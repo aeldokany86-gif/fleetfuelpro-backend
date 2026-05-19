@@ -1,0 +1,118 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+model Company {
+  id               String   @id @default(cuid())
+  name             String
+  code             String   @unique
+  country          String?
+  city             String?
+  timezone         String   @default("Asia/Riyadh")
+  logoUrl          String?
+  subscriptionPlan String   @default("trial")
+  isActive         Boolean  @default(true)
+  currency         String   @default("SAR")
+  language         String   @default("EN-AR")
+
+  users            User[]
+  roles            Role[]
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+}
+
+model Role {
+  id           String   @id @default(cuid())
+  companyId    String?
+  company      Company? @relation(fields: [companyId], references: [id])
+
+  name         String
+  description  String?
+  isSystemRole Boolean  @default(false)
+
+  users        User[]
+  permissions  RolePermission[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([companyId, name])
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  name        String
+  description String?
+
+  roles       RolePermission[]
+
+  createdAt   DateTime @default(now())
+}
+
+model RolePermission {
+  id           String     @id @default(cuid())
+
+  roleId       String
+  role         Role       @relation(fields: [roleId], references: [id])
+
+  permissionId String
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  createdAt    DateTime   @default(now())
+
+  @@unique([roleId, permissionId])
+}
+
+model User {
+  id                 String   @id @default(cuid())
+
+  companyId          String
+  company            Company  @relation(fields: [companyId], references: [id])
+
+  roleId             String
+  role               Role     @relation(fields: [roleId], references: [id])
+
+  fullName           String
+  email              String   @unique
+  phone              String?
+  passwordHash       String
+
+  isActive           Boolean  @default(true)
+  mustChangePassword Boolean  @default(false)
+  lastLoginAt        DateTime?
+
+  createdById        String?
+  createdBy          User?    @relation("UserCreatedBy", fields: [createdById], references: [id])
+  createdUsers       User[]   @relation("UserCreatedBy")
+
+  refreshTokens      RefreshToken[]
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  deletedAt          DateTime?
+}
+
+model RefreshToken {
+  id          String   @id @default(cuid())
+
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+
+  tokenHash   String
+  expiresAt   DateTime
+  revokedAt   DateTime?
+
+  createdAt   DateTime @default(now())
+}
