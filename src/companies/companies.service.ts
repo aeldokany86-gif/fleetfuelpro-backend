@@ -170,24 +170,21 @@ const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
   ],
 
   Operator: [
-  'operations.read',
-  'operations.create',
-  'operations.direct_refuel.create',
-],
+    'operations.read',
+    'operations.create',
+    'operations.direct_refuel.create',
+  ],
 };
 
 @Injectable()
 export class CompaniesService {
   constructor(private prisma: PrismaService) {}
 
-  private async ensureDefaultRolesAndPermissionsForCompany(
-    companyId: string,
-    tx: any = this.prisma,
-  ) {
+  private async ensureDefaultRolesAndPermissionsForCompany(companyId: string) {
     const permissions: Record<string, { id: string }> = {};
 
     for (const [key, name] of DEFAULT_PERMISSIONS) {
-      const permission = await tx.permission.upsert({
+      const permission = await this.prisma.permission.upsert({
         where: { key },
         update: { name },
         create: {
@@ -202,7 +199,7 @@ export class CompaniesService {
     const roles: Record<string, { id: string }> = {};
 
     for (const [name, description] of DEFAULT_COMPANY_ROLES) {
-      const role = await tx.role.upsert({
+      const role = await this.prisma.role.upsert({
         where: {
           companyId_name: {
             companyId,
@@ -227,24 +224,14 @@ export class CompaniesService {
       const role = roles[roleName];
 
       if (!role) {
-        throw new BadRequestException(
-          `Default role not found: ${roleName}`,
-        );
+        throw new BadRequestException(`Default role not found: ${roleName}`);
       }
 
-      const allowedPermissionIds = permissionKeys.map((key) => {
-        const permission = permissions[key];
+      const allowedPermissionIds = permissionKeys
+        .map((key) => permissions[key]?.id)
+        .filter(Boolean);
 
-        if (!permission) {
-          throw new BadRequestException(
-            `Default permission not found: ${key}`,
-          );
-        }
-
-        return permission.id;
-      });
-
-      await tx.rolePermission.deleteMany({
+      await this.prisma.rolePermission.deleteMany({
         where: {
           roleId: role.id,
           permissionId: {
@@ -254,17 +241,25 @@ export class CompaniesService {
       });
 
       for (const permissionKey of permissionKeys) {
-        await tx.rolePermission.upsert({
+        const permission = permissions[permissionKey];
+
+        if (!permission) {
+          throw new BadRequestException(
+            `Default permission not found: ${permissionKey}`,
+          );
+        }
+
+        await this.prisma.rolePermission.upsert({
           where: {
             roleId_permissionId: {
               roleId: role.id,
-              permissionId: permissions[permissionKey].id,
+              permissionId: permission.id,
             },
           },
           update: {},
           create: {
             roleId: role.id,
-            permissionId: permissions[permissionKey].id,
+            permissionId: permission.id,
           },
         });
       }
@@ -281,7 +276,7 @@ export class CompaniesService {
         id: true,
         name: true,
         code: true,
- 	country: true,
+        country: true,
         currency: true,
         timezone: true,
         language: true,
@@ -316,26 +311,21 @@ export class CompaniesService {
       throw new BadRequestException('Company code already exists');
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const company = await tx.company.create({
-        data: {
-          name: dto.name,
-          code: dto.code,
-          country: dto.country || '',
-          currency: dto.currency || 'SAR',
-          timezone: dto.timezone || 'Asia/Riyadh',
-          language: dto.language || 'EN-AR',
-          isActive: true,
-        },
-      });
-
-      await this.ensureDefaultRolesAndPermissionsForCompany(
-        company.id,
-        tx,
-      );
-
-      return company;
+    const company = await this.prisma.company.create({
+      data: {
+        name: dto.name,
+        code: dto.code,
+        country: dto.country || '',
+        currency: dto.currency || 'SAR',
+        timezone: dto.timezone || 'Asia/Riyadh',
+        language: dto.language || 'EN-AR',
+        isActive: true,
+      },
     });
+
+    await this.ensureDefaultRolesAndPermissionsForCompany(company.id);
+
+    return company;
   }
 
   async update(id: string, dto: UpdateCompanyDto) {

@@ -1,8 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -11,108 +9,281 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+enum EmployeeStatus {
+  ON_DUTY
+  VACATION
+  RETIRED_RESIGNED
+}
+
+enum EmployeeTransferStatus {
+  PENDING
+  PARTIALLY_APPROVED
+  APPROVED
+  REJECTED
+  CANCELLED
+  APPLIED
+}
+
+enum EmployeeTransferApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model Company {
-  id               String   @id @default(cuid())
+  id               String  @id @default(cuid())
   name             String
-  code             String   @unique
+  code             String  @unique
   country          String?
   city             String?
-  timezone         String   @default("Asia/Riyadh")
+  timezone         String  @default("Asia/Riyadh")
   logoUrl          String?
-  subscriptionPlan String   @default("trial")
-  isActive         Boolean  @default(true)
-  currency         String   @default("SAR")
-  language         String   @default("EN-AR")
+  subscriptionPlan String  @default("trial")
+  isActive         Boolean @default(true)
+  currency         String  @default("SAR")
+  language         String  @default("EN-AR")
 
-  users            User[]
-  roles            Role[]
+  users                    User[]
+  roles                    Role[]
+  projects                 Project[]
+  employees                Employee[]
+  employeeTransferRequests EmployeeTransferRequest[]
 
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  deletedAt        DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+}
+
+model Project {
+  id String @id @default(cuid())
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  code String
+  name String
+
+  location    String?
+  description String?
+
+  isActive Boolean @default(true)
+
+  createdById String?
+  createdBy   User?   @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+
+  projectManagerId String?
+  projectManager   User?   @relation("ProjectManager", fields: [projectManagerId], references: [id])
+
+  employees Employee[]
+
+  employeeTransferRequestsFrom EmployeeTransferRequest[]  @relation("EmployeeTransferFromProject")
+  employeeTransferRequestsTo   EmployeeTransferRequest[]  @relation("EmployeeTransferToProject")
+  employeeTransferApprovals    EmployeeTransferApproval[] @relation("EmployeeTransferApprovalProject")
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@unique([companyId, code])
+  @@index([companyId])
+  @@index([projectManagerId])
 }
 
 model Role {
-  id           String   @id @default(cuid())
-  companyId    String?
-  company      Company? @relation(fields: [companyId], references: [id])
+  id        String   @id @default(cuid())
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id])
 
   name         String
   description  String?
-  isSystemRole Boolean  @default(false)
+  isSystemRole Boolean @default(false)
 
-  users        User[]
-  permissions  RolePermission[]
+  users       User[]
+  permissions RolePermission[]
 
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([companyId, name])
 }
 
 model Permission {
-  id          String   @id @default(cuid())
-  key         String   @unique
+  id          String  @id @default(cuid())
+  key         String  @unique
   name        String
   description String?
 
-  roles       RolePermission[]
+  roles RolePermission[]
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
 }
 
 model RolePermission {
-  id           String     @id @default(cuid())
+  id String @id @default(cuid())
 
-  roleId       String
-  role         Role       @relation(fields: [roleId], references: [id])
+  roleId String
+  role   Role   @relation(fields: [roleId], references: [id])
 
   permissionId String
   permission   Permission @relation(fields: [permissionId], references: [id])
 
-  createdAt    DateTime   @default(now())
+  createdAt DateTime @default(now())
 
   @@unique([roleId, permissionId])
 }
 
 model User {
-  id                 String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  companyId          String
-  company            Company  @relation(fields: [companyId], references: [id])
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
 
-  roleId             String
-  role               Role     @relation(fields: [roleId], references: [id])
+  roleId String
+  role   Role   @relation(fields: [roleId], references: [id])
 
-  fullName           String
-  email              String   @unique
-  phone              String?
-  passwordHash       String
+  fullName     String
+  email        String  @unique
+  phone        String?
+  passwordHash String
 
-  isActive           Boolean  @default(true)
-  mustChangePassword Boolean  @default(false)
+  isActive           Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
   lastLoginAt        DateTime?
 
-  createdById        String?
-  createdBy          User?    @relation("UserCreatedBy", fields: [createdById], references: [id])
-  createdUsers       User[]   @relation("UserCreatedBy")
+  createdById  String?
+  createdBy    User?   @relation("UserCreatedBy", fields: [createdById], references: [id])
+  createdUsers User[]  @relation("UserCreatedBy")
 
-  refreshTokens      RefreshToken[]
+  createdProjects Project[] @relation("ProjectCreatedBy")
+  managedProjects Project[] @relation("ProjectManager")
 
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  deletedAt          DateTime?
+  linkedEmployee   Employee?  @relation("EmployeeLinkedUser")
+  createdEmployees Employee[] @relation("EmployeeCreatedBy")
+
+  requestedEmployeeTransfers EmployeeTransferRequest[]  @relation("EmployeeTransferRequestedBy")
+  employeeTransferApprovals  EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
+
+  refreshTokens RefreshToken[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+}
+
+model Employee {
+  id String @id @default(cuid())
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  employeeId String
+  name       String
+  phone      String?
+  email      String?
+
+  jobTitle String         @default("Operator")
+  status   EmployeeStatus @default(ON_DUTY)
+
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id])
+
+  linkedUserId String? @unique
+  linkedUser   User?   @relation("EmployeeLinkedUser", fields: [linkedUserId], references: [id])
+
+  createdById String?
+  createdBy   User?   @relation("EmployeeCreatedBy", fields: [createdById], references: [id])
+
+  transferRequests EmployeeTransferRequest[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@unique([companyId, employeeId])
+  @@index([companyId])
+  @@index([projectId])
+  @@index([status])
+}
+
+model EmployeeTransferRequest {
+  id String @id @default(cuid())
+
+  companyId String
+  company   Company @relation(fields: [companyId], references: [id])
+
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  fromProjectId String
+  fromProject   Project @relation("EmployeeTransferFromProject", fields: [fromProjectId], references: [id])
+
+  toProjectId String
+  toProject   Project @relation("EmployeeTransferToProject", fields: [toProjectId], references: [id])
+
+  requestedByUserId String
+  requestedBy       User   @relation("EmployeeTransferRequestedBy", fields: [requestedByUserId], references: [id])
+
+  status EmployeeTransferStatus @default(PENDING)
+
+  reason          String?
+  rejectionReason String?
+
+  approvedAt  DateTime?
+  rejectedAt  DateTime?
+  cancelledAt DateTime?
+  appliedAt   DateTime?
+
+  approvals EmployeeTransferApproval[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId])
+  @@index([employeeId])
+  @@index([fromProjectId])
+  @@index([toProjectId])
+  @@index([requestedByUserId])
+  @@index([status])
+}
+
+model EmployeeTransferApproval {
+  id String @id @default(cuid())
+
+  transferRequestId String
+  transferRequest   EmployeeTransferRequest @relation(fields: [transferRequestId], references: [id])
+
+  approverUserId String
+  approver       User   @relation("EmployeeTransferApprover", fields: [approverUserId], references: [id])
+
+  projectId String
+  project   Project @relation("EmployeeTransferApprovalProject", fields: [projectId], references: [id])
+
+  approvalStage String
+  status        EmployeeTransferApprovalStatus @default(PENDING)
+
+  note       String?
+  reviewedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([transferRequestId, approverUserId, projectId])
+  @@index([transferRequestId])
+  @@index([approverUserId])
+  @@index([projectId])
+  @@index([status])
 }
 
 model RefreshToken {
-  id          String   @id @default(cuid())
+  id String @id @default(cuid())
 
-  userId      String
-  user        User     @relation(fields: [userId], references: [id])
+  userId String
+  user   User   @relation(fields: [userId], references: [id])
 
-  tokenHash   String
-  expiresAt   DateTime
-  revokedAt   DateTime?
+  tokenHash String
+  expiresAt DateTime
+  revokedAt DateTime?
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
 }
