@@ -20,7 +20,17 @@ export class ProjectsService {
   private normalizeRoleName(roleName: string) {
     return String(roleName || '')
       .trim()
-      .toUpperCase();
+      .toUpperCase()
+      .replace(/[\s_-]+/g, '');
+  }
+
+  private isAdminRole(roleName: string) {
+    const normalized = this.normalizeRoleName(roleName);
+    return (
+      normalized === 'ADMIN' ||
+      normalized === 'PLATFORMADMIN' ||
+      normalized === 'PLATFORMUSER'
+    );
   }
 
   async create(createProjectDto: CreateProjectDto) {
@@ -276,6 +286,7 @@ export class ProjectsService {
   async assignProjectManager(
     projectId: string,
     managerUserId: string,
+    requestedByUserId?: string,
   ) {
     if (!managerUserId) {
       throw new BadRequestException(
@@ -295,6 +306,26 @@ export class ProjectsService {
       throw new NotFoundException(
         'Project not found',
       );
+    }
+
+    if (requestedByUserId) {
+      const requester = await this.prisma.user.findFirst({
+        where: {
+          id: requestedByUserId,
+          deletedAt: null,
+          isActive: true,
+          companyId: project.companyId,
+        },
+        include: {
+          role: true,
+        },
+      });
+
+      if (!requester || !this.isAdminRole(requester.role?.name || '')) {
+        throw new BadRequestException(
+          'Only Admin can approve Project Manager assignment',
+        );
+      }
     }
 
     const manager =

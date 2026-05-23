@@ -12,6 +12,48 @@ export class EmployeeTransfersService {
     private prisma: PrismaService,
   ) {}
 
+  private normalizeRoleName(roleName: string) {
+    return String(roleName || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s_-]+/g, '');
+  }
+
+  private isAdminRole(roleName: string) {
+    const normalized = this.normalizeRoleName(roleName);
+    return normalized === 'ADMIN' || normalized === 'PLATFORMADMIN' || normalized === 'PLATFORMUSER';
+  }
+
+  private isManagerTransfer(request: any) {
+    const reason = String(request?.reason || '').toUpperCase();
+    const employeeRoleName = this.normalizeRoleName(
+      request?.employee?.linkedUser?.role?.name || request?.employee?.jobTitle || '',
+    );
+
+    return reason.includes('MANAGER_TRANSFER_ADMIN_APPROVAL') || employeeRoleName === 'MANAGER';
+  }
+
+  private async assertAdminApprover(userId: string) {
+    const user = await this.prisma.user.findFirst({
+      where: {
+        id: userId,
+        deletedAt: null,
+        isActive: true,
+      },
+      include: {
+        role: true,
+      },
+    });
+
+    if (!user || !this.isAdminRole(user.role?.name || '')) {
+      throw new BadRequestException(
+        'Only Admin can approve manager transfer',
+      );
+    }
+
+    return user;
+  }
+
   async createTransferRequest(
     employeeId: string,
     toProjectId: string,
@@ -26,6 +68,11 @@ export class EmployeeTransfersService {
 
         include: {
           project: true,
+          linkedUser: {
+            include: {
+              role: true,
+            },
+          },
         },
       });
 
@@ -88,7 +135,39 @@ export class EmployeeTransfersService {
       );
     }
 
-    if (
+    const employeeRoleName = String(
+      employee.linkedUser?.role?.name ||
+        employee.jobTitle ||
+        '',
+    )
+      .trim()
+      .toUpperCase();
+
+    const isManagerTransfer =
+      employeeRoleName === 'MANAGER';
+
+    if (isManagerTransfer) {
+      const activeAdmin = await this.prisma.user.findFirst({
+        where: {
+          companyId: employee.companyId,
+          deletedAt: null,
+          isActive: true,
+          role: {
+            is: {
+              name: {
+                in: ['Admin', 'ADMIN', 'PlatformAdmin', 'Platform User'],
+              },
+            },
+          },
+        },
+      });
+
+      if (!activeAdmin) {
+        throw new BadRequestException(
+          'Manager transfer requires an active Admin approver',
+        );
+      }
+    } else if (
       !employee.project?.projectManagerId ||
       !targetProject.projectManagerId
     ) {
@@ -114,10 +193,22 @@ export class EmployeeTransfersService {
 
           status:
             'PENDING',
+
+          reason: isManagerTransfer
+            ? 'MANAGER_TRANSFER_ADMIN_APPROVAL'
+            : null,
         },
 
         include: {
-          employee: true,
+          employee: {
+            include: {
+              linkedUser: {
+                include: {
+                  role: true,
+                },
+              },
+            },
+          },
           fromProject: true,
           toProject: true,
         },
@@ -138,7 +229,15 @@ export class EmployeeTransfersService {
         },
 
         include: {
-          employee: true,
+          employee: {
+            include: {
+              linkedUser: {
+                include: {
+                  role: true,
+                },
+              },
+            },
+          },
           fromProject: true,
           toProject: true,
         },
@@ -165,7 +264,15 @@ export class EmployeeTransfersService {
           },
 
           include: {
-            employee: true,
+            employee: {
+            include: {
+              linkedUser: {
+                include: {
+                  role: true,
+                },
+              },
+            },
+          },
             fromProject: true,
             toProject: true,
           },
@@ -195,18 +302,24 @@ export class EmployeeTransfersService {
     const toManagerId =
       request.toProject?.projectManagerId;
 
-    const allowed =
-      [
-        fromManagerId,
-        toManagerId,
-      ].includes(
-        managerUserId,
-      );
+    const isManagerTransfer = this.isManagerTransfer(request);
 
-    if (!allowed) {
-      throw new BadRequestException(
-        'User cannot approve this transfer',
-      );
+    if (isManagerTransfer) {
+      await this.assertAdminApprover(managerUserId);
+    } else {
+      const allowed =
+        [
+          fromManagerId,
+          toManagerId,
+        ].includes(
+          managerUserId,
+        );
+
+      if (!allowed) {
+        throw new BadRequestException(
+          'User cannot approve this transfer',
+        );
+      }
     }
 
     if (!approve) {
@@ -230,7 +343,15 @@ export class EmployeeTransfersService {
           },
 
           include: {
-            employee: true,
+            employee: {
+            include: {
+              linkedUser: {
+                include: {
+                  role: true,
+                },
+              },
+            },
+          },
             fromProject: true,
             toProject: true,
           },
@@ -244,6 +365,7 @@ export class EmployeeTransfersService {
       fromManagerId === toManagerId;
 
     const shouldApplyTransfer =
+      isManagerTransfer ||
       request.status ===
         'PARTIALLY_APPROVED' ||
       sameManagerForBothProjects;
@@ -265,7 +387,15 @@ export class EmployeeTransfersService {
           },
 
           include: {
-            employee: true,
+            employee: {
+            include: {
+              linkedUser: {
+                include: {
+                  role: true,
+                },
+              },
+            },
+          },
             fromProject: true,
             toProject: true,
           },
@@ -305,13 +435,23 @@ export class EmployeeTransfersService {
             new Date(),
 
           reason:
-            request.reason
+            isManagerTransfer
+              ? `Manager transfer approved by Admin ${managerUserId}`
+              : request.reason
               ? `${request.reason}; Final approval by manager ${managerUserId}`
               : `Approved by manager ${managerUserId}`,
         },
 
         include: {
-          employee: true,
+          employee: {
+            include: {
+              linkedUser: {
+                include: {
+                  role: true,
+                },
+              },
+            },
+          },
           fromProject: true,
           toProject: true,
         },
