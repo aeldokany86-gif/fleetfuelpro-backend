@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model Company {
@@ -22,6 +23,9 @@ model Company {
   createdAt                DateTime                  @default(now())
   updatedAt                DateTime                  @updatedAt
   deletedAt                DateTime?
+  assets                   Asset[]
+  assetTransferRequests    AssetTransferRequest[]
+  assetAssignmentHistory   AssetAssignmentHistory[]
   employees                Employee[]
   employeeTransferRequests EmployeeTransferRequest[]
   projects                 Project[]
@@ -42,6 +46,12 @@ model Project {
   updatedAt                    DateTime                   @updatedAt
   deletedAt                    DateTime?
   projectManagerId             String?
+  assetTransferApprovals       AssetTransferApproval[] @relation("AssetTransferApprovalProject")
+  assetTransferRequestsFrom    AssetTransferRequest[]  @relation("AssetTransferFromProject")
+  assetTransferRequestsTo      AssetTransferRequest[]  @relation("AssetTransferToProject")
+  assetAssignmentHistoryFrom   AssetAssignmentHistory[] @relation("AssetAssignmentFromProject")
+  assetAssignmentHistoryTo     AssetAssignmentHistory[] @relation("AssetAssignmentToProject")
+  assets                       Asset[]
   employees                    Employee[]
   employeeTransferApprovals    EmployeeTransferApproval[] @relation("EmployeeTransferApprovalProject")
   employeeTransferRequestsFrom EmployeeTransferRequest[]  @relation("EmployeeTransferFromProject")
@@ -105,6 +115,11 @@ model User {
   createdAt                  DateTime                   @default(now())
   updatedAt                  DateTime                   @updatedAt
   deletedAt                  DateTime?
+  assetOdometerResets        AssetOdometerReset[]
+  assetTransferApprovals     AssetTransferApproval[]  @relation("AssetTransferApprover")
+  assetAssignmentHistory     AssetAssignmentHistory[] @relation("AssetAssignmentAssignedBy")
+  createdAssets              Asset[]                  @relation("AssetCreatedBy")
+  requestedAssetTransfers    AssetTransferRequest[]   @relation("AssetTransferRequestedBy")
   createdEmployees           Employee[]                 @relation("EmployeeCreatedBy")
   linkedEmployee             Employee?                  @relation("EmployeeLinkedUser")
   employeeTransferApprovals  EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
@@ -196,6 +211,143 @@ model EmployeeTransferApproval {
   @@index([approverUserId])
   @@index([projectId])
   @@index([status])
+}
+
+model Asset {
+  id                    String                  @id @default(cuid())
+  companyId             String
+  assetId               String
+  type                  String
+  category              String?
+  fuelTankCapacity      Float?
+  currentOdometer       Float                   @default(0)
+  status                AssetStatus             @default(ACTIVE)
+  projectId             String?
+  createdById           String?
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+  deletedAt             DateTime?
+  company               Company                 @relation(fields: [companyId], references: [id])
+  createdBy             User?                   @relation("AssetCreatedBy", fields: [createdById], references: [id])
+  project               Project?                @relation(fields: [projectId], references: [id])
+  odometerResetHistory  AssetOdometerReset[]
+  assignmentHistory     AssetAssignmentHistory[]
+  transferRequests      AssetTransferRequest[]
+
+  @@unique([companyId, assetId])
+  @@index([companyId])
+  @@index([projectId])
+  @@index([status])
+}
+
+model AssetOdometerReset {
+  id              String   @id @default(cuid())
+  assetId         String
+  companyId       String
+  oldOdometer     Float
+  newOdometer     Float
+  reason          String
+  effectiveAt     DateTime @default(now())
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  asset           Asset    @relation(fields: [assetId], references: [id])
+  createdBy       User?    @relation(fields: [createdByUserId], references: [id])
+
+  @@index([assetId])
+  @@index([companyId])
+  @@index([createdByUserId])
+}
+
+model AssetTransferRequest {
+  id                String                     @id @default(cuid())
+  companyId         String
+  assetId           String
+  fromProjectId     String
+  toProjectId       String
+  requestedByUserId String
+  status            EmployeeTransferStatus     @default(PENDING)
+  reason            String?
+  rejectionReason   String?
+  approvedAt        DateTime?
+  rejectedAt        DateTime?
+  cancelledAt       DateTime?
+  appliedAt         DateTime?
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  approvals         AssetTransferApproval[]
+  assignmentHistory AssetAssignmentHistory[]
+  asset             Asset                      @relation(fields: [assetId], references: [id])
+  company           Company                    @relation(fields: [companyId], references: [id])
+  fromProject       Project                    @relation("AssetTransferFromProject", fields: [fromProjectId], references: [id])
+  requestedBy       User                       @relation("AssetTransferRequestedBy", fields: [requestedByUserId], references: [id])
+  toProject         Project                    @relation("AssetTransferToProject", fields: [toProjectId], references: [id])
+
+  @@index([companyId])
+  @@index([assetId])
+  @@index([fromProjectId])
+  @@index([toProjectId])
+  @@index([requestedByUserId])
+  @@index([status])
+}
+
+model AssetTransferApproval {
+  id                String                         @id @default(cuid())
+  transferRequestId String
+  approverUserId    String
+  projectId         String
+  approvalStage     String
+  status            EmployeeTransferApprovalStatus @default(PENDING)
+  note              String?
+  reviewedAt        DateTime?
+  createdAt         DateTime                       @default(now())
+  updatedAt         DateTime                       @updatedAt
+  approver          User                           @relation("AssetTransferApprover", fields: [approverUserId], references: [id])
+  project           Project                        @relation("AssetTransferApprovalProject", fields: [projectId], references: [id])
+  transferRequest   AssetTransferRequest           @relation(fields: [transferRequestId], references: [id])
+
+  @@unique([transferRequestId, approverUserId, projectId])
+  @@index([transferRequestId])
+  @@index([approverUserId])
+  @@index([projectId])
+  @@index([status])
+}
+
+model AssetAssignmentHistory {
+  id                String              @id @default(cuid())
+  companyId         String
+  assetId           String
+  fromProjectId     String?
+  toProjectId       String
+  transferRequestId String?
+  assignmentType    AssetAssignmentType
+  reason            String?
+  assignedAt        DateTime            @default(now())
+  assignedByUserId  String?
+  createdAt         DateTime            @default(now())
+  asset             Asset               @relation(fields: [assetId], references: [id])
+  company           Company             @relation(fields: [companyId], references: [id])
+  fromProject       Project?            @relation("AssetAssignmentFromProject", fields: [fromProjectId], references: [id])
+  toProject         Project             @relation("AssetAssignmentToProject", fields: [toProjectId], references: [id])
+  assignedBy        User?               @relation("AssetAssignmentAssignedBy", fields: [assignedByUserId], references: [id])
+  transferRequest   AssetTransferRequest? @relation(fields: [transferRequestId], references: [id])
+
+  @@index([companyId])
+  @@index([assetId])
+  @@index([fromProjectId])
+  @@index([toProjectId])
+  @@index([transferRequestId])
+  @@index([assignedByUserId])
+  @@index([assignedAt])
+}
+
+enum AssetAssignmentType {
+  INITIAL_ASSIGNMENT
+  TRANSFER
+}
+
+enum AssetStatus {
+  ACTIVE
+  INACTIVE
 }
 
 model RefreshToken {

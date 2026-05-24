@@ -1,3 +1,5 @@
 d9+m7eqMNVQs,SA
 
 postgresql://postgres.rxcfwcklmsqxndlksaye:d9+m7eqMNVQs,SA@aws-1-ap-northeast-1.pooler.supabase.com:6543/postgres
+
+DIRECT_URL="postgresql://postgres:d9+m7eqMNVQs,SA@db.rxcfwcklmsqxndlksaye.supabase.co:5432/postgres"
