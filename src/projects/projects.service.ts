@@ -407,7 +407,159 @@ export class ProjectsService {
       },
     });
   }
+  
+  async updateFuelPrice(
+    projectId: string,
+    data: {
+      pricePerLiter: number;
+      effectiveFrom?: string;
+      reason?: string;
+      createdByUserId?: string;
+    },
+  ) {
+    const project = await this.prisma.project.findFirst({
+      where: {
+        id: projectId,
+        deletedAt: null,
+      },
+      include: {
+        company: true,
+      },
+    });
 
+    if (!project) {
+      throw new NotFoundException('Project not found');
+    }
+
+    const pricePerLiter = Number(data.pricePerLiter);
+
+    if (
+      Number.isNaN(pricePerLiter) ||
+      pricePerLiter <= 0
+    ) {
+      throw new BadRequestException(
+        'Price per liter must be greater than zero',
+      );
+    }
+
+    const effectiveFrom = data.effectiveFrom
+      ? new Date(data.effectiveFrom)
+      : new Date();
+
+    const history =
+      await this.prisma.projectFuelPriceHistory.create({
+        data: {
+          projectId: project.id,
+          companyId: project.companyId,
+          country:
+            project.company?.country || 'Unknown',
+          currency:
+            project.company?.currency || 'SAR',
+          pricePerLiter,
+          effectiveFrom,
+          reason: data.reason?.trim() || null,
+          createdByUserId:
+            data.createdByUserId || null,
+        },
+        include: {
+          project: true,
+          company: true,
+          createdBy: true,
+        },
+      });
+
+    const latestPrice =
+      await this.prisma.projectFuelPriceHistory.findFirst({
+        where: {
+          projectId: project.id,
+        },
+        orderBy: {
+          effectiveFrom: 'desc',
+        },
+      });
+
+    await this.prisma.project.update({
+      where: {
+        id: project.id,
+      },
+      data: {
+        currentFuelPrice:
+          latestPrice?.pricePerLiter || 0,
+        fuelPriceEffectiveFrom:
+          latestPrice?.effectiveFrom || new Date(),
+      },
+    });
+
+    return history;
+  }
+
+  async getFuelPriceHistory(projectId: string) {
+    const project = await this.prisma.project.findFirst({
+      where: {
+        id: projectId,
+        deletedAt: null,
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException('Project not found');
+    }
+
+    return this.prisma.projectFuelPriceHistory.findMany({
+      where: {
+        projectId,
+      },
+      include: {
+        company: true,
+        project: true,
+        createdBy: true,
+      },
+      orderBy: {
+        effectiveFrom: 'desc',
+      },
+    });
+  }
+
+  async getEffectiveFuelPrice(
+    projectId: string,
+    operationDate?: string,
+  ) {
+    const project = await this.prisma.project.findFirst({
+      where: {
+        id: projectId,
+        deletedAt: null,
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException('Project not found');
+    }
+
+    const targetDate = operationDate
+      ? new Date(operationDate)
+      : new Date();
+
+    const price =
+      await this.prisma.projectFuelPriceHistory.findFirst({
+        where: {
+          projectId,
+          effectiveFrom: {
+            lte: targetDate,
+          },
+        },
+        orderBy: {
+          effectiveFrom: 'desc',
+        },
+      });
+
+    if (!price) {
+      throw new NotFoundException(
+        'No fuel price found for this date',
+      );
+    }
+
+    return price;
+  }
   async remove(id: string) {
     const existingProject =
       await this.prisma.project.findFirst({

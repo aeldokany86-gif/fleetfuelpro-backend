@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Station" ADD COLUMN     "currentPrice" DOUBLE PRECISION NOT NULL DEFAULT 0;

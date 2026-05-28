@@ -9,23 +9,29 @@ datasource db {
 }
 
 model Company {
-  id                       String                    @id @default(cuid())
+  id                       String                     @id @default(cuid())
   name                     String
-  code                     String                    @unique
+  code                     String                     @unique
   country                  String?
   city                     String?
-  timezone                 String                    @default("Asia/Riyadh")
+  timezone                 String                     @default("Asia/Riyadh")
   logoUrl                  String?
-  subscriptionPlan         String                    @default("trial")
-  isActive                 Boolean                   @default(true)
-  currency                 String                    @default("SAR")
-  language                 String                    @default("EN-AR")
-  createdAt                DateTime                  @default(now())
-  updatedAt                DateTime                  @updatedAt
+  subscriptionPlan         String                     @default("trial")
+  isActive                 Boolean                    @default(true)
+  currency                 String                     @default("SAR")
+  language                 String                     @default("EN-AR")
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @updatedAt
   deletedAt                DateTime?
   assets                   Asset[]
   assetTransferRequests    AssetTransferRequest[]
   assetAssignmentHistory   AssetAssignmentHistory[]
+  stations                 Station[]
+  stationTransferRequests  StationTransferRequest[]
+  stationAssignmentHistory StationAssignmentHistory[]
+  stationStockMovements    StationStockMovement[]
+  stationPriceHistory      StationPriceHistory[]
+  projectFuelPriceHistory  ProjectFuelPriceHistory[]
   employees                Employee[]
   employeeTransferRequests EmployeeTransferRequest[]
   projects                 Project[]
@@ -41,18 +47,28 @@ model Project {
   location                     String?
   description                  String?
   isActive                     Boolean                    @default(true)
+  currentFuelPrice             Float                      @default(0)
+  fuelPriceCurrency            String                     @default("SAR")
+  fuelPriceEffectiveFrom       DateTime?
   createdById                  String?
   createdAt                    DateTime                   @default(now())
   updatedAt                    DateTime                   @updatedAt
   deletedAt                    DateTime?
   projectManagerId             String?
   assetTransferApprovals       AssetTransferApproval[]    @relation("AssetTransferApprovalProject")
+  stationTransferApprovals     StationTransferApproval[]  @relation("StationTransferApprovalProject")
   assetTransferRequestsFrom    AssetTransferRequest[]     @relation("AssetTransferFromProject")
+  stationTransferRequestsFrom  StationTransferRequest[]   @relation("StationTransferFromProject")
   assetTransferRequestsTo      AssetTransferRequest[]     @relation("AssetTransferToProject")
+  stationTransferRequestsTo    StationTransferRequest[]   @relation("StationTransferToProject")
   assetAssignmentHistoryFrom   AssetAssignmentHistory[]   @relation("AssetAssignmentFromProject")
+  stationAssignmentHistoryFrom StationAssignmentHistory[] @relation("StationAssignmentFromProject")
   assetAssignmentHistoryTo     AssetAssignmentHistory[]   @relation("AssetAssignmentToProject")
+  stationAssignmentHistoryTo   StationAssignmentHistory[] @relation("StationAssignmentToProject")
   assets                       Asset[]
+  stations                     Station[]
   employees                    Employee[]
+  fuelPriceHistory             ProjectFuelPriceHistory[]
   employeeTransferApprovals    EmployeeTransferApproval[] @relation("EmployeeTransferApprovalProject")
   employeeTransferRequestsFrom EmployeeTransferRequest[]  @relation("EmployeeTransferFromProject")
   employeeTransferRequestsTo   EmployeeTransferRequest[]  @relation("EmployeeTransferToProject")
@@ -118,10 +134,18 @@ model User {
   updatedAt                  DateTime                   @updatedAt
   deletedAt                  DateTime?
   assetOdometerResets        AssetOdometerReset[]
+  stationCounterResets       StationCounterReset[]
+  stationStockMovements      StationStockMovement[]
+  stationPriceHistory        StationPriceHistory[]
+  projectFuelPriceHistory    ProjectFuelPriceHistory[]
   assetTransferApprovals     AssetTransferApproval[]    @relation("AssetTransferApprover")
+  stationTransferApprovals   StationTransferApproval[]  @relation("StationTransferApprover")
   assetAssignmentHistory     AssetAssignmentHistory[]   @relation("AssetAssignmentAssignedBy")
+  stationAssignmentHistory   StationAssignmentHistory[] @relation("StationAssignmentAssignedBy")
   createdAssets              Asset[]                    @relation("AssetCreatedBy")
+  createdStations            Station[]                  @relation("StationCreatedBy")
   requestedAssetTransfers    AssetTransferRequest[]     @relation("AssetTransferRequestedBy")
+  requestedStationTransfers  StationTransferRequest[]   @relation("StationTransferRequestedBy")
   createdEmployees           Employee[]                 @relation("EmployeeCreatedBy")
   linkedEmployee             Employee?                  @relation("EmployeeLinkedUser")
   employeeTransferApprovals  EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
@@ -356,6 +380,246 @@ enum AssetAssignmentType {
 enum AssetStatus {
   ACTIVE
   INACTIVE
+}
+
+model Station {
+  id                  String                     @id @default(cuid())
+  companyId           String
+  stationId           String
+  name                String?
+  type                String?
+  capacity            Float?
+  openingBalance      Float                      @default(0)
+  currentStock        Float                      @default(0)
+  currentCounter      Float                      @default(0)
+  currentPrice        Float                      @default(0)
+  status              StationStatus              @default(ACTIVE)
+  projectId           String?
+  createdById         String?
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+  deletedAt           DateTime?
+  company             Company                    @relation(fields: [companyId], references: [id])
+  project             Project?                   @relation(fields: [projectId], references: [id])
+  createdBy           User?                      @relation("StationCreatedBy", fields: [createdById], references: [id])
+  counterResetHistory StationCounterReset[]
+  stockMovements      StationStockMovement[]
+  priceHistory        StationPriceHistory[]
+  assignmentHistory   StationAssignmentHistory[]
+  transferRequests    StationTransferRequest[]
+
+  @@unique([companyId, stationId])
+  @@index([companyId])
+  @@index([projectId])
+  @@index([status])
+}
+
+model StationCounterReset {
+  id              String   @id @default(cuid())
+  stationId       String
+  companyId       String
+  oldCounter      Float
+  newCounter      Float
+  reason          String
+  effectiveAt     DateTime @default(now())
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  station         Station  @relation(fields: [stationId], references: [id])
+  createdBy       User?    @relation(fields: [createdByUserId], references: [id])
+
+  @@index([stationId])
+  @@index([companyId])
+  @@index([createdByUserId])
+}
+
+model StationStockMovement {
+  id              String                   @id @default(cuid())
+  stationId       String
+  companyId       String
+  movementType    StationStockMovementType
+  quantity        Float
+  balanceBefore   Float
+  balanceAfter    Float
+  referenceType   String?
+  referenceId     String?
+  reason          String?
+  movementAt      DateTime                 @default(now())
+  createdByUserId String?
+  createdAt       DateTime                 @default(now())
+  station         Station                  @relation(fields: [stationId], references: [id])
+  company         Company                  @relation(fields: [companyId], references: [id])
+  createdBy       User?                    @relation(fields: [createdByUserId], references: [id])
+
+  @@index([stationId])
+  @@index([companyId])
+  @@index([movementType])
+  @@index([movementAt])
+  @@index([referenceType, referenceId])
+}
+
+model StationPriceHistory {
+  id              String   @id @default(cuid())
+  stationId       String?
+  companyId       String
+  country         String?
+  currency        String
+  pricePerLiter   Float
+  effectiveFrom   DateTime
+  reason          String?
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+  station         Station? @relation(fields: [stationId], references: [id])
+  company         Company  @relation(fields: [companyId], references: [id])
+  createdBy       User?    @relation(fields: [createdByUserId], references: [id])
+
+  @@index([stationId])
+  @@index([companyId])
+  @@index([country])
+  @@index([effectiveFrom])
+}
+
+model ProjectFuelPriceHistory {
+  id                String   @id @default(cuid())
+  projectId         String
+  companyId         String
+  country           String?
+  currency          String
+  basePricePerLiter Float?
+  transportCost     Float?
+  pricePerLiter     Float
+  effectiveFrom     DateTime
+  reason            String?
+  createdByUserId   String?
+  createdAt         DateTime @default(now())
+  project           Project  @relation(fields: [projectId], references: [id])
+  company           Company  @relation(fields: [companyId], references: [id])
+  createdBy         User?    @relation(fields: [createdByUserId], references: [id])
+
+  @@index([projectId])
+  @@index([companyId])
+  @@index([country])
+  @@index([effectiveFrom])
+}
+
+model StationTransferRequest {
+  id                String                     @id @default(cuid())
+  companyId         String
+  stationId         String
+  fromProjectId     String
+  toProjectId       String
+  requestedByUserId String
+  status            StationTransferStatus      @default(PENDING)
+  reason            String?
+  rejectionReason   String?
+  approvedAt        DateTime?
+  rejectedAt        DateTime?
+  cancelledAt       DateTime?
+  appliedAt         DateTime?
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  approvals         StationTransferApproval[]
+  assignmentHistory StationAssignmentHistory[]
+  station           Station                    @relation(fields: [stationId], references: [id])
+  company           Company                    @relation(fields: [companyId], references: [id])
+  fromProject       Project                    @relation("StationTransferFromProject", fields: [fromProjectId], references: [id])
+  toProject         Project                    @relation("StationTransferToProject", fields: [toProjectId], references: [id])
+  requestedBy       User                       @relation("StationTransferRequestedBy", fields: [requestedByUserId], references: [id])
+
+  @@index([companyId])
+  @@index([stationId])
+  @@index([fromProjectId])
+  @@index([toProjectId])
+  @@index([requestedByUserId])
+  @@index([status])
+}
+
+model StationTransferApproval {
+  id                String                        @id @default(cuid())
+  transferRequestId String
+  approverUserId    String
+  projectId         String
+  approvalStage     String
+  status            StationTransferApprovalStatus @default(PENDING)
+  note              String?
+  reviewedAt        DateTime?
+  createdAt         DateTime                      @default(now())
+  updatedAt         DateTime                      @updatedAt
+  approver          User                          @relation("StationTransferApprover", fields: [approverUserId], references: [id])
+  project           Project                       @relation("StationTransferApprovalProject", fields: [projectId], references: [id])
+  transferRequest   StationTransferRequest        @relation(fields: [transferRequestId], references: [id])
+
+  @@unique([transferRequestId, approverUserId, projectId])
+  @@index([transferRequestId])
+  @@index([approverUserId])
+  @@index([projectId])
+  @@index([status])
+}
+
+model StationAssignmentHistory {
+  id                String                  @id @default(cuid())
+  companyId         String
+  stationId         String
+  fromProjectId     String?
+  toProjectId       String
+  transferRequestId String?
+  assignmentType    StationAssignmentType
+  reason            String?
+  assignedAt        DateTime                @default(now())
+  assignedByUserId  String?
+  createdAt         DateTime                @default(now())
+  station           Station                 @relation(fields: [stationId], references: [id])
+  company           Company                 @relation(fields: [companyId], references: [id])
+  fromProject       Project?                @relation("StationAssignmentFromProject", fields: [fromProjectId], references: [id])
+  toProject         Project                 @relation("StationAssignmentToProject", fields: [toProjectId], references: [id])
+  assignedBy        User?                   @relation("StationAssignmentAssignedBy", fields: [assignedByUserId], references: [id])
+  transferRequest   StationTransferRequest? @relation(fields: [transferRequestId], references: [id])
+
+  @@index([companyId])
+  @@index([stationId])
+  @@index([fromProjectId])
+  @@index([toProjectId])
+  @@index([transferRequestId])
+  @@index([assignedByUserId])
+  @@index([assignedAt])
+}
+
+enum StationAssignmentType {
+  INITIAL_ASSIGNMENT
+  TRANSFER
+}
+
+enum StationStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum StationStockMovementType {
+  OPENING_BALANCE
+  ADJUSTMENT
+  PHYSICAL_ADJUSTMENT
+  ZERO_BALANCE
+  DIRECT_REFUEL_OUT
+  INTERNAL_TRANSFER_IN
+  INTERNAL_TRANSFER_OUT
+  EXTERNAL_SUPPLY_IN
+  EXTERNAL_TRANSFER_IN
+  EXTERNAL_TRANSFER_OUT
+  COUNTER_CORRECTION
+}
+
+enum StationTransferStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+  APPLIED
+  PARTIALLY_APPROVED
+}
+
+enum StationTransferApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 model RefreshToken {

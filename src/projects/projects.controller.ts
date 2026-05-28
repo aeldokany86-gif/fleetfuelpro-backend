@@ -80,6 +80,49 @@ export class ProjectsController {
     );
   }
 
+  @Post(':id/update-fuel-price')
+  updateFuelPrice(
+    @Param('id')
+    id: string,
+
+    @Body()
+    body: {
+      pricePerLiter: number;
+      effectiveFrom?: string;
+      reason?: string;
+      createdByUserId?: string;
+    },
+  ) {
+    return this.projectsService.updateFuelPrice(
+      id,
+      body,
+    );
+  }
+
+  @Get(':id/fuel-price-history')
+  getFuelPriceHistory(
+    @Param('id')
+    id: string,
+  ) {
+    return this.projectsService.getFuelPriceHistory(
+      id,
+    );
+  }
+
+  @Get(':id/effective-fuel-price')
+  getEffectiveFuelPrice(
+    @Param('id')
+    id: string,
+
+    @Query('operationDate')
+    operationDate?: string,
+  ) {
+    return this.projectsService.getEffectiveFuelPrice(
+      id,
+      operationDate,
+    );
+  }
+
   @Delete(':id')
   remove(
     @Param('id')
