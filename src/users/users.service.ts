@@ -15,16 +15,86 @@ import * as bcrypt from 'bcryptjs';
 export class UsersService {
   constructor(private prisma: PrismaService) {}
 
-  private isPlatformUser(roleName: string) {
-    const normalizedRole = String(roleName || '')
+  private normalizeRoleName(roleName: string) {
+    return String(roleName || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, '');
+  }
+
+  private normalizeEmployeeId(employeeId?: string) {
+    return String(employeeId || '')
+      .trim()
+      .toUpperCase();
+  }
+
+  private normalizeEmail(email?: string) {
+    const cleanEmail = String(email || '')
       .trim()
       .toLowerCase();
 
+    return cleanEmail || null;
+  }
+
+  private normalizeUsername(username?: string) {
+    return String(username || '')
+      .trim()
+      .toLowerCase();
+  }
+
+  private normalizeCompanyCode(value?: string) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
+  private buildUsername(company: any, employeeId: string) {
+    const companyCode =
+      this.normalizeCompanyCode(company?.code) ||
+      this.normalizeCompanyCode(company?.name) ||
+      this.normalizeCompanyCode(company?.id);
+
+    const normalizedEmployeeId = String(employeeId || '')
+      .trim()
+      .toLowerCase();
+
+    if (!companyCode || !normalizedEmployeeId) {
+      throw new BadRequestException('Username cannot be generated without company code and employee ID');
+    }
+
+    return `${companyCode}.${normalizedEmployeeId}`;
+  }
+
+  private isPlatformUser(roleName: string) {
+    const normalizedRole = this.normalizeRoleName(roleName);
+
     return (
-      normalizedRole === 'platform user' ||
       normalizedRole === 'platformuser' ||
-      normalizedRole === 'platform admin' ||
       normalizedRole === 'platformadmin'
+    );
+  }
+
+  private isPlatformRoleName(roleName?: string) {
+    const normalizedRole = this.normalizeRoleName(roleName || '');
+
+    return (
+      normalizedRole === 'platformuser' ||
+      normalizedRole === 'platformadmin'
+    );
+  }
+
+  private isPlatformConsoleCompany(company?: any) {
+    const normalizedId = this.normalizeRoleName(company?.id || '');
+    const normalizedCode = this.normalizeRoleName(company?.code || '');
+    const normalizedName = this.normalizeRoleName(company?.name || '');
+
+    return (
+      normalizedId === 'platform' ||
+      normalizedCode === 'platform' ||
+      normalizedName === 'platformconsole'
     );
   }
 
@@ -70,13 +140,102 @@ export class UsersService {
     );
   }
 
+  private buildUserInclude() {
+    return {
+      company: true,
+      role: true,
+      linkedEmployee: {
+        include: {
+          project: true,
+        },
+      },
+    };
+  }
+
+  private async validateRoleForCompany(roleId: string, company: any) {
+    const selectedRole = await this.prisma.role.findFirst({
+      where: {
+        id: roleId,
+      },
+    });
+
+    if (!selectedRole) {
+      throw new BadRequestException('Selected role is not valid');
+    }
+
+    const roleBelongsToCompany =
+      selectedRole.companyId === null ||
+      selectedRole.companyId === company.id;
+
+    if (!roleBelongsToCompany) {
+      throw new BadRequestException(
+        'Selected role does not belong to the selected company',
+      );
+    }
+
+    const selectedRoleIsPlatform = this.isPlatformRoleName(selectedRole.name);
+    const targetIsPlatformConsole = this.isPlatformConsoleCompany(company);
+
+    if (selectedRoleIsPlatform && !targetIsPlatformConsole) {
+      throw new BadRequestException(
+        'Platform roles are only allowed inside Platform Console',
+      );
+    }
+
+    return selectedRole;
+  }
+
+  private async resolveEmployeeForUser({
+    companyId,
+    employeeId,
+    linkedEmployeeId,
+    excludeUserId,
+  }: {
+    companyId: string;
+    employeeId?: string;
+    linkedEmployeeId?: string;
+    excludeUserId?: string;
+  }) {
+    const normalizedEmployeeId = this.normalizeEmployeeId(employeeId);
+
+    if (!normalizedEmployeeId && !linkedEmployeeId) {
+      throw new BadRequestException('Employee ID is required');
+    }
+
+    const employee = await this.prisma.employee.findFirst({
+      where: {
+        companyId,
+        deletedAt: null,
+        ...(linkedEmployeeId
+          ? { id: linkedEmployeeId }
+          : { employeeId: normalizedEmployeeId }),
+      },
+      include: {
+        project: true,
+        linkedUser: true,
+      },
+    });
+
+    if (!employee) {
+      throw new BadRequestException(
+        'Employee must exist in Team before creating a user',
+      );
+    }
+
+    if (employee.linkedUserId && employee.linkedUserId !== excludeUserId) {
+      throw new BadRequestException(
+        'This employee is already linked to another user',
+      );
+    }
+
+    return employee;
+  }
+
   async findAll(
     actorCompanyId: string,
     actorRoleName: string,
     selectedCompanyId?: string,
   ) {
-    console.log('USERS FINDALL ROLE:', actorRoleName);
-
     const isPlatform = this.isPlatformUser(actorRoleName);
 
     const where = isPlatform
@@ -95,12 +254,9 @@ export class UsersService {
 
     return this.prisma.user.findMany({
       where,
-      include: {
-        company: true,
-        role: true,
-      },
+      include: this.buildUserInclude(),
       orderBy: {
-        fullName: 'asc',
+        username: 'asc',
       },
     });
   }
@@ -133,35 +289,59 @@ export class UsersService {
       throw new BadRequestException('Selected company is not valid or inactive');
     }
 
-    const existingUser = await this.prisma.user.findFirst({
+    const selectedRole = await this.validateRoleForCompany(
+      createUserDto.roleId,
+      company,
+    );
+
+    const employee = await this.resolveEmployeeForUser({
+      companyId: targetCompanyId,
+      employeeId: createUserDto.employeeId,
+      linkedEmployeeId: createUserDto.linkedEmployeeId,
+    });
+
+    const email = this.normalizeEmail(createUserDto.email || employee.email || undefined);
+
+    if (this.isPlatformRoleName(selectedRole.name) && !email) {
+      throw new BadRequestException('Email is required for Platform users');
+    }
+
+    if (email) {
+      const existingUser = await this.prisma.user.findFirst({
+        where: {
+          email,
+          deletedAt: null,
+        },
+      });
+
+      if (existingUser) {
+        throw new BadRequestException('Email already exists');
+      }
+    }
+
+    const username = this.buildUsername(company, employee.employeeId);
+
+    const existingUsernameUser = await this.prisma.user.findFirst({
       where: {
-        email: createUserDto.email,
+        username,
         deletedAt: null,
       },
     });
 
-    if (existingUser) {
-      throw new BadRequestException('Email already exists');
+    if (existingUsernameUser) {
+      throw new BadRequestException('Username already exists');
     }
 
-    const selectedRole = await this.prisma.role.findFirst({
+    const existingEmployeeUser = await this.prisma.user.findFirst({
       where: {
-        id: createUserDto.roleId,
+        companyId: targetCompanyId,
+        employeeId: employee.employeeId,
+        deletedAt: null,
       },
     });
 
-    if (!selectedRole) {
-      throw new BadRequestException('Selected role is not valid');
-    }
-
-    const roleBelongsToCompany =
-      selectedRole.companyId === null ||
-      selectedRole.companyId === targetCompanyId;
-
-    if (!roleBelongsToCompany) {
-      throw new BadRequestException(
-        'Selected role does not belong to the selected company',
-      );
+    if (existingEmployeeUser) {
+      throw new BadRequestException('Employee ID is already linked to another user');
     }
 
     const passwordHash = await bcrypt.hash(
@@ -169,23 +349,38 @@ export class UsersService {
       10,
     );
 
-    return this.prisma.user.create({
-      data: {
-        fullName: createUserDto.fullName,
-        email: createUserDto.email,
-        phone: createUserDto.phone,
-        passwordHash,
-        roleId: createUserDto.roleId,
-        companyId: targetCompanyId,
-        createdById: actorUserId || null,
-        isActive: true,
-        mustChangePassword: true,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.create({
+        data: {
+          fullName: createUserDto.fullName?.trim() || employee.name,
+          employeeId: employee.employeeId,
+          username,
+          email,
+          phone: createUserDto.phone?.trim() || employee.phone || null,
+          passwordHash,
+          roleId: createUserDto.roleId,
+          companyId: targetCompanyId,
+          createdById: actorUserId || null,
+          isActive: true,
+          mustChangePassword: true,
+        },
+      });
 
-      include: {
-        company: true,
-        role: true,
-      },
+      await tx.employee.update({
+        where: {
+          id: employee.id,
+        },
+        data: {
+          linkedUserId: user.id,
+        },
+      });
+
+      return tx.user.findUnique({
+        where: {
+          id: user.id,
+        },
+        include: this.buildUserInclude(),
+      });
     });
   }
 
@@ -201,72 +396,154 @@ export class UsersService {
         actorCompanyId,
         actorRoleName,
       ),
+      include: {
+        company: true,
+        linkedEmployee: true,
+      },
     });
 
     if (!user) {
       throw new NotFoundException('User not found');
     }
 
-    if (
-      updateUserDto.email &&
-      updateUserDto.email !== user.email
-    ) {
-      const existingUser =
-        await this.prisma.user.findFirst({
-          where: {
-            email: updateUserDto.email,
-            deletedAt: null,
-            NOT: {
-              id,
-            },
-          },
-        });
+    let nextEmployee: any = null;
 
-      if (existingUser) {
-        throw new BadRequestException(
-          'Email already exists',
-        );
-      }
+    if (
+      updateUserDto.employeeId !== undefined ||
+      updateUserDto.linkedEmployeeId !== undefined
+    ) {
+      nextEmployee = await this.resolveEmployeeForUser({
+        companyId: user.companyId,
+        employeeId: updateUserDto.employeeId || undefined,
+        linkedEmployeeId: updateUserDto.linkedEmployeeId || undefined,
+        excludeUserId: id,
+      });
     }
 
-    if (updateUserDto.roleId) {
-      const selectedRole = await this.prisma.role.findFirst({
+    const nextEmail =
+      updateUserDto.email !== undefined
+        ? this.normalizeEmail(updateUserDto.email)
+        : undefined;
+
+    if (nextEmail && nextEmail !== user.email) {
+      const existingUser = await this.prisma.user.findFirst({
         where: {
-          id: updateUserDto.roleId,
+          email: nextEmail,
+          deletedAt: null,
+          NOT: {
+            id,
+          },
         },
       });
 
-      if (!selectedRole) {
-        throw new BadRequestException('Selected role is not valid');
-      }
-
-      const roleBelongsToCompany =
-        selectedRole.companyId === null ||
-        selectedRole.companyId === user.companyId;
-
-      if (!roleBelongsToCompany) {
-        throw new BadRequestException(
-          'Selected role does not belong to this user company',
-        );
+      if (existingUser) {
+        throw new BadRequestException('Email already exists');
       }
     }
 
-    return this.prisma.user.update({
-      where: {
-        id,
-      },
+    let selectedRole: any = null;
 
-      data: {
-        fullName: updateUserDto.fullName,
-        email: updateUserDto.email,
-        phone: updateUserDto.phone,
-        roleId: updateUserDto.roleId,
-      },
+    if (updateUserDto.roleId) {
+      const company = await this.prisma.company.findFirst({
+        where: {
+          id: user.companyId,
+          deletedAt: null,
+        },
+      });
 
-      include: {
-        company: true,
-        role: true,
-      },
+      if (!company) {
+        throw new BadRequestException('User company is not valid');
+      }
+
+      selectedRole = await this.validateRoleForCompany(
+        updateUserDto.roleId,
+        company,
+      );
+    }
+
+    if (selectedRole && this.isPlatformRoleName(selectedRole.name)) {
+      const effectiveEmail = nextEmail !== undefined ? nextEmail : user.email;
+
+      if (!effectiveEmail) {
+        throw new BadRequestException('Email is required for Platform users');
+      }
+    }
+
+    const nextUsername = nextEmployee
+      ? this.buildUsername(user.company, nextEmployee.employeeId)
+      : undefined;
+
+    if (nextUsername && nextUsername !== user.username) {
+      const existingUsernameUser = await this.prisma.user.findFirst({
+        where: {
+          username: nextUsername,
+          deletedAt: null,
+          NOT: {
+            id,
+          },
+        },
+      });
+
+      if (existingUsernameUser) {
+        throw new BadRequestException('Username already exists');
+      }
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      if (nextEmployee && user.linkedEmployee?.id !== nextEmployee.id) {
+        if (user.linkedEmployee?.id) {
+          await tx.employee.update({
+            where: {
+              id: user.linkedEmployee.id,
+            },
+            data: {
+              linkedUserId: null,
+            },
+          });
+        }
+
+        await tx.employee.update({
+          where: {
+            id: nextEmployee.id,
+          },
+          data: {
+            linkedUserId: id,
+          },
+        });
+      }
+
+      await tx.user.update({
+        where: {
+          id,
+        },
+        data: {
+          ...(updateUserDto.fullName !== undefined
+            ? { fullName: updateUserDto.fullName?.trim() || nextEmployee?.name || user.fullName }
+            : {}),
+          ...(nextEmployee
+            ? {
+                employeeId: nextEmployee.employeeId,
+                username: nextUsername,
+              }
+            : {}),
+          ...(nextEmail !== undefined
+            ? { email: nextEmail }
+            : {}),
+          ...(updateUserDto.phone !== undefined
+            ? { phone: updateUserDto.phone?.trim() || nextEmployee?.phone || null }
+            : {}),
+          ...(updateUserDto.roleId !== undefined
+            ? { roleId: updateUserDto.roleId }
+            : {}),
+        },
+      });
+
+      return tx.user.findUnique({
+        where: {
+          id,
+        },
+        include: this.buildUserInclude(),
+      });
     });
   }
 
@@ -297,10 +574,7 @@ export class UsersService {
         isActive,
       },
 
-      include: {
-        company: true,
-        role: true,
-      },
+      include: this.buildUserInclude(),
     });
   }
 

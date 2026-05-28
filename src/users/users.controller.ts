@@ -26,7 +26,7 @@ export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
   @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles('Admin', 'Platform User')
+  @Roles('Admin', 'Platform User', 'PlatformAdmin', 'Platform User')
   @Get()
   async findAll(
     @Request() req,
@@ -40,7 +40,7 @@ export class UsersController {
   }
 
   @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles('Admin', 'Platform User')
+  @Roles('Admin', 'Platform User', 'PlatformAdmin', 'Platform User')
   @Post()
   async create(
     @Body() createUserDto: CreateUserDto,
@@ -50,12 +50,12 @@ export class UsersController {
       createUserDto,
       req.user.companyId,
       req.user.roleName || req.user.role || req.user.roleNameNormalized,
-      req.user.id,
+      req.user.userId || req.user.id,
     );
   }
 
   @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles('Admin', 'Platform User')
+  @Roles('Admin', 'Platform User', 'PlatformAdmin', 'Platform User')
   @Patch(':id')
   async update(
     @Param('id') id: string,
@@ -71,7 +71,7 @@ export class UsersController {
   }
 
   @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles('Admin', 'Platform User')
+  @Roles('Admin', 'Platform User', 'PlatformAdmin', 'Platform User')
   @Patch(':id/status')
   async updateStatus(
     @Param('id') id: string,
@@ -87,7 +87,7 @@ export class UsersController {
   }
 
   @UseGuards(AuthGuard('jwt'), RolesGuard)
-  @Roles('Admin', 'Platform User')
+  @Roles('Admin', 'Platform User', 'PlatformAdmin', 'Platform User')
   @Patch(':id/reset-password')
   async resetPassword(
     @Param('id') id: string,

@@ -46,11 +46,11 @@ model Project {
   updatedAt                    DateTime                   @updatedAt
   deletedAt                    DateTime?
   projectManagerId             String?
-  assetTransferApprovals       AssetTransferApproval[] @relation("AssetTransferApprovalProject")
-  assetTransferRequestsFrom    AssetTransferRequest[]  @relation("AssetTransferFromProject")
-  assetTransferRequestsTo      AssetTransferRequest[]  @relation("AssetTransferToProject")
-  assetAssignmentHistoryFrom   AssetAssignmentHistory[] @relation("AssetAssignmentFromProject")
-  assetAssignmentHistoryTo     AssetAssignmentHistory[] @relation("AssetAssignmentToProject")
+  assetTransferApprovals       AssetTransferApproval[]    @relation("AssetTransferApprovalProject")
+  assetTransferRequestsFrom    AssetTransferRequest[]     @relation("AssetTransferFromProject")
+  assetTransferRequestsTo      AssetTransferRequest[]     @relation("AssetTransferToProject")
+  assetAssignmentHistoryFrom   AssetAssignmentHistory[]   @relation("AssetAssignmentFromProject")
+  assetAssignmentHistoryTo     AssetAssignmentHistory[]   @relation("AssetAssignmentToProject")
   assets                       Asset[]
   employees                    Employee[]
   employeeTransferApprovals    EmployeeTransferApproval[] @relation("EmployeeTransferApprovalProject")
@@ -105,7 +105,9 @@ model User {
   companyId                  String
   roleId                     String
   fullName                   String
-  email                      String                     @unique
+  employeeId                 String?
+  username                   String?                    @unique
+  email                      String?                    @unique
   phone                      String?
   passwordHash               String
   isActive                   Boolean                    @default(true)
@@ -116,10 +118,10 @@ model User {
   updatedAt                  DateTime                   @updatedAt
   deletedAt                  DateTime?
   assetOdometerResets        AssetOdometerReset[]
-  assetTransferApprovals     AssetTransferApproval[]  @relation("AssetTransferApprover")
-  assetAssignmentHistory     AssetAssignmentHistory[] @relation("AssetAssignmentAssignedBy")
-  createdAssets              Asset[]                  @relation("AssetCreatedBy")
-  requestedAssetTransfers    AssetTransferRequest[]   @relation("AssetTransferRequestedBy")
+  assetTransferApprovals     AssetTransferApproval[]    @relation("AssetTransferApprover")
+  assetAssignmentHistory     AssetAssignmentHistory[]   @relation("AssetAssignmentAssignedBy")
+  createdAssets              Asset[]                    @relation("AssetCreatedBy")
+  requestedAssetTransfers    AssetTransferRequest[]     @relation("AssetTransferRequestedBy")
   createdEmployees           Employee[]                 @relation("EmployeeCreatedBy")
   linkedEmployee             Employee?                  @relation("EmployeeLinkedUser")
   employeeTransferApprovals  EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
@@ -131,6 +133,12 @@ model User {
   createdBy                  User?                      @relation("UserCreatedBy", fields: [createdById], references: [id])
   createdUsers               User[]                     @relation("UserCreatedBy")
   role                       Role                       @relation(fields: [roleId], references: [id])
+
+  @@unique([companyId, employeeId])
+  @@index([companyId])
+  @@index([roleId])
+  @@index([employeeId])
+  @@index([username])
 }
 
 model Employee {
@@ -214,25 +222,25 @@ model EmployeeTransferApproval {
 }
 
 model Asset {
-  id                    String                  @id @default(cuid())
-  companyId             String
-  assetId               String
-  type                  String
-  category              String?
-  fuelTankCapacity      Float?
-  currentOdometer       Float                   @default(0)
-  status                AssetStatus             @default(ACTIVE)
-  projectId             String?
-  createdById           String?
-  createdAt             DateTime                @default(now())
-  updatedAt             DateTime                @updatedAt
-  deletedAt             DateTime?
-  company               Company                 @relation(fields: [companyId], references: [id])
-  createdBy             User?                   @relation("AssetCreatedBy", fields: [createdById], references: [id])
-  project               Project?                @relation(fields: [projectId], references: [id])
-  odometerResetHistory  AssetOdometerReset[]
-  assignmentHistory     AssetAssignmentHistory[]
-  transferRequests      AssetTransferRequest[]
+  id                   String                   @id @default(cuid())
+  companyId            String
+  assetId              String
+  type                 String
+  category             String?
+  fuelTankCapacity     Float?
+  currentOdometer      Float                    @default(0)
+  status               AssetStatus              @default(ACTIVE)
+  projectId            String?
+  createdById          String?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  deletedAt            DateTime?
+  company              Company                  @relation(fields: [companyId], references: [id])
+  createdBy            User?                    @relation("AssetCreatedBy", fields: [createdById], references: [id])
+  project              Project?                 @relation(fields: [projectId], references: [id])
+  odometerResetHistory AssetOdometerReset[]
+  assignmentHistory    AssetAssignmentHistory[]
+  transferRequests     AssetTransferRequest[]
 
   @@unique([companyId, assetId])
   @@index([companyId])
@@ -259,28 +267,28 @@ model AssetOdometerReset {
 }
 
 model AssetTransferRequest {
-  id                String                     @id @default(cuid())
+  id                String                   @id @default(cuid())
   companyId         String
   assetId           String
   fromProjectId     String
   toProjectId       String
   requestedByUserId String
-  status            EmployeeTransferStatus     @default(PENDING)
+  status            EmployeeTransferStatus   @default(PENDING)
   reason            String?
   rejectionReason   String?
   approvedAt        DateTime?
   rejectedAt        DateTime?
   cancelledAt       DateTime?
   appliedAt         DateTime?
-  createdAt         DateTime                   @default(now())
-  updatedAt         DateTime                   @updatedAt
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
   approvals         AssetTransferApproval[]
   assignmentHistory AssetAssignmentHistory[]
-  asset             Asset                      @relation(fields: [assetId], references: [id])
-  company           Company                    @relation(fields: [companyId], references: [id])
-  fromProject       Project                    @relation("AssetTransferFromProject", fields: [fromProjectId], references: [id])
-  requestedBy       User                       @relation("AssetTransferRequestedBy", fields: [requestedByUserId], references: [id])
-  toProject         Project                    @relation("AssetTransferToProject", fields: [toProjectId], references: [id])
+  asset             Asset                    @relation(fields: [assetId], references: [id])
+  company           Company                  @relation(fields: [companyId], references: [id])
+  fromProject       Project                  @relation("AssetTransferFromProject", fields: [fromProjectId], references: [id])
+  requestedBy       User                     @relation("AssetTransferRequestedBy", fields: [requestedByUserId], references: [id])
+  toProject         Project                  @relation("AssetTransferToProject", fields: [toProjectId], references: [id])
 
   @@index([companyId])
   @@index([assetId])
@@ -313,7 +321,7 @@ model AssetTransferApproval {
 }
 
 model AssetAssignmentHistory {
-  id                String              @id @default(cuid())
+  id                String                @id @default(cuid())
   companyId         String
   assetId           String
   fromProjectId     String?
@@ -321,14 +329,14 @@ model AssetAssignmentHistory {
   transferRequestId String?
   assignmentType    AssetAssignmentType
   reason            String?
-  assignedAt        DateTime            @default(now())
+  assignedAt        DateTime              @default(now())
   assignedByUserId  String?
-  createdAt         DateTime            @default(now())
-  asset             Asset               @relation(fields: [assetId], references: [id])
-  company           Company             @relation(fields: [companyId], references: [id])
-  fromProject       Project?            @relation("AssetAssignmentFromProject", fields: [fromProjectId], references: [id])
-  toProject         Project             @relation("AssetAssignmentToProject", fields: [toProjectId], references: [id])
-  assignedBy        User?               @relation("AssetAssignmentAssignedBy", fields: [assignedByUserId], references: [id])
+  createdAt         DateTime              @default(now())
+  asset             Asset                 @relation(fields: [assetId], references: [id])
+  company           Company               @relation(fields: [companyId], references: [id])
+  fromProject       Project?              @relation("AssetAssignmentFromProject", fields: [fromProjectId], references: [id])
+  toProject         Project               @relation("AssetAssignmentToProject", fields: [toProjectId], references: [id])
+  assignedBy        User?                 @relation("AssetAssignmentAssignedBy", fields: [assignedByUserId], references: [id])
   transferRequest   AssetTransferRequest? @relation(fields: [transferRequestId], references: [id])
 
   @@index([companyId])

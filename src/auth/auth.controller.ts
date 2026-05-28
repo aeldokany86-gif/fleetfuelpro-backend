@@ -21,17 +21,18 @@ export class AuthController {
 
   @Get('login-company')
   async getLoginCompany(
-    @Query('email') email: string,
+    @Query('identifier') identifier: string,
+    @Query('email') email?: string,
   ) {
-    return this.authService.getLoginCompany(email);
+    return this.authService.getLoginCompany(identifier || email || '');
   }
 
   @Post('login')
   async login(
-    @Body() body: { email: string; password: string },
+    @Body() body: { identifier?: string; email?: string; username?: string; password: string },
   ) {
     return this.authService.login(
-      body.email,
+      body.identifier || body.username || body.email || '',
       body.password,
     );
   }
