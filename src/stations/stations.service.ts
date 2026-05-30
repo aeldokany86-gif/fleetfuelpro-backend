@@ -142,11 +142,6 @@ export class StationsService {
           },
           take: 50,
         },
-        priceHistory: {
-          orderBy: {
-            effectiveFrom: 'desc',
-          },
-        },
         assignmentHistory: {
           include: {
             fromProject: {
@@ -727,180 +722,6 @@ export class StationsService {
     });
   }
 
-  async updatePrice(
-    stationId: string,
-    body: {
-      pricePerLiter: number;
-      effectiveFrom?: string;
-      currency?: string;
-      country?: string;
-      reason?: string;
-      createdByUserId?: string;
-    },
-  ) {
-    const pricePerLiter = Number(body.pricePerLiter);
-    if (!Number.isFinite(pricePerLiter) || pricePerLiter < 0) {
-      throw new BadRequestException('Price per liter must be a valid positive number');
-    }
-
-    const station = await this.prisma.station.findFirst({
-      where: {
-        id: stationId,
-        deletedAt: null,
-      },
-      include: {
-        company: true,
-      },
-    });
-
-    if (!station) {
-      throw new NotFoundException('Station not found');
-    }
-
-    const effectiveFrom = this.parseOptionalDate(body.effectiveFrom);
-
-    return this.prisma.$transaction(async (tx) => {
-      const priceHistory = await tx.stationPriceHistory.create({
-        data: {
-          stationId: station.id,
-          companyId: station.companyId,
-          country: body.country || station.company?.country || null,
-          currency: body.currency || station.company?.currency || 'SAR',
-          pricePerLiter,
-          effectiveFrom,
-          reason: body.reason?.trim() || null,
-          createdByUserId: body.createdByUserId || null,
-        },
-        include: {
-          station: true,
-          company: true,
-          createdBy: {
-            select: {
-              id: true,
-              fullName: true,
-              email: true,
-            },
-          },
-        },
-      });
-
-      await tx.station.update({
-        where: {
-          id: station.id,
-        },
-        data: {
-          currentPrice: pricePerLiter,
-        },
-      });
-
-      return priceHistory;
-    });
-  }
-
-  async getPriceHistory(stationId: string) {
-    const station = await this.prisma.station.findFirst({
-      where: {
-        id: stationId,
-        deletedAt: null,
-      },
-      select: {
-        id: true,
-      },
-    });
-
-    if (!station) {
-      throw new NotFoundException('Station not found');
-    }
-
-    return this.prisma.stationPriceHistory.findMany({
-      where: {
-        stationId,
-      },
-      orderBy: {
-        effectiveFrom: 'desc',
-      },
-      include: {
-        createdBy: {
-          select: {
-            id: true,
-            fullName: true,
-            email: true,
-          },
-        },
-      },
-    });
-  }
-
-  async getEffectivePrice(
-    stationId: string,
-    operationDate?: string,
-  ) {
-    const station = await this.prisma.station.findFirst({
-      where: {
-        id: stationId,
-        deletedAt: null,
-      },
-      include: {
-        company: {
-          select: {
-            id: true,
-            country: true,
-            currency: true,
-          },
-        },
-      },
-    });
-
-    if (!station) {
-      throw new NotFoundException('Station not found');
-    }
-
-    const targetDate = this.parseOptionalDate(operationDate);
-
-    const effectivePrice = await this.prisma.stationPriceHistory.findFirst({
-      where: {
-        stationId: station.id,
-        effectiveFrom: {
-          lte: targetDate,
-        },
-      },
-      orderBy: {
-        effectiveFrom: 'desc',
-      },
-      include: {
-        station: true,
-        company: true,
-        createdBy: {
-          select: {
-            id: true,
-            fullName: true,
-            email: true,
-          },
-        },
-      },
-    });
-
-    if (effectivePrice) {
-      return effectivePrice;
-    }
-
-    return {
-      id: null,
-      stationId: station.id,
-      companyId: station.companyId,
-      country: station.company?.country || null,
-      currency: station.company?.currency || 'SAR',
-      pricePerLiter: Number((station as any).currentPrice || 0),
-      effectiveFrom: null,
-      reason: 'No effective price history found. Falling back to station current price.',
-      createdByUserId: null,
-      createdAt: null,
-      station,
-      company: station.company,
-      createdBy: null,
-    };
-  }
-
   async createTransferRequest(
     stationId: string,
     toProjectId: string,
@@ -960,6 +781,8 @@ export class StationsService {
       throw new BadRequestException('Pending transfer already exists');
     }
 
+    const now = new Date();
+
     const approvers = [
       {
         approverUserId: station.project.projectManagerId,
@@ -973,36 +796,119 @@ export class StationsService {
       },
     ].filter(
       (item, index, list) =>
+        // If the same manager is responsible for both source and destination projects,
+        // one approval is enough.
         list.findIndex(
           (candidate) =>
-            candidate.approverUserId === item.approverUserId &&
-            candidate.projectId === item.projectId,
+            candidate.approverUserId === item.approverUserId,
         ) === index,
     );
 
-    return this.prisma.stationTransferRequest.create({
-      data: {
-        companyId: station.companyId,
-        stationId: station.id,
-        fromProjectId: station.projectId,
-        toProjectId,
-        requestedByUserId,
-        status: 'PENDING',
-        approvals: {
-          create: approvers.map((approver) => ({
-            approverUserId: approver.approverUserId,
-            projectId: approver.projectId,
-            approvalStage: approver.approvalStage,
-            status: 'PENDING',
-          })),
+    const approvalsToCreate = approvers.map((approver) => {
+      const requesterIsThisProjectManager =
+        approver.approverUserId === requestedByUserId;
+
+      return {
+        approverUserId: approver.approverUserId,
+        projectId: approver.projectId,
+        approvalStage: approver.approvalStage,
+        status: requesterIsThisProjectManager ? 'APPROVED' : 'PENDING',
+        reviewedAt: requesterIsThisProjectManager ? now : null,
+        note: requesterIsThisProjectManager
+          ? 'Auto-approved because the requester is this project manager'
+          : null,
+      };
+    });
+
+    const fullyApproved = approvalsToCreate.every(
+      (approval) => approval.status === 'APPROVED',
+    );
+
+    const partiallyApproved = approvalsToCreate.some(
+      (approval) => approval.status === 'APPROVED',
+    );
+
+    return this.prisma.$transaction(async (tx) => {
+      const transferRequest = await tx.stationTransferRequest.create({
+        data: {
+          companyId: station.companyId,
+          stationId: station.id,
+          fromProjectId: station.projectId!,
+          toProjectId,
+          requestedByUserId,
+          status: fullyApproved
+            ? 'APPROVED'
+            : partiallyApproved
+              ? 'PARTIALLY_APPROVED'
+              : 'PENDING',
+          ...(fullyApproved
+            ? {
+                approvedAt: now,
+                appliedAt: now,
+                reason: 'Auto-applied because the requester manages all required approval stages',
+              }
+            : partiallyApproved
+              ? {
+                  reason: 'Partially auto-approved because the requester manages one required approval stage',
+                }
+              : {}),
+          approvals: {
+            create: approvalsToCreate.map((approval) => ({
+              approverUserId: approval.approverUserId,
+              projectId: approval.projectId,
+              approvalStage: approval.approvalStage,
+              status: approval.status as any,
+              reviewedAt: approval.reviewedAt,
+              note: approval.note,
+            })),
+          },
         },
-      },
-      include: {
-        station: true,
-        fromProject: true,
-        toProject: true,
-        approvals: true,
-      },
+        include: {
+          station: true,
+          fromProject: true,
+          toProject: true,
+          approvals: true,
+        },
+      });
+
+      if (!fullyApproved) {
+        return transferRequest;
+      }
+
+      await tx.station.update({
+        where: {
+          id: station.id,
+        },
+        data: {
+          projectId: toProjectId,
+        },
+      });
+
+      await tx.stationAssignmentHistory.create({
+        data: {
+          companyId: station.companyId,
+          stationId: station.id,
+          fromProjectId: station.projectId,
+          toProjectId,
+          transferRequestId: transferRequest.id,
+          assignmentType: 'TRANSFER' as any,
+          reason: 'Station transfer auto-approved and applied',
+          assignedAt: now,
+          assignedByUserId: requestedByUserId,
+        },
+      });
+
+      return tx.stationTransferRequest.findFirst({
+        where: {
+          id: transferRequest.id,
+        },
+        include: {
+          station: true,
+          fromProject: true,
+          toProject: true,
+          approvals: true,
+        },
+      });
     });
   }
 
@@ -1237,11 +1143,6 @@ export class StationsService {
         },
       });
 
-      await tx.stationPriceHistory.deleteMany({
-        where: {
-          stationId: id,
-        },
-      });
 
       return tx.station.delete({
         where: {

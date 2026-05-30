@@ -24,6 +24,64 @@ export class AssetsService {
     return 'ACTIVE';
   }
 
+  private normalizeRoleName(roleName: string) {
+    return String(roleName || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s_-]+/g, '');
+  }
+
+  private isAdminRole(roleName: string) {
+    const normalized = this.normalizeRoleName(roleName);
+    return (
+      normalized === 'ADMIN' ||
+      normalized === 'PLATFORMADMIN' ||
+      normalized === 'PLATFORMUSER'
+    );
+  }
+
+  private isOfficerRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === 'OFFICER';
+  }
+
+  private isManagerRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === 'MANAGER';
+  }
+
+  private async getRequester(
+    requestedByUserId: string,
+    companyId: string,
+  ) {
+    const requester = await this.prisma.user.findFirst({
+      where: {
+        id: requestedByUserId,
+        companyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      include: {
+        role: true,
+      },
+    });
+
+    if (!requester) {
+      throw new BadRequestException('Requester user is invalid or inactive');
+    }
+
+    return requester;
+  }
+
+  private parseOptionalEffectiveDate(value?: string | null) {
+    if (!value) return null;
+
+    const effectiveDate = new Date(value);
+    if (Number.isNaN(effectiveDate.getTime())) {
+      throw new BadRequestException('Invalid effective date');
+    }
+
+    return effectiveDate;
+  }
+
   private async ensureCompany(companyId: string) {
     const company = await this.prisma.company.findFirst({
       where: {
@@ -506,6 +564,7 @@ export class AssetsService {
             requestedByUserId: true,
             approvedAt: true,
             appliedAt: true,
+            effectiveDate: true,
             createdAt: true,
           },
         },
@@ -517,6 +576,7 @@ export class AssetsService {
     assetId: string,
     toProjectId: string,
     requestedByUserId: string,
+    effectiveDateInput?: string,
   ) {
     const asset = await this.prisma.asset.findFirst({
       where: {
@@ -553,6 +613,28 @@ export class AssetsService {
       throw new BadRequestException('Target project is invalid');
     }
 
+    const requester = await this.getRequester(
+      requestedByUserId,
+      asset.companyId,
+    );
+
+    const requesterRoleName = requester.role?.name || '';
+
+    if (this.isAdminRole(requesterRoleName)) {
+      throw new BadRequestException(
+        'Admin cannot create asset transfer requests',
+      );
+    }
+
+    if (
+      !this.isOfficerRole(requesterRoleName) &&
+      !this.isManagerRole(requesterRoleName)
+    ) {
+      throw new BadRequestException(
+        'Only Officer or Manager can create asset transfer requests',
+      );
+    }
+
     if (!asset.project?.projectManagerId || !targetProject.projectManagerId) {
       throw new BadRequestException(
         'Asset transfer requires source and destination project managers',
@@ -572,6 +654,9 @@ export class AssetsService {
       throw new BadRequestException('Pending transfer already exists');
     }
 
+    const now = new Date();
+    const requestedEffectiveDate = this.parseOptionalEffectiveDate(effectiveDateInput);
+
     const approvers = [
       {
         approverUserId: asset.project.projectManagerId,
@@ -585,36 +670,122 @@ export class AssetsService {
       },
     ].filter(
       (item, index, list) =>
+        // If the same manager is responsible for both source and destination projects,
+        // one approval is enough.
         list.findIndex(
           (candidate) =>
-            candidate.approverUserId === item.approverUserId &&
-            candidate.projectId === item.projectId,
+            candidate.approverUserId === item.approverUserId,
         ) === index,
     );
 
-    return this.prisma.assetTransferRequest.create({
-      data: {
-        companyId: asset.companyId,
-        assetId: asset.id,
-        fromProjectId: asset.projectId,
-        toProjectId,
-        requestedByUserId,
-        status: 'PENDING',
-        approvals: {
-          create: approvers.map((approver) => ({
-            approverUserId: approver.approverUserId,
-            projectId: approver.projectId,
-            approvalStage: approver.approvalStage,
-            status: 'PENDING',
-          })),
+    const approvalsToCreate = approvers.map((approver) => {
+      const requesterIsThisProjectManager =
+        approver.approverUserId === requestedByUserId;
+
+      return {
+        approverUserId: approver.approverUserId,
+        projectId: approver.projectId,
+        approvalStage: approver.approvalStage,
+        status: requesterIsThisProjectManager ? 'APPROVED' : 'PENDING',
+        reviewedAt: requesterIsThisProjectManager ? now : null,
+        note: requesterIsThisProjectManager
+          ? 'Auto-approved because the requester is this project manager'
+          : null,
+      };
+    });
+
+    const fullyApproved = approvalsToCreate.every(
+      (approval) => approval.status === 'APPROVED',
+    );
+
+    const partiallyApproved = approvalsToCreate.some(
+      (approval) => approval.status === 'APPROVED',
+    );
+
+    return this.prisma.$transaction(async (tx) => {
+      const transferRequest = await tx.assetTransferRequest.create({
+        data: {
+          companyId: asset.companyId,
+          assetId: asset.id,
+          fromProjectId: asset.projectId!,
+          toProjectId,
+          requestedByUserId,
+          effectiveDate: fullyApproved
+            ? requestedEffectiveDate || now
+            : requestedEffectiveDate,
+          status: fullyApproved
+            ? 'APPROVED'
+            : partiallyApproved
+              ? 'PARTIALLY_APPROVED'
+              : 'PENDING',
+          ...(fullyApproved
+            ? {
+                approvedAt: now,
+                appliedAt: now,
+                reason: 'Auto-applied because the requester manages all required approval stages',
+              }
+            : partiallyApproved
+              ? {
+                  reason: 'Partially auto-approved because the requester manages one required approval stage',
+                }
+              : {}),
+          approvals: {
+            create: approvalsToCreate.map((approval) => ({
+              approverUserId: approval.approverUserId,
+              projectId: approval.projectId,
+              approvalStage: approval.approvalStage,
+              status: approval.status as any,
+              reviewedAt: approval.reviewedAt,
+              note: approval.note,
+            })),
+          },
         },
-      },
-      include: {
-        asset: true,
-        fromProject: true,
-        toProject: true,
-        approvals: true,
-      },
+        include: {
+          asset: true,
+          fromProject: true,
+          toProject: true,
+          approvals: true,
+        },
+      });
+
+      if (!fullyApproved) {
+        return transferRequest;
+      }
+
+      await tx.asset.update({
+        where: {
+          id: asset.id,
+        },
+        data: {
+          projectId: toProjectId,
+        },
+      });
+
+      await tx.assetAssignmentHistory.create({
+        data: {
+          companyId: asset.companyId,
+          assetId: asset.id,
+          fromProjectId: asset.projectId,
+          toProjectId,
+          transferRequestId: transferRequest.id,
+          assignmentType: 'TRANSFER' as any,
+          reason: 'Asset transfer auto-approved and applied',
+          assignedAt: requestedEffectiveDate || now,
+          assignedByUserId: requestedByUserId,
+        },
+      });
+
+      return tx.assetTransferRequest.findFirst({
+        where: {
+          id: transferRequest.id,
+        },
+        include: {
+          asset: true,
+          fromProject: true,
+          toProject: true,
+          approvals: true,
+        },
+      });
     });
   }
 
@@ -663,6 +834,9 @@ export class AssetsService {
       throw new BadRequestException('Transfer already reviewed');
     }
 
+    const now = new Date();
+    const effectiveDate = request.effectiveDate || now;
+
     const pendingApproval = request.approvals.find(
       (approval) =>
         approval.approverUserId === managerUserId &&
@@ -682,7 +856,7 @@ export class AssetsService {
           data: {
             status: 'REJECTED',
             note: rejectionReason || 'Rejected',
-            reviewedAt: new Date(),
+            reviewedAt: now,
           },
         });
 
@@ -692,7 +866,7 @@ export class AssetsService {
           },
           data: {
             status: 'REJECTED',
-            rejectedAt: new Date(),
+            rejectedAt: now,
             rejectionReason: rejectionReason || 'Rejected',
           },
           include: {
@@ -712,7 +886,7 @@ export class AssetsService {
         },
         data: {
           status: 'APPROVED',
-          reviewedAt: new Date(),
+          reviewedAt: now,
         },
       });
 
@@ -762,7 +936,7 @@ export class AssetsService {
           transferRequestId: request.id,
           assignmentType: 'TRANSFER' as any,
           reason: 'Asset transfer approved and applied',
-          assignedAt: new Date(),
+          assignedAt: effectiveDate,
           assignedByUserId: managerUserId,
         },
       });
@@ -773,8 +947,9 @@ export class AssetsService {
         },
         data: {
           status: 'APPROVED',
-          approvedAt: new Date(),
-          appliedAt: new Date(),
+          approvedAt: now,
+          appliedAt: now,
+          effectiveDate,
           reason: request.reason
             ? `${request.reason}; Final approval by manager ${managerUserId}`
             : `Approved by manager ${managerUserId}`,

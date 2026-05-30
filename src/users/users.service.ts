@@ -152,20 +152,60 @@ export class UsersService {
     };
   }
 
-  private async validateRoleForCompany(roleId: string, company: any) {
-    const selectedRole = await this.prisma.role.findFirst({
-      where: {
-        id: roleId,
-      },
-    });
+  private async validateRoleForCompany(roleIdOrName: string, company: any) {
+    const rawRoleValue = String(roleIdOrName || '').trim();
+    const normalizedRoleValue = this.normalizeRoleName(rawRoleValue);
 
-    if (!selectedRole) {
+    if (!rawRoleValue) {
       throw new BadRequestException('Selected role is not valid');
     }
 
+    const selectedRole = await this.prisma.role.findFirst({
+      where: {
+        OR: [
+          { id: rawRoleValue },
+          {
+            companyId: company.id,
+            name: {
+              equals: rawRoleValue,
+              mode: 'insensitive',
+            },
+          },
+          {
+            companyId: null,
+            name: {
+              equals: rawRoleValue,
+              mode: 'insensitive',
+            },
+          },
+        ],
+      },
+    });
+
+    const fallbackRole = selectedRole
+      ? null
+      : await this.prisma.role.findFirst({
+          where: {
+            OR: [
+              { companyId: company.id },
+              { companyId: null },
+            ],
+          },
+        });
+
+    const effectiveSelectedRole = selectedRole || (
+      fallbackRole && this.normalizeRoleName(fallbackRole.name) === normalizedRoleValue
+        ? fallbackRole
+        : null
+    );
+
+    if (!effectiveSelectedRole) {
+      throw new BadRequestException('Selected role is not valid for this company');
+    }
+
     const roleBelongsToCompany =
-      selectedRole.companyId === null ||
-      selectedRole.companyId === company.id;
+      effectiveSelectedRole.companyId === null ||
+      effectiveSelectedRole.companyId === company.id;
 
     if (!roleBelongsToCompany) {
       throw new BadRequestException(
@@ -173,7 +213,7 @@ export class UsersService {
       );
     }
 
-    const selectedRoleIsPlatform = this.isPlatformRoleName(selectedRole.name);
+    const selectedRoleIsPlatform = this.isPlatformRoleName(effectiveSelectedRole.name);
     const targetIsPlatformConsole = this.isPlatformConsoleCompany(company);
 
     if (selectedRoleIsPlatform && !targetIsPlatformConsole) {
@@ -182,7 +222,7 @@ export class UsersService {
       );
     }
 
-    return selectedRole;
+    return effectiveSelectedRole;
   }
 
   private async resolveEmployeeForUser({
@@ -358,7 +398,7 @@ export class UsersService {
           email,
           phone: createUserDto.phone?.trim() || employee.phone || null,
           passwordHash,
-          roleId: createUserDto.roleId,
+          roleId: selectedRole.id,
           companyId: targetCompanyId,
           createdById: actorUserId || null,
           isActive: true,
@@ -532,8 +572,8 @@ export class UsersService {
           ...(updateUserDto.phone !== undefined
             ? { phone: updateUserDto.phone?.trim() || nextEmployee?.phone || null }
             : {}),
-          ...(updateUserDto.roleId !== undefined
-            ? { roleId: updateUserDto.roleId }
+          ...(updateUserDto.roleId !== undefined && selectedRole
+            ? { roleId: selectedRole.id }
             : {}),
         },
       });

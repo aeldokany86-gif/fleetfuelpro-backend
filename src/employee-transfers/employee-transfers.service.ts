@@ -19,45 +19,202 @@ export class EmployeeTransfersService {
       .replace(/[\s_-]+/g, '');
   }
 
-  private isAdminRole(roleName: string) {
-    const normalized = this.normalizeRoleName(roleName);
-    return normalized === 'ADMIN' || normalized === 'PLATFORMADMIN' || normalized === 'PLATFORMUSER';
-  }
+  private parseEffectiveDate(value?: string | Date | null) {
+    if (!value) return null;
 
-  private isManagerTransfer(request: any) {
-    const reason = String(request?.reason || '').toUpperCase();
-    const employeeRoleName = this.normalizeRoleName(
-      request?.employee?.linkedUser?.role?.name || request?.employee?.jobTitle || '',
-    );
+    const date = value instanceof Date ? value : new Date(value);
 
-    return reason.includes('MANAGER_TRANSFER_ADMIN_APPROVAL') || employeeRoleName === 'MANAGER';
-  }
-
-  private async assertAdminApprover(userId: string) {
-    const user = await this.prisma.user.findFirst({
-      where: {
-        id: userId,
-        deletedAt: null,
-        isActive: true,
-      },
-      include: {
-        role: true,
-      },
-    });
-
-    if (!user || !this.isAdminRole(user.role?.name || '')) {
+    if (Number.isNaN(date.getTime())) {
       throw new BadRequestException(
-        'Only Admin can approve manager transfer',
+        'Effective date is invalid',
       );
     }
 
-    return user;
+    return date;
+  }
+
+  private isAdminRole(roleName: string) {
+    const normalized = this.normalizeRoleName(roleName);
+    return (
+      normalized === 'ADMIN' ||
+      normalized === 'PLATFORMADMIN' ||
+      normalized === 'PLATFORMUSER'
+    );
+  }
+
+  private isOfficerRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === 'OFFICER';
+  }
+
+  private isManagerRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === 'MANAGER';
+  }
+
+  private isTopManagementRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === 'TOPMANAGEMENT';
+  }
+
+  private isAdminApprovalEmployeeRole(roleName: string) {
+    return (
+      this.isManagerRole(roleName) ||
+      this.isTopManagementRole(roleName)
+    );
+  }
+
+  private getEmployeeRoleName(employee: any) {
+    // Manager Transfer must be based on the linked system user role only.
+    // Job title is not a security/approval role and must not trigger Admin approval.
+    return employee?.linkedUser?.role?.name || '';
+  }
+
+  private isAdminApprovalEmployee(employee: any) {
+    return this.isAdminApprovalEmployeeRole(
+      this.getEmployeeRoleName(employee),
+    );
+  }
+
+  private isManagerTransferRequest(request: any) {
+    return (
+      String(request?.reason || '')
+        .toUpperCase()
+        .includes('MANAGER_TRANSFER_ADMIN_APPROVAL') ||
+      String(request?.reason || '')
+        .toUpperCase()
+        .includes('ADMIN_APPROVAL_EMPLOYEE_TRANSFER') ||
+      this.isAdminApprovalEmployee(request?.employee)
+    );
+  }
+
+  private async getRequester(
+    requestedByUserId: string,
+    companyId: string,
+  ) {
+    const requester =
+      await this.prisma.user.findFirst({
+        where: {
+          id: requestedByUserId,
+          companyId,
+          deletedAt: null,
+          isActive: true,
+        },
+        include: {
+          role: true,
+        },
+      });
+
+    if (!requester) {
+      throw new BadRequestException(
+        'Requester user is invalid or inactive',
+      );
+    }
+
+    return requester;
+  }
+
+  private async getActiveAdmins(companyId: string) {
+    const admins =
+      await this.prisma.user.findMany({
+        where: {
+          companyId,
+          deletedAt: null,
+          isActive: true,
+          role: {
+            is: {
+              name: {
+                in: [
+                  'Admin',
+                  'ADMIN',
+                  'PlatformAdmin',
+                  'Platform Admin',
+                  'Platform User',
+                ],
+              },
+            },
+          },
+        },
+        include: {
+          role: true,
+        },
+      });
+
+    const normalizedAdmins = admins.filter((admin) =>
+      this.isAdminRole(admin.role?.name || ''),
+    );
+
+    if (!normalizedAdmins.length) {
+      throw new BadRequestException(
+        'Manager or Top Management transfer requires an active Admin approver',
+      );
+    }
+
+    return normalizedAdmins;
+  }
+
+  private async assertAdminReviewer(
+    reviewerUserId: string,
+    companyId: string,
+  ) {
+    const reviewer =
+      await this.prisma.user.findFirst({
+        where: {
+          id: reviewerUserId,
+          companyId,
+          deletedAt: null,
+          isActive: true,
+        },
+        include: {
+          role: true,
+        },
+      });
+
+    if (!reviewer || !this.isAdminRole(reviewer.role?.name || '')) {
+      throw new BadRequestException(
+        'Only Admin can approve Manager or Top Management transfer',
+      );
+    }
+
+    return reviewer;
+  }
+
+  private buildUniqueApprovers(
+    approvers: Array<{
+      approverUserId: string;
+      projectId: string;
+      approvalStage: string;
+    }>,
+  ) {
+    return approvers.filter(
+      (item, index, list) =>
+        list.findIndex(
+          (candidate) =>
+            candidate.approverUserId ===
+            item.approverUserId,
+        ) === index,
+    );
+  }
+
+  private buildInclude() {
+    return {
+      employee: {
+        include: {
+          linkedUser: {
+            include: {
+              role: true,
+            },
+          },
+        },
+      },
+      fromProject: true,
+      toProject: true,
+      approvals: true,
+    };
   }
 
   async createTransferRequest(
     employeeId: string,
     toProjectId: string,
     requestedByUserId: string,
+    effectiveDate?: string | Date | null,
   ) {
     const employee =
       await this.prisma.employee.findFirst({
@@ -88,10 +245,7 @@ export class EmployeeTransfersService {
       );
     }
 
-    if (
-      employee.projectId ===
-      toProjectId
-    ) {
+    if (employee.projectId === toProjectId) {
       throw new BadRequestException(
         'Employee already belongs to this project',
       );
@@ -103,8 +257,7 @@ export class EmployeeTransfersService {
           id: toProjectId,
           deletedAt: null,
           isActive: true,
-          companyId:
-            employee.companyId,
+          companyId: employee.companyId,
         },
       });
 
@@ -114,112 +267,46 @@ export class EmployeeTransfersService {
       );
     }
 
-    const pending =
-      await this.prisma.employeeTransferRequest.findFirst(
-        {
-          where: {
-            employeeId,
-            status: {
-              in: [
-                'PENDING',
-                'PARTIALLY_APPROVED',
-              ],
-            },
-          },
-        },
-      );
+    const requester = await this.getRequester(
+      requestedByUserId,
+      employee.companyId,
+    );
 
-    if (pending) {
+    const requesterRoleName =
+      requester.role?.name || '';
+
+    if (this.isAdminRole(requesterRoleName)) {
       throw new BadRequestException(
-        'Pending transfer already exists',
+        'Admin cannot create employee transfer requests',
       );
     }
-
-    const employeeRoleName = String(
-      employee.linkedUser?.role?.name ||
-        employee.jobTitle ||
-        '',
-    )
-      .trim()
-      .toUpperCase();
 
     const isManagerTransfer =
-      employeeRoleName === 'MANAGER';
+      this.isAdminApprovalEmployee(employee);
 
-    if (isManagerTransfer) {
-      const activeAdmin = await this.prisma.user.findFirst({
-        where: {
-          companyId: employee.companyId,
-          deletedAt: null,
-          isActive: true,
-          role: {
-            is: {
-              name: {
-                in: ['Admin', 'ADMIN', 'PlatformAdmin', 'Platform User'],
-              },
-            },
-          },
-        },
-      });
-
-      if (!activeAdmin) {
-        throw new BadRequestException(
-          'Manager transfer requires an active Admin approver',
-        );
-      }
-    } else if (
-      !employee.project?.projectManagerId ||
-      !targetProject.projectManagerId
+    if (
+      isManagerTransfer &&
+      !this.isOfficerRole(requesterRoleName)
     ) {
       throw new BadRequestException(
-        'Employee transfer requires approval workflow',
+        'Only Officer can create Manager or Top Management transfer requests',
       );
     }
 
-    return this.prisma.employeeTransferRequest.create(
-      {
-        data: {
-          companyId:
-            employee.companyId,
+    if (
+      !isManagerTransfer &&
+      !this.isOfficerRole(requesterRoleName) &&
+      !this.isManagerRole(requesterRoleName)
+    ) {
+      throw new BadRequestException(
+        'Only Officer or Manager can create employee transfer requests',
+      );
+    }
 
-          employeeId,
-
-          fromProjectId:
-            employee.projectId,
-
-          toProjectId,
-
-          requestedByUserId,
-
-          status:
-            'PENDING',
-
-          reason: isManagerTransfer
-            ? 'MANAGER_TRANSFER_ADMIN_APPROVAL'
-            : null,
-        },
-
-        include: {
-          employee: {
-            include: {
-              linkedUser: {
-                include: {
-                  role: true,
-                },
-              },
-            },
-          },
-          fromProject: true,
-          toProject: true,
-        },
-      },
-    );
-  }
-
-  async getPendingRequests() {
-    return this.prisma.employeeTransferRequest.findMany(
-      {
+    const pending =
+      await this.prisma.employeeTransferRequest.findFirst({
         where: {
+          employeeId,
           status: {
             in: [
               'PENDING',
@@ -227,27 +314,194 @@ export class EmployeeTransfersService {
             ],
           },
         },
+      });
 
-        include: {
-          employee: {
-            include: {
-              linkedUser: {
-                include: {
-                  role: true,
-                },
-              },
-            },
+    if (pending) {
+      throw new BadRequestException(
+        'Pending transfer already exists',
+      );
+    }
+
+    const now = new Date();
+    const requestedEffectiveDate = this.parseEffectiveDate(effectiveDate);
+
+    if (isManagerTransfer) {
+      const admins =
+        await this.getActiveAdmins(employee.companyId);
+
+      return this.prisma.employeeTransferRequest.create({
+        data: {
+          companyId: employee.companyId,
+          employeeId,
+          fromProjectId: employee.projectId!,
+          toProjectId,
+          requestedByUserId,
+          status: 'PENDING',
+          effectiveDate: requestedEffectiveDate,
+          reason: 'ADMIN_APPROVAL_EMPLOYEE_TRANSFER',
+          approvals: {
+            create: admins.map((admin) => ({
+              approverUserId: admin.id,
+              projectId: employee.projectId!,
+              approvalStage: 'Admin Approval',
+              status: 'PENDING' as any,
+              reviewedAt: null,
+              note: 'Manager or Top Management transfer requires Admin approval',
+            })),
           },
-          fromProject: true,
-          toProject: true,
         },
+        include: this.buildInclude(),
+      });
+    }
 
-        orderBy: {
-          createdAt:
-            'desc',
+    if (
+      !employee.project?.projectManagerId ||
+      !targetProject.projectManagerId
+    ) {
+      throw new BadRequestException(
+        'Employee transfer requires source and destination project managers',
+      );
+    }
+
+    const approvers =
+      this.buildUniqueApprovers([
+        {
+          approverUserId:
+            employee.project.projectManagerId,
+          projectId: employee.projectId!,
+          approvalStage: 'Source Project Manager',
         },
+        {
+          approverUserId:
+            targetProject.projectManagerId,
+          projectId: targetProject.id,
+          approvalStage:
+            'Destination Project Manager',
+        },
+      ]);
+
+    const approvalsToCreate = approvers.map(
+      (approver) => {
+        const requesterIsThisProjectManager =
+          approver.approverUserId ===
+          requestedByUserId;
+
+        return {
+          approverUserId: approver.approverUserId,
+          projectId: approver.projectId,
+          approvalStage: approver.approvalStage,
+          status: requesterIsThisProjectManager
+            ? 'APPROVED'
+            : 'PENDING',
+          reviewedAt: requesterIsThisProjectManager
+            ? now
+            : null,
+          note: requesterIsThisProjectManager
+            ? 'Auto-approved because the requester is this project manager'
+            : null,
+        };
       },
     );
+
+    const fullyApproved =
+      approvalsToCreate.every(
+        (approval) =>
+          approval.status === 'APPROVED',
+      );
+
+    const partiallyApproved =
+      approvalsToCreate.some(
+        (approval) =>
+          approval.status === 'APPROVED',
+      );
+
+    return this.prisma.$transaction(async (tx) => {
+      const transferRequest =
+        await tx.employeeTransferRequest.create({
+          data: {
+            companyId: employee.companyId,
+            employeeId,
+            fromProjectId: employee.projectId!,
+            toProjectId,
+            requestedByUserId,
+            status: fullyApproved
+              ? 'APPROVED'
+              : partiallyApproved
+                ? 'PARTIALLY_APPROVED'
+                : 'PENDING',
+            effectiveDate: fullyApproved
+              ? (requestedEffectiveDate || now)
+              : requestedEffectiveDate,
+            ...(fullyApproved
+              ? {
+                  approvedAt: now,
+                  appliedAt: now,
+                  reason:
+                    'Auto-applied because the requester manages all required approval stages',
+                }
+              : partiallyApproved
+                ? {
+                    reason:
+                      'Partially auto-approved because the requester manages one required approval stage',
+                  }
+                : {}),
+            approvals: {
+              create: approvalsToCreate.map(
+                (approval) => ({
+                  approverUserId:
+                    approval.approverUserId,
+                  projectId: approval.projectId,
+                  approvalStage:
+                    approval.approvalStage,
+                  status: approval.status as any,
+                  reviewedAt: approval.reviewedAt,
+                  note: approval.note,
+                }),
+              ),
+            },
+          },
+          include: this.buildInclude(),
+        });
+
+      if (!fullyApproved) {
+        return transferRequest;
+      }
+
+      await tx.employee.update({
+        where: {
+          id: employee.id,
+        },
+        data: {
+          projectId: toProjectId,
+        },
+      });
+
+      return tx.employeeTransferRequest.findFirst({
+        where: {
+          id: transferRequest.id,
+        },
+        include: this.buildInclude(),
+      });
+    }, { timeout: 20000 });
+  }
+
+  async getPendingRequests() {
+    return this.prisma.employeeTransferRequest.findMany({
+      where: {
+        status: {
+          in: [
+            'PENDING',
+            'PARTIALLY_APPROVED',
+          ],
+        },
+      },
+
+      include: this.buildInclude(),
+
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
   }
 
   async reviewTransfer(
@@ -257,27 +511,13 @@ export class EmployeeTransfersService {
     rejectionReason?: string,
   ) {
     const request =
-      await this.prisma.employeeTransferRequest.findFirst(
-        {
-          where: {
-            id: transferId,
-          },
-
-          include: {
-            employee: {
-            include: {
-              linkedUser: {
-                include: {
-                  role: true,
-                },
-              },
-            },
-          },
-            fromProject: true,
-            toProject: true,
-          },
+      await this.prisma.employeeTransferRequest.findFirst({
+        where: {
+          id: transferId,
         },
-      );
+
+        include: this.buildInclude(),
+      });
 
     if (!request) {
       throw new NotFoundException(
@@ -296,166 +536,211 @@ export class EmployeeTransfersService {
       );
     }
 
-    const fromManagerId =
-      request.fromProject?.projectManagerId;
-
-    const toManagerId =
-      request.toProject?.projectManagerId;
-
-    const isManagerTransfer = this.isManagerTransfer(request);
+    const now = new Date();
+    const isManagerTransfer =
+      this.isManagerTransferRequest(request);
 
     if (isManagerTransfer) {
-      await this.assertAdminApprover(managerUserId);
-    } else {
-      const allowed =
-        [
-          fromManagerId,
-          toManagerId,
-        ].includes(
-          managerUserId,
+      await this.assertAdminReviewer(
+        managerUserId,
+        request.companyId,
+      );
+
+      const adminPendingApproval =
+        request.approvals.find(
+          (approval) =>
+            approval.approverUserId ===
+              managerUserId &&
+            approval.status === 'PENDING',
+        ) ||
+        request.approvals.find(
+          (approval) =>
+            approval.approvalStage ===
+              'Admin Approval' &&
+            approval.status === 'PENDING',
         );
 
-      if (!allowed) {
+      if (!adminPendingApproval) {
         throw new BadRequestException(
-          'User cannot approve this transfer',
+          'No pending Admin approval found for this Manager or Top Management transfer',
         );
       }
+
+      if (!approve) {
+        return this.prisma.$transaction(async (tx) => {
+          await tx.employeeTransferApproval.update({
+            where: {
+              id: adminPendingApproval.id,
+            },
+            data: {
+              status: 'REJECTED',
+              note: rejectionReason || 'Rejected',
+              reviewedAt: now,
+            },
+          });
+
+          return tx.employeeTransferRequest.update({
+            where: {
+              id: transferId,
+            },
+            data: {
+              status: 'REJECTED',
+              rejectedAt: now,
+              rejectionReason:
+                rejectionReason || 'Rejected',
+            },
+            include: this.buildInclude(),
+          });
+        }, { timeout: 20000 });
+      }
+
+      return this.prisma.$transaction(async (tx) => {
+        await tx.employeeTransferApproval.update({
+          where: {
+            id: adminPendingApproval.id,
+          },
+          data: {
+            approverUserId: managerUserId,
+            status: 'APPROVED',
+            reviewedAt: now,
+            note: request.reason
+              ? `${request.reason}; Approved by Admin ${managerUserId}`
+              : `Approved by Admin ${managerUserId}`,
+          },
+        });
+
+        await tx.employee.update({
+          where: {
+            id: request.employeeId,
+          },
+          data: {
+            projectId: request.toProjectId,
+          },
+        });
+
+        return tx.employeeTransferRequest.update({
+          where: {
+            id: transferId,
+          },
+          data: {
+            status: 'APPROVED',
+            approvedAt: now,
+            appliedAt: now,
+            effectiveDate: request.effectiveDate || now,
+            reason: `Manager or Top Management transfer approved by Admin ${managerUserId}`,
+          },
+          include: this.buildInclude(),
+        });
+      }, { timeout: 20000 });
+    }
+
+    const pendingApproval =
+      request.approvals.find(
+        (approval) =>
+          approval.approverUserId ===
+            managerUserId &&
+          approval.status === 'PENDING',
+      );
+
+    if (!pendingApproval) {
+      throw new BadRequestException(
+        'User cannot approve this employee transfer',
+      );
     }
 
     if (!approve) {
-      return this.prisma.employeeTransferRequest.update(
-        {
+      return this.prisma.$transaction(async (tx) => {
+        await tx.employeeTransferApproval.update({
           where: {
-            id:
-              transferId,
+            id: pendingApproval.id,
+          },
+          data: {
+            status: 'REJECTED',
+            note: rejectionReason || 'Rejected',
+            reviewedAt: now,
+          },
+        });
+
+        return tx.employeeTransferRequest.update({
+          where: {
+            id: transferId,
           },
 
           data: {
-            status:
-              'REJECTED',
-
-            rejectedAt:
-              new Date(),
-
+            status: 'REJECTED',
+            rejectedAt: now,
             rejectionReason:
-              rejectionReason ||
-              'Rejected',
+              rejectionReason || 'Rejected',
           },
 
-          include: {
-            employee: {
-            include: {
-              linkedUser: {
-                include: {
-                  role: true,
-                },
-              },
-            },
-          },
-            fromProject: true,
-            toProject: true,
-          },
-        },
-      );
+          include: this.buildInclude(),
+        });
+      }, { timeout: 20000 });
     }
 
-    const sameManagerForBothProjects =
-      fromManagerId &&
-      toManagerId &&
-      fromManagerId === toManagerId;
+    return this.prisma.$transaction(async (tx) => {
+      await tx.employeeTransferApproval.update({
+        where: {
+          id: pendingApproval.id,
+        },
+        data: {
+          status: 'APPROVED',
+          reviewedAt: now,
+        },
+      });
 
-    const shouldApplyTransfer =
-      isManagerTransfer ||
-      request.status ===
-        'PARTIALLY_APPROVED' ||
-      sameManagerForBothProjects;
-
-    if (!shouldApplyTransfer) {
-      return this.prisma.employeeTransferRequest.update(
-        {
+      const approvals =
+        await tx.employeeTransferApproval.findMany({
           where: {
-            id:
-              transferId,
+            transferRequestId: transferId,
           },
+        });
 
+      const fullyApproved =
+        approvals.every(
+          (approval) =>
+            approval.status === 'APPROVED',
+        );
+
+      if (!fullyApproved) {
+        return tx.employeeTransferRequest.update({
+          where: {
+            id: transferId,
+          },
           data: {
-            status:
-              'PARTIALLY_APPROVED',
-
-            reason:
-              `First approval by manager ${managerUserId}`,
+            status: 'PARTIALLY_APPROVED',
+            reason: `Approval stage completed by manager ${managerUserId}`,
           },
+          include: this.buildInclude(),
+        });
+      }
 
-          include: {
-            employee: {
-            include: {
-              linkedUser: {
-                include: {
-                  role: true,
-                },
-              },
-            },
-          },
-            fromProject: true,
-            toProject: true,
-          },
-        },
-      );
-    }
-
-    await this.prisma.employee.update(
-      {
+      await tx.employee.update({
         where: {
-          id:
-            request.employeeId,
+          id: request.employeeId,
+        },
+        data: {
+          projectId: request.toProjectId,
+        },
+      });
+
+      return tx.employeeTransferRequest.update({
+        where: {
+          id: transferId,
         },
 
         data: {
-          projectId:
-            request.toProjectId,
-        },
-      },
-    );
-
-    return this.prisma.employeeTransferRequest.update(
-      {
-        where: {
-          id:
-            transferId,
+          status: 'APPROVED',
+          approvedAt: now,
+          appliedAt: now,
+          effectiveDate: request.effectiveDate || now,
+          reason: request.reason
+            ? `${request.reason}; Final approval by manager ${managerUserId}`
+            : `Approved by manager ${managerUserId}`,
         },
 
-        data: {
-          status:
-            'APPROVED',
-
-          approvedAt:
-            new Date(),
-
-          appliedAt:
-            new Date(),
-
-          reason:
-            isManagerTransfer
-              ? `Manager transfer approved by Admin ${managerUserId}`
-              : request.reason
-              ? `${request.reason}; Final approval by manager ${managerUserId}`
-              : `Approved by manager ${managerUserId}`,
-        },
-
-        include: {
-          employee: {
-            include: {
-              linkedUser: {
-                include: {
-                  role: true,
-                },
-              },
-            },
-          },
-          fromProject: true,
-          toProject: true,
-        },
-      },
-    );
+        include: this.buildInclude(),
+      });
+    }, { timeout: 20000 });
   }
 }

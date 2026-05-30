@@ -5,7 +5,7 @@ generator client {
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+  // directUrl = env("DIRECT_URL")
 }
 
 model Company {
@@ -30,7 +30,6 @@ model Company {
   stationTransferRequests  StationTransferRequest[]
   stationAssignmentHistory StationAssignmentHistory[]
   stationStockMovements    StationStockMovement[]
-  stationPriceHistory      StationPriceHistory[]
   projectFuelPriceHistory  ProjectFuelPriceHistory[]
   employees                Employee[]
   employeeTransferRequests EmployeeTransferRequest[]
@@ -136,7 +135,6 @@ model User {
   assetOdometerResets        AssetOdometerReset[]
   stationCounterResets       StationCounterReset[]
   stationStockMovements      StationStockMovement[]
-  stationPriceHistory        StationPriceHistory[]
   projectFuelPriceHistory    ProjectFuelPriceHistory[]
   assetTransferApprovals     AssetTransferApproval[]    @relation("AssetTransferApprover")
   stationTransferApprovals   StationTransferApproval[]  @relation("StationTransferApprover")
@@ -206,6 +204,7 @@ model EmployeeTransferRequest {
   rejectedAt        DateTime?
   cancelledAt       DateTime?
   appliedAt         DateTime?
+  effectiveDate     DateTime?
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
   approvals         EmployeeTransferApproval[]
@@ -304,6 +303,7 @@ model AssetTransferRequest {
   rejectedAt        DateTime?
   cancelledAt       DateTime?
   appliedAt         DateTime?
+  effectiveDate     DateTime?
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
   approvals         AssetTransferApproval[]
@@ -392,7 +392,6 @@ model Station {
   openingBalance      Float                      @default(0)
   currentStock        Float                      @default(0)
   currentCounter      Float                      @default(0)
-  currentPrice        Float                      @default(0)
   status              StationStatus              @default(ACTIVE)
   projectId           String?
   createdById         String?
@@ -404,7 +403,6 @@ model Station {
   createdBy           User?                      @relation("StationCreatedBy", fields: [createdById], references: [id])
   counterResetHistory StationCounterReset[]
   stockMovements      StationStockMovement[]
-  priceHistory        StationPriceHistory[]
   assignmentHistory   StationAssignmentHistory[]
   transferRequests    StationTransferRequest[]
 
@@ -457,27 +455,6 @@ model StationStockMovement {
   @@index([referenceType, referenceId])
 }
 
-model StationPriceHistory {
-  id              String   @id @default(cuid())
-  stationId       String?
-  companyId       String
-  country         String?
-  currency        String
-  pricePerLiter   Float
-  effectiveFrom   DateTime
-  reason          String?
-  createdByUserId String?
-  createdAt       DateTime @default(now())
-  station         Station? @relation(fields: [stationId], references: [id])
-  company         Company  @relation(fields: [companyId], references: [id])
-  createdBy       User?    @relation(fields: [createdByUserId], references: [id])
-
-  @@index([stationId])
-  @@index([companyId])
-  @@index([country])
-  @@index([effectiveFrom])
-}
-
 model ProjectFuelPriceHistory {
   id                String   @id @default(cuid())
   projectId         String
@@ -515,6 +492,7 @@ model StationTransferRequest {
   rejectedAt        DateTime?
   cancelledAt       DateTime?
   appliedAt         DateTime?
+  effectiveDate     DateTime?
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
   approvals         StationTransferApproval[]

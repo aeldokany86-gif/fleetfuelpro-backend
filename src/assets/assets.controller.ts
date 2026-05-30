@@ -108,12 +108,14 @@ export class AssetsController {
     body: {
       toProjectId: string;
       requestedByUserId: string;
+      effectiveDate?: string;
     },
   ) {
     return this.assetsService.createTransferRequest(
       id,
       body.toProjectId,
       body.requestedByUserId,
+      body.effectiveDate,
     );
   }
 

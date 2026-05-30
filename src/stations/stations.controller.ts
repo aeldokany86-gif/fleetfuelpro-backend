@@ -47,14 +47,6 @@ export class StationsController {
     return this.stationsService.getPendingTransferRequests();
   }
 
-  @Get(':id/effective-price')
-  getEffectivePrice(
-    @Param('id') id: string,
-    @Query('operationDate') operationDate?: string,
-  ) {
-    return this.stationsService.getEffectivePrice(id, operationDate);
-  }
-
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.stationsService.findOne(id);
@@ -133,27 +125,6 @@ export class StationsController {
     },
   ) {
     return this.stationsService.zeroBalance(id, body);
-  }
-
-  @Post(':id/update-price')
-  updatePrice(
-    @Param('id') id: string,
-    @Body()
-    body: {
-      pricePerLiter: number;
-      effectiveFrom?: string;
-      currency?: string;
-      country?: string;
-      reason?: string;
-      createdByUserId?: string;
-    },
-  ) {
-    return this.stationsService.updatePrice(id, body);
-  }
-
-  @Get(':id/price-history')
-  getPriceHistory(@Param('id') id: string) {
-    return this.stationsService.getPriceHistory(id);
   }
 
   @Post(':id/transfer')

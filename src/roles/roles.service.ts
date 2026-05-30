@@ -176,10 +176,16 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
 export class RolesService {
   constructor(private prisma: PrismaService) {}
 
-  private isPlatformUser(roleName: string) {
+  private normalizeRoleName(roleName: string) {
     return String(roleName || '')
       .trim()
-      .toLowerCase() === 'platform user';
+      .toLowerCase()
+      .replace(/[\s_-]+/g, '');
+  }
+
+  private isPlatformUser(roleName: string) {
+    const normalizedRole = this.normalizeRoleName(roleName);
+    return normalizedRole === 'platformuser' || normalizedRole === 'platformadmin';
   }
 
   private async ensureDefaultRolesForCompany(companyId: string) {
@@ -279,7 +285,18 @@ export class RolesService {
       throw new BadRequestException('Company ID is required');
     }
 
-    await this.ensureDefaultRolesForCompany(targetCompanyId);
+    const existingRoleCount = await this.prisma.role.count({
+      where: {
+        companyId: targetCompanyId,
+        name: {
+          in: DEFAULT_COMPANY_ROLES.map(([name]) => name),
+        },
+      },
+    });
+
+    if (existingRoleCount < DEFAULT_COMPANY_ROLES.length) {
+      await this.ensureDefaultRolesForCompany(targetCompanyId);
+    }
 
     return this.prisma.role.findMany({
       where: {
