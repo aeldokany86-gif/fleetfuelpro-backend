@@ -3,8 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
   // directUrl = env("DIRECT_URL")
 }
 
@@ -36,6 +36,7 @@ model Company {
   projects                 Project[]
   roles                    Role[]
   users                    User[]
+  operations               Operation[]
 }
 
 model Project {
@@ -71,6 +72,7 @@ model Project {
   employeeTransferApprovals    EmployeeTransferApproval[] @relation("EmployeeTransferApprovalProject")
   employeeTransferRequestsFrom EmployeeTransferRequest[]  @relation("EmployeeTransferFromProject")
   employeeTransferRequestsTo   EmployeeTransferRequest[]  @relation("EmployeeTransferToProject")
+  operationApprovals           OperationApproval[]        @relation("OperationApprovalProject")
   company                      Company                    @relation(fields: [companyId], references: [id])
   createdBy                    User?                      @relation("ProjectCreatedBy", fields: [createdById], references: [id])
   projectManager               User?                      @relation("ProjectManager", fields: [projectManagerId], references: [id])
@@ -148,6 +150,8 @@ model User {
   linkedEmployee             Employee?                  @relation("EmployeeLinkedUser")
   employeeTransferApprovals  EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
   requestedEmployeeTransfers EmployeeTransferRequest[]  @relation("EmployeeTransferRequestedBy")
+  requestedOperations        Operation[]                @relation("OperationRequestedBy")
+  operationApprovals         OperationApproval[]        @relation("OperationApprover")
   createdProjects            Project[]                  @relation("ProjectCreatedBy")
   managedProjects            Project[]                  @relation("ProjectManager")
   refreshTokens              RefreshToken[]
@@ -264,6 +268,7 @@ model Asset {
   odometerResetHistory AssetOdometerReset[]
   assignmentHistory    AssetAssignmentHistory[]
   transferRequests     AssetTransferRequest[]
+  operations           Operation[]
 
   @@unique([companyId, assetId])
   @@index([companyId])
@@ -383,28 +388,30 @@ enum AssetStatus {
 }
 
 model Station {
-  id                  String                     @id @default(cuid())
-  companyId           String
-  stationId           String
-  name                String?
-  type                String?
-  capacity            Float?
-  openingBalance      Float                      @default(0)
-  currentStock        Float                      @default(0)
-  currentCounter      Float                      @default(0)
-  status              StationStatus              @default(ACTIVE)
-  projectId           String?
-  createdById         String?
-  createdAt           DateTime                   @default(now())
-  updatedAt           DateTime                   @updatedAt
-  deletedAt           DateTime?
-  company             Company                    @relation(fields: [companyId], references: [id])
-  project             Project?                   @relation(fields: [projectId], references: [id])
-  createdBy           User?                      @relation("StationCreatedBy", fields: [createdById], references: [id])
-  counterResetHistory StationCounterReset[]
-  stockMovements      StationStockMovement[]
-  assignmentHistory   StationAssignmentHistory[]
-  transferRequests    StationTransferRequest[]
+  id                    String                     @id @default(cuid())
+  companyId             String
+  stationId             String
+  name                  String?
+  type                  String?
+  capacity              Float?
+  openingBalance        Float                      @default(0)
+  currentStock          Float                      @default(0)
+  currentCounter        Float                      @default(0)
+  status                StationStatus              @default(ACTIVE)
+  projectId             String?
+  createdById           String?
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+  deletedAt             DateTime?
+  company               Company                    @relation(fields: [companyId], references: [id])
+  project               Project?                   @relation(fields: [projectId], references: [id])
+  createdBy             User?                      @relation("StationCreatedBy", fields: [createdById], references: [id])
+  counterResetHistory   StationCounterReset[]
+  stockMovements        StationStockMovement[]
+  assignmentHistory     StationAssignmentHistory[]
+  transferRequests      StationTransferRequest[]
+  sourceOperations      Operation[]                @relation("OperationSourceStation")
+  destinationOperations Operation[]                @relation("OperationDestinationStation")
 
   @@unique([companyId, stationId])
   @@index([companyId])
@@ -453,6 +460,69 @@ model StationStockMovement {
   @@index([movementType])
   @@index([movementAt])
   @@index([referenceType, referenceId])
+}
+
+model Operation {
+  id                   String              @id @default(cuid())
+  companyId            String
+  operationNo          String
+  type                 OperationType
+  status               OperationStatus     @default(COMPLETED)
+  sourceStationId      String?
+  destinationStationId String?
+  assetId              String?
+  quantity             Float
+  odometer             Float?
+  stationCounter       Float?
+  externalStationName  String?
+  invoiceNumber        String?
+  notes                String?
+  attachments          Json?
+  requestedByUserId    String
+  completedAt          DateTime?
+  approvedAt           DateTime?
+  rejectedAt           DateTime?
+  cancelledAt          DateTime?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  company              Company             @relation(fields: [companyId], references: [id])
+  sourceStation        Station?            @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
+  destinationStation   Station?            @relation("OperationDestinationStation", fields: [destinationStationId], references: [id])
+  asset                Asset?              @relation(fields: [assetId], references: [id])
+  requestedBy          User                @relation("OperationRequestedBy", fields: [requestedByUserId], references: [id])
+  approvals            OperationApproval[]
+
+  @@unique([companyId, operationNo])
+  @@index([companyId])
+  @@index([type])
+  @@index([status])
+  @@index([sourceStationId])
+  @@index([destinationStationId])
+  @@index([assetId])
+  @@index([requestedByUserId])
+  @@index([createdAt])
+}
+
+model OperationApproval {
+  id             String                  @id @default(cuid())
+  operationId    String
+  approverUserId String
+  projectId      String
+  approvalStage  String
+  status         OperationApprovalStatus @default(PENDING)
+  note           String?
+  reviewedAt     DateTime?
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  operation      Operation               @relation(fields: [operationId], references: [id])
+  approver       User                    @relation("OperationApprover", fields: [approverUserId], references: [id])
+  project        Project                 @relation("OperationApprovalProject", fields: [projectId], references: [id])
+
+  @@unique([operationId, approverUserId, projectId])
+  @@index([operationId])
+  @@index([approverUserId])
+  @@index([projectId])
+  @@index([status])
 }
 
 model ProjectFuelPriceHistory {
@@ -595,6 +665,29 @@ enum StationTransferStatus {
 }
 
 enum StationTransferApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum OperationType {
+  DIRECT_REFUEL
+  EXTERNAL_DIRECT_REFUEL
+  INTERNAL_TRANSFER
+  EXTERNAL_SUPPLY
+  EXTERNAL_TRANSFER
+}
+
+enum OperationStatus {
+  PENDING
+  PARTIALLY_APPROVED
+  APPROVED
+  REJECTED
+  COMPLETED
+  CANCELLED
+}
+
+enum OperationApprovalStatus {
   PENDING
   APPROVED
   REJECTED

@@ -128,20 +128,22 @@ export class StationsController {
   }
 
   @Post(':id/transfer')
-  createTransfer(
-    @Param('id') id: string,
-    @Body()
-    body: {
-      toProjectId: string;
-      requestedByUserId: string;
-    },
-  ) {
-    return this.stationsService.createTransferRequest(
-      id,
-      body.toProjectId,
-      body.requestedByUserId,
-    );
-  }
+createTransfer(
+  @Param('id') id: string,
+  @Body()
+  body: {
+    toProjectId: string;
+    requestedByUserId: string;
+    effectiveDate?: string;
+  },
+) {
+  return this.stationsService.createTransferRequest(
+    id,
+    body.toProjectId,
+    body.requestedByUserId,
+    body.effectiveDate,
+  );
+}
 
   @Patch('transfers/:id/review')
   reviewTransfer(

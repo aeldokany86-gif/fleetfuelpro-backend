@@ -13,9 +13,22 @@ import { EmployeesModule } from './employees/employees.module';
 import { EmployeeTransfersModule } from './employee-transfers/employee-transfers.module';
 import { AssetsModule } from './assets/assets.module';
 import { StationsModule } from './stations/stations.module';
+import { OperationsModule } from './operations/operations.module';
 
 @Module({
-  imports: [PrismaModule, UsersModule, AuthModule, RolesModule, CompaniesModule, ProjectsModule, EmployeesModule, EmployeeTransfersModule, AssetsModule, StationsModule],
+  imports: [
+    PrismaModule,
+    UsersModule,
+    AuthModule,
+    RolesModule,
+    CompaniesModule,
+    ProjectsModule,
+    EmployeesModule,
+    EmployeeTransfersModule,
+    AssetsModule,
+    StationsModule,
+    OperationsModule,
+  ],
   controllers: [AppController, EmployeesController],
   providers: [AppService, EmployeesService],
 })

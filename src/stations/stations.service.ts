@@ -33,6 +33,74 @@ export class StationsService {
     return date;
   }
 
+  private parseNullableDate(value?: string) {
+    if (!value) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      throw new BadRequestException('Invalid effective date');
+    }
+    return date;
+  }
+
+  private normalizeRoleName(roleName: string) {
+    return String(roleName || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s_-]+/g, '');
+  }
+
+  private isAdminRole(roleName: string) {
+    const normalized = this.normalizeRoleName(roleName);
+    return (
+      normalized === 'ADMIN' ||
+      normalized === 'PLATFORMADMIN' ||
+      normalized === 'PLATFORMUSER'
+    );
+  }
+
+  private isOfficerRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === 'OFFICER';
+  }
+
+  private isManagerRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === 'MANAGER';
+  }
+
+  private async getRequester(requestedByUserId: string, companyId: string) {
+    const requester = await this.prisma.user.findFirst({
+      where: {
+        id: requestedByUserId,
+        companyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      include: {
+        role: true,
+      },
+    });
+
+    if (!requester) {
+      throw new BadRequestException('Requester user is invalid or inactive');
+    }
+
+    return requester;
+  }
+
+  private buildUniqueApprovers(
+    approvers: Array<{
+      approverUserId: string;
+      projectId: string;
+      approvalStage: string;
+    }>,
+  ) {
+    return approvers.filter(
+      (item, index, list) =>
+        list.findIndex(
+          (candidate) => candidate.approverUserId === item.approverUserId,
+        ) === index,
+    );
+  }
+
   private async ensureCompany(companyId: string) {
     const company = await this.prisma.company.findFirst({
       where: {
@@ -194,6 +262,30 @@ export class StationsService {
   }) {
     await this.ensureCompany(body.companyId);
 
+    if (!body.createdById) {
+      throw new BadRequestException('Creator user is required');
+    }
+
+    const creator = await this.prisma.user.findFirst({
+      where: {
+        id: body.createdById,
+        companyId: body.companyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      include: {
+        role: true,
+      },
+    });
+
+    if (!creator) {
+      throw new BadRequestException('Creator user is invalid or inactive');
+    }
+
+    if (!this.isAdminRole(creator.role?.name || '')) {
+      throw new BadRequestException('Only Admin can create stations');
+    }
+
     const stationId = this.normalizeStationId(body.stationId);
     if (!stationId) {
       throw new BadRequestException('Station ID is required');
@@ -232,63 +324,70 @@ export class StationsService {
       throw new BadRequestException('Station counter must be a valid positive number');
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const createdStation = await tx.station.create({
-        data: {
-          companyId: body.companyId,
-          stationId,
-          name: body.name?.trim() || null,
-          type: body.type?.trim() || null,
-          capacity:
-            body.capacity === undefined || body.capacity === null
-              ? null
-              : Number(body.capacity),
-          openingBalance,
-          currentStock: openingBalance,
-          currentCounter,
-          projectId: body.projectId || null,
-          status: this.mapStationStatus(body.status) as any,
-          createdById: body.createdById || null,
-        },
-        include: {
-          company: true,
-          project: true,
-        },
-      });
+    const createdStation = await this.prisma.station.create({
+      data: {
+        companyId: body.companyId,
+        stationId,
+        name: body.name?.trim() || null,
+        type: body.type?.trim() || null,
+        capacity:
+          body.capacity === undefined || body.capacity === null
+            ? null
+            : Number(body.capacity),
+        openingBalance,
+        currentStock: openingBalance,
+        currentCounter,
+        projectId: body.projectId || null,
+        status: this.mapStationStatus(body.status) as any,
+        createdById: body.createdById || null,
+      },
+      include: {
+        company: true,
+        project: true,
+      },
+    });
 
-      await tx.stationStockMovement.create({
-        data: {
-          companyId: body.companyId,
-          stationId: createdStation.id,
-          movementType: 'OPENING_BALANCE' as any,
-          quantity: openingBalance,
-          balanceBefore: 0,
-          balanceAfter: openingBalance,
-          referenceType: 'STATION_CREATE',
-          referenceId: createdStation.id,
-          reason: 'Initial station opening balance',
-          createdByUserId: body.createdById || null,
-        },
-      });
-
-      if (body.projectId) {
-        await tx.stationAssignmentHistory.create({
+    // Keep the user-facing create operation fast. History/supporting records are
+    // written after the station is created and should not hold the main response.
+    // Run them sequentially instead of Promise.all to avoid stressing the Supabase pooler.
+    void (async () => {
+      try {
+        await this.prisma.stationStockMovement.create({
           data: {
             companyId: body.companyId,
             stationId: createdStation.id,
-            fromProjectId: null,
-            toProjectId: body.projectId,
-            transferRequestId: null,
-            assignmentType: 'INITIAL_ASSIGNMENT' as any,
-            reason: 'Initial station project assignment',
-            assignedAt: new Date(),
-            assignedByUserId: body.createdById || null,
+            movementType: 'OPENING_BALANCE' as any,
+            quantity: openingBalance,
+            balanceBefore: 0,
+            balanceAfter: openingBalance,
+            referenceType: 'STATION_CREATE',
+            referenceId: createdStation.id,
+            reason: 'Initial station opening balance',
+            createdByUserId: body.createdById || null,
           },
         });
-      }
 
-      return createdStation;
-    });
+        if (body.projectId) {
+          await this.prisma.stationAssignmentHistory.create({
+            data: {
+              companyId: body.companyId,
+              stationId: createdStation.id,
+              fromProjectId: null,
+              toProjectId: body.projectId,
+              transferRequestId: null,
+              assignmentType: 'INITIAL_ASSIGNMENT' as any,
+              reason: 'Initial station project assignment',
+              assignedAt: new Date(),
+              assignedByUserId: body.createdById || null,
+            },
+          });
+        }
+      } catch (error) {
+        console.warn('Station post-create history write failed', error);
+      }
+    })();
+
+    return createdStation;
   }
 
   async update(
@@ -683,6 +782,13 @@ export class StationsService {
       }
 
       const balanceBefore = Number(station.currentStock || 0);
+
+      if (balanceBefore <= 0) {
+        throw new BadRequestException(
+          'Current station stock is already zero',
+        );
+      }
+
       const quantity = -balanceBefore;
       const balanceAfter = 0;
 
@@ -726,6 +832,7 @@ export class StationsService {
     stationId: string,
     toProjectId: string,
     requestedByUserId: string,
+    effectiveDate?: string,
   ) {
     const station = await this.prisma.station.findFirst({
       where: {
@@ -762,6 +869,28 @@ export class StationsService {
       throw new BadRequestException('Target project is invalid');
     }
 
+    const requester = await this.getRequester(
+      requestedByUserId,
+      station.companyId,
+    );
+
+    const requesterRoleName = requester.role?.name || '';
+
+    if (this.isAdminRole(requesterRoleName)) {
+      throw new BadRequestException(
+        'Admin cannot create station transfer requests',
+      );
+    }
+
+    if (
+      !this.isOfficerRole(requesterRoleName) &&
+      !this.isManagerRole(requesterRoleName)
+    ) {
+      throw new BadRequestException(
+        'Only Officer or Manager can create station transfer requests',
+      );
+    }
+
     if (!station.project?.projectManagerId || !targetProject.projectManagerId) {
       throw new BadRequestException(
         'Station transfer requires source and destination project managers',
@@ -782,8 +911,10 @@ export class StationsService {
     }
 
     const now = new Date();
+    const requestedEffectiveDate = this.parseNullableDate(effectiveDate);
+    const effectiveDateToApply = requestedEffectiveDate || now;
 
-    const approvers = [
+    const approvers = this.buildUniqueApprovers([
       {
         approverUserId: station.project.projectManagerId,
         projectId: station.projectId,
@@ -794,15 +925,7 @@ export class StationsService {
         projectId: targetProject.id,
         approvalStage: 'Destination Project Manager',
       },
-    ].filter(
-      (item, index, list) =>
-        // If the same manager is responsible for both source and destination projects,
-        // one approval is enough.
-        list.findIndex(
-          (candidate) =>
-            candidate.approverUserId === item.approverUserId,
-        ) === index,
-    );
+    ]);
 
     const approvalsToCreate = approvers.map((approver) => {
       const requesterIsThisProjectManager =
@@ -836,6 +959,7 @@ export class StationsService {
           fromProjectId: station.projectId!,
           toProjectId,
           requestedByUserId,
+          effectiveDate: requestedEffectiveDate,
           status: fullyApproved
             ? 'APPROVED'
             : partiallyApproved
@@ -844,7 +968,7 @@ export class StationsService {
           ...(fullyApproved
             ? {
                 approvedAt: now,
-                appliedAt: now,
+                appliedAt: effectiveDateToApply,
                 reason: 'Auto-applied because the requester manages all required approval stages',
               }
             : partiallyApproved
@@ -893,7 +1017,7 @@ export class StationsService {
           transferRequestId: transferRequest.id,
           assignmentType: 'TRANSFER' as any,
           reason: 'Station transfer auto-approved and applied',
-          assignedAt: now,
+          assignedAt: effectiveDateToApply,
           assignedByUserId: requestedByUserId,
         },
       });
@@ -957,6 +1081,9 @@ export class StationsService {
       throw new BadRequestException('Transfer already reviewed');
     }
 
+    const now = new Date();
+    const effectiveDateToApply = request.effectiveDate || now;
+
     const pendingApproval = request.approvals.find(
       (approval) =>
         approval.approverUserId === managerUserId &&
@@ -968,15 +1095,16 @@ export class StationsService {
     }
 
     if (!approve) {
-      return this.prisma.$transaction(async (tx) => {
-        await tx.stationTransferApproval.update({
+      return this.prisma.$transaction(
+        async (tx) => {
+          await tx.stationTransferApproval.update({
           where: {
             id: pendingApproval.id,
           },
           data: {
             status: 'REJECTED',
             note: rejectionReason || 'Rejected',
-            reviewedAt: new Date(),
+            reviewedAt: now,
           },
         });
 
@@ -986,7 +1114,7 @@ export class StationsService {
           },
           data: {
             status: 'REJECTED',
-            rejectedAt: new Date(),
+            rejectedAt: now,
             rejectionReason: rejectionReason || 'Rejected',
           },
           include: {
@@ -996,10 +1124,13 @@ export class StationsService {
             approvals: true,
           },
         });
-      });
+        },
+        { timeout: 15000 },
+      );
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    return this.prisma.$transaction(
+      async (tx) => {
       await tx.stationTransferApproval.update({
         where: {
           id: pendingApproval.id,
@@ -1056,7 +1187,7 @@ export class StationsService {
           transferRequestId: request.id,
           assignmentType: 'TRANSFER' as any,
           reason: 'Station transfer approved and applied',
-          assignedAt: new Date(),
+          assignedAt: effectiveDateToApply,
           assignedByUserId: managerUserId,
         },
       });
@@ -1067,8 +1198,8 @@ export class StationsService {
         },
         data: {
           status: 'APPROVED',
-          approvedAt: new Date(),
-          appliedAt: new Date(),
+          approvedAt: now,
+          appliedAt: effectiveDateToApply,
           reason: request.reason
             ? `${request.reason}; Final approval by manager ${managerUserId}`
             : `Approved by manager ${managerUserId}`,
@@ -1080,7 +1211,9 @@ export class StationsService {
           approvals: true,
         },
       });
-    });
+      },
+      { timeout: 15000 },
+    );
   }
 
   async hardDelete(id: string) {
