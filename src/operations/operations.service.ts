@@ -357,6 +357,7 @@ async findAll(request?: RequestLike) {
       sourceStation: true,
       destinationStation: true,
       asset: true,
+      fuelPriceHistory: true,
     },
 
     orderBy: {
@@ -414,6 +415,7 @@ async findPendingApprovals(request?: RequestLike) {
       sourceStation: true,
       destinationStation: true,
       asset: true,
+      fuelPriceHistory: true,
     },
 
     orderBy: {
@@ -442,6 +444,13 @@ async findPendingApprovals(request?: RequestLike) {
       const approvalPlan = await this.buildApprovalPlan(tx, currentUser, type, entities);
       const status = this.getInitialOperationStatus(type, currentUser, approvalPlan);
       const completedAt = status === 'COMPLETED' ? new Date() : null;
+      const costSnapshot = await this.resolveOperationCostSnapshot(tx, {
+        type,
+        entities,
+        quantity: Number(dto.quantity),
+        operationDate: new Date(),
+        externalInvoiceAmount: dto.externalInvoiceAmount,
+      });
 
       const operation = await (tx as any).operation.create({
         data: {
@@ -465,6 +474,9 @@ async findPendingApprovals(request?: RequestLike) {
           invoiceNumber: dto.invoiceNumber || null,
           notes: dto.notes || null,
           attachments: dto.attachments || undefined,
+          fuelPriceHistoryId: costSnapshot.fuelPriceHistoryId,
+          pricePerLiterAtOperation: costSnapshot.pricePerLiterAtOperation,
+          totalCostAtOperation: costSnapshot.totalCostAtOperation,
           requestedByUserId: currentUser.id,
           completedAt,
           approvedAt:
@@ -557,6 +569,7 @@ async findPendingApprovals(request?: RequestLike) {
         stationCounter: dto.stationCounter ?? null,
         externalStationName: dto.externalStationName || null,
         invoiceNumber: dto.invoiceNumber || null,
+        externalInvoiceAmount: dto.externalInvoiceAmount ?? null,
         notes: dto.notes || null,
       },
     };
@@ -999,6 +1012,106 @@ async findPendingApprovals(request?: RequestLike) {
     });
   }
 
+
+  private getOperationProjectIdForCost(
+    type: NormalizedOperationType,
+    entities: LoadedOperationEntities,
+  ) {
+    if (type === 'DIRECT_REFUEL' || type === 'EXTERNAL_DIRECT_REFUEL') {
+      return entities.assetProjectId || null;
+    }
+
+    if (type === 'EXTERNAL_SUPPLY') {
+      return entities.destinationProjectId || null;
+    }
+
+    if (type === 'INTERNAL_TRANSFER') {
+      return entities.destinationProjectId || entities.sourceProjectId || null;
+    }
+
+    if (type === 'EXTERNAL_TRANSFER') {
+      return entities.destinationProjectId || entities.sourceProjectId || null;
+    }
+
+    return null;
+  }
+
+  private async resolveOperationCostSnapshot(
+    tx: any,
+    args: {
+      type: NormalizedOperationType;
+      entities: LoadedOperationEntities;
+      quantity: number;
+      operationDate: Date;
+      externalInvoiceAmount?: number;
+    },
+  ) {
+    if (args.type === 'EXTERNAL_DIRECT_REFUEL') {
+      const externalInvoiceAmount = Number(args.externalInvoiceAmount || 0);
+
+      return {
+        fuelPriceHistoryId: null,
+        pricePerLiterAtOperation: null,
+        totalCostAtOperation:
+          externalInvoiceAmount > 0 ? externalInvoiceAmount : null,
+      };
+    }
+
+    const projectId = this.getOperationProjectIdForCost(args.type, args.entities);
+
+    if (!projectId) {
+      return {
+        fuelPriceHistoryId: null,
+        pricePerLiterAtOperation: null,
+        totalCostAtOperation: null,
+      };
+    }
+
+    const effectivePrice = await tx.projectFuelPriceHistory.findFirst({
+      where: {
+        projectId,
+        effectiveFrom: {
+          lte: args.operationDate,
+        },
+      },
+      orderBy: {
+        effectiveFrom: 'desc',
+      },
+    });
+
+    if (effectivePrice) {
+      const pricePerLiterAtOperation = Number(effectivePrice.pricePerLiter);
+      const totalCostAtOperation = Number(args.quantity || 0) * pricePerLiterAtOperation;
+
+      return {
+        fuelPriceHistoryId: effectivePrice.id,
+        pricePerLiterAtOperation,
+        totalCostAtOperation,
+      };
+    }
+
+    const project = await tx.project.findUnique({
+      where: { id: projectId },
+      select: { currentFuelPrice: true },
+    });
+
+    const fallbackPrice = Number(project?.currentFuelPrice || 0);
+
+    if (fallbackPrice > 0) {
+      return {
+        fuelPriceHistoryId: null,
+        pricePerLiterAtOperation: fallbackPrice,
+        totalCostAtOperation: Number(args.quantity || 0) * fallbackPrice,
+      };
+    }
+
+    return {
+      fuelPriceHistoryId: null,
+      pricePerLiterAtOperation: null,
+      totalCostAtOperation: null,
+    };
+  }
+
   private async generateOperationNo(tx: any, companyId: string) {
     const count = await tx.operation.count({
       where: { companyId },
@@ -1133,6 +1246,15 @@ async findPendingApprovals(request?: RequestLike) {
         dto.invoiceNumber,
         'invoiceNumber is required for External Direct Refuel.',
       );
+      this.requireNumber(
+        dto.externalInvoiceAmount,
+        'externalInvoiceAmount is required for External Direct Refuel.',
+      );
+      if (Number(dto.externalInvoiceAmount) <= 0) {
+        throw new BadRequestException(
+          'External invoice amount must be greater than zero.',
+        );
+      }
       return;
     }
 

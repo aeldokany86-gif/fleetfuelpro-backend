@@ -58,6 +58,11 @@ export class CreateOperationDto {
   invoiceNumber?: string;
 
   @IsOptional()
+  @IsNumber()
+  externalInvoiceAmount?: number;
+
+
+  @IsOptional()
   @IsString()
   notes?: string;
 

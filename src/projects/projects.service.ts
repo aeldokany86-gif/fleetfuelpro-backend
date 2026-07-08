@@ -66,33 +66,67 @@ export class ProjectsService {
       );
     }
 
-    return this.prisma.project.create({
-      data: {
-        companyId: createProjectDto.companyId,
-        code: projectCode,
-        name: createProjectDto.name?.trim(),
-        location: createProjectDto.location?.trim() || null,
-        description: createProjectDto.description?.trim() || null,
-        isActive: createProjectDto.isActive ?? true,
-      },
-      include: {
-        company: {
-          select: {
-            id: true,
-            name: true,
-            code: true,
+    const initialFuelPrice = Number(createProjectDto.initialFuelPrice);
+
+    if (
+      Number.isNaN(initialFuelPrice) ||
+      initialFuelPrice <= 0
+    ) {
+      throw new BadRequestException(
+        'Initial fuel price per liter must be greater than zero',
+      );
+    }
+
+    const effectiveFrom = new Date();
+
+    const createdProject = await this.prisma.$transaction(async (tx) => {
+      const project = await tx.project.create({
+        data: {
+          companyId: createProjectDto.companyId,
+          code: projectCode,
+          name: createProjectDto.name?.trim(),
+          location: createProjectDto.location?.trim() || null,
+          description: createProjectDto.description?.trim() || null,
+          isActive: createProjectDto.isActive ?? true,
+          currentFuelPrice: initialFuelPrice,
+          fuelPriceEffectiveFrom: effectiveFrom,
+        },
+        include: {
+          company: {
+            select: {
+              id: true,
+              name: true,
+              code: true,
+            },
+          },
+          projectManager: {
+            select: {
+              id: true,
+              fullName: true,
+              email: true,
+              isActive: true,
+            },
           },
         },
-        projectManager: {
-          select: {
-            id: true,
-            fullName: true,
-            email: true,
-            isActive: true,
-          },
+      });
+
+      await tx.projectFuelPriceHistory.create({
+        data: {
+          projectId: project.id,
+          companyId: project.companyId,
+          country: company.country || 'Unknown',
+          currency: company.currency || 'SAR',
+          pricePerLiter: initialFuelPrice,
+          effectiveFrom,
+          reason: 'Initial project fuel price',
+          createdByUserId: null,
         },
-      },
+      });
+
+      return project;
     });
+
+    return createdProject;
   }
 
   async findAll(companyId?: string) {
@@ -490,7 +524,68 @@ export class ProjectsService {
       },
     });
 
-    return history;
+    const operationsToReprice =
+      await this.prisma.operation.findMany({
+        where: {
+          companyId: project.companyId,
+          status: 'COMPLETED',
+          type: { not: 'EXTERNAL_DIRECT_REFUEL' },
+          completedAt: {
+            gte: effectiveFrom,
+          },
+          OR: [
+            {
+              asset: {
+                projectId: project.id,
+              },
+            },
+            {
+              destinationStation: {
+                projectId: project.id,
+              },
+            },
+            {
+              sourceStation: {
+                projectId: project.id,
+              },
+            },
+          ],
+        },
+        select: {
+          id: true,
+          quantity: true,
+        },
+      });
+
+    const repricedOperations =
+      operationsToReprice.length;
+
+    if (repricedOperations > 0) {
+      const valuesSql =
+        operationsToReprice
+          .map(
+            (operation) =>
+              `('${operation.id}', ${Number(operation.quantity)})`,
+          )
+          .join(', ');
+
+      await this.prisma.$executeRawUnsafe(`
+        UPDATE "Operation" AS op
+        SET
+          "fuelPriceHistoryId" = '${history.id}',
+          "pricePerLiterAtOperation" = ${Number(pricePerLiter)},
+          "totalCostAtOperation" = values.quantity * ${Number(pricePerLiter)}
+        FROM (
+          VALUES ${valuesSql}
+        ) AS values(id, quantity)
+        WHERE op.id = values.id
+      `);
+    }
+
+    return {
+      ...history,
+      repricedOperations,
+    };
   }
 
   async getFuelPriceHistory(projectId: string) {

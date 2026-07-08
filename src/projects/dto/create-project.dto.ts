@@ -1,9 +1,11 @@
 import {
   IsBoolean,
+  IsNumber,
   IsOptional,
   IsString,
   MaxLength,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateProjectDto {
   @IsString()
@@ -31,4 +33,8 @@ export class CreateProjectDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @Type(() => Number)
+  @IsNumber()
+  initialFuelPrice: number;
 }
