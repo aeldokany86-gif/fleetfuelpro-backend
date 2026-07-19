@@ -14,6 +14,7 @@ import { EmployeeTransfersModule } from './employee-transfers/employee-transfers
 import { AssetsModule } from './assets/assets.module';
 import { StationsModule } from './stations/stations.module';
 import { OperationsModule } from './operations/operations.module';
+import { OperationCorrectionsModule } from './operation-corrections/operation-corrections.module';
 import { UploadsModule } from './uploads/uploads.module';
 
 @Module({
@@ -29,6 +30,7 @@ import { UploadsModule } from './uploads/uploads.module';
     AssetsModule,
     StationsModule,
     OperationsModule,
+    OperationCorrectionsModule,
     UploadsModule,
   ],
   controllers: [AppController, EmployeesController],

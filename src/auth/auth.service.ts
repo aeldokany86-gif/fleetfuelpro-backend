@@ -10,6 +10,36 @@ export class AuthService {
     private jwtService: JwtService,
   ) {}
 
+  private createPerformanceTracker(scope: string) {
+    const requestId = `${scope}-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const startedAt = Date.now();
+    let checkpointAt = startedAt;
+    const stages: Record<string, number> = {};
+
+    return {
+      mark: (stage: string) => {
+        const now = Date.now();
+        stages[stage] = now - checkpointAt;
+        checkpointAt = now;
+      },
+      finish: (extra: Record<string, unknown> = {}) => {
+        const totalMs = Date.now() - startedAt;
+
+        console.log(
+          `[PERF][${requestId}]`,
+          JSON.stringify({
+            scope,
+            totalMs,
+            stages,
+            ...extra,
+          }),
+        );
+
+        return totalMs;
+      },
+    };
+  }
+
   private normalizeRoleName(roleName: string) {
     return String(roleName || '')
       .trim()
@@ -58,6 +88,156 @@ export class AuthService {
         },
       },
     };
+  }
+
+  private async loadAuthRelationsSeparately(
+    userId: string,
+    performance: ReturnType<AuthService['createPerformanceTracker']>,
+  ) {
+    const relationStartedAt = Date.now();
+
+    const [
+      companyResult,
+      roleResult,
+      linkedEmployeeResult,
+      managedProjectsResult,
+    ] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          company: true,
+        },
+      }),
+
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          role: {
+            include: {
+              permissions: {
+                include: {
+                  permission: true,
+                },
+              },
+            },
+          },
+        },
+      }),
+
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          linkedEmployee: {
+            include: {
+              project: true,
+            },
+          },
+        },
+      }),
+
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          managedProjects: {
+            where: {
+              deletedAt: null,
+              isActive: true,
+            },
+            select: {
+              id: true,
+              name: true,
+              code: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    performance.mark('relations.parallel');
+
+    console.log(
+      '[PERF][auth.relations.parallel]',
+      JSON.stringify({
+        userId,
+        totalMs: Date.now() - relationStartedAt,
+        companyLoaded: Boolean(companyResult?.company),
+        roleLoaded: Boolean(roleResult?.role),
+        linkedEmployeeLoaded: Boolean(
+          linkedEmployeeResult?.linkedEmployee,
+        ),
+        managedProjectCount:
+          managedProjectsResult?.managedProjects?.length || 0,
+      }),
+    );
+
+    return {
+      company: companyResult?.company || null,
+      role: roleResult?.role || null,
+      linkedEmployee: linkedEmployeeResult?.linkedEmployee || null,
+      managedProjects: managedProjectsResult?.managedProjects || [],
+    };
+  }
+
+  private async findAuthUserCoreByIdentifier(
+    cleanIdentifier: string,
+    performance: ReturnType<AuthService['createPerformanceTracker']>,
+  ) {
+    const user = await this.prisma.user.findFirst({
+      where: {
+        deletedAt: null,
+        OR: [
+          { username: cleanIdentifier },
+          ...(cleanIdentifier.includes('@') ? [{ email: cleanIdentifier }] : []),
+        ],
+      },
+      select: {
+        id: true,
+        fullName: true,
+        username: true,
+        email: true,
+        phone: true,
+        passwordHash: true,
+        companyId: true,
+        roleId: true,
+        employeeId: true,
+        isActive: true,
+        mustChangePassword: true,
+        lastLoginAt: true,
+        deletedAt: true,
+      },
+    });
+
+    performance.mark('core.user.findFirst');
+
+    return user;
+  }
+
+  private async findAuthUserCoreById(
+    userId: string,
+    performance: ReturnType<AuthService['createPerformanceTracker']>,
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        fullName: true,
+        username: true,
+        email: true,
+        phone: true,
+        passwordHash: true,
+        companyId: true,
+        roleId: true,
+        employeeId: true,
+        isActive: true,
+        mustChangePassword: true,
+        lastLoginAt: true,
+        deletedAt: true,
+      },
+    });
+
+    performance.mark('core.user.findUnique');
+
+    return user;
   }
 
   async getLoginCompany(identifier: string) {
@@ -115,7 +295,7 @@ export class AuthService {
         username: user.username,
         companyId: 'PLATFORM',
         companyName: 'Platform Console',
-        roleName: user.role.name,
+        roleName: user.role?.name || '',
         isPlatformUser: true,
         companies,
       };
@@ -133,72 +313,156 @@ export class AuthService {
   }
 
   async login(identifier: string, password: string) {
+    const performance = this.createPerformanceTracker('auth.login.isolated');
     const cleanIdentifier = this.normalizeIdentifier(identifier);
 
+    performance.mark('normalizeIdentifier');
+
     if (!cleanIdentifier || !password) {
+      performance.finish({
+        success: false,
+        reason: 'missing_credentials',
+      });
       throw new UnauthorizedException('Invalid username or password');
     }
 
-    const user = await this.prisma.user.findFirst({
-      where: {
-        deletedAt: null,
-        OR: [
-          { username: cleanIdentifier },
-          ...(cleanIdentifier.includes('@') ? [{ email: cleanIdentifier }] : []),
-        ],
-      },
-      include: this.buildAuthInclude(),
-    });
-
-    if (!user || user.deletedAt) {
-      throw new UnauthorizedException('Invalid username or password');
-    }
-
-    const isPlatformUser = this.isPlatformRole(user.role?.name);
-
-    // Company users must login by generated username: companyCode.employeeId.
-    // Email remains available for Platform Console users and temporary backwards-compatible checks only.
-    if (cleanIdentifier.includes('@') && !isPlatformUser) {
-      throw new UnauthorizedException('Please login using your username');
-    }
-
-    if (!user.isActive) {
-      throw new UnauthorizedException(
-        'Your account is inactive. Please contact your administrator.',
+    try {
+      const coreUser = await this.findAuthUserCoreByIdentifier(
+        cleanIdentifier,
+        performance,
       );
+
+      if (!coreUser || coreUser.deletedAt) {
+        performance.finish({
+          success: false,
+          reason: 'user_not_found',
+        });
+        throw new UnauthorizedException('Invalid username or password');
+      }
+
+      const relations = await this.loadAuthRelationsSeparately(
+        coreUser.id,
+        performance,
+      );
+
+      if (!relations.role) {
+        performance.finish({
+          success: false,
+          reason: 'role_not_found',
+          userId: coreUser.id,
+        });
+        throw new UnauthorizedException('Invalid username or password');
+      }
+
+      const user = {
+        ...coreUser,
+        ...relations,
+      };
+
+      const role = relations.role;
+
+      const isPlatformUser = this.isPlatformRole(role.name);
+
+      performance.mark('validateUserRecord');
+
+      if (cleanIdentifier.includes('@') && !isPlatformUser) {
+        performance.finish({
+          success: false,
+          reason: 'company_user_used_email',
+          userId: user.id,
+        });
+        throw new UnauthorizedException('Please login using your username');
+      }
+
+      if (!user.isActive) {
+        performance.finish({
+          success: false,
+          reason: 'inactive_user',
+          userId: user.id,
+        });
+        throw new UnauthorizedException(
+          'Your account is inactive. Please contact your administrator.',
+        );
+      }
+
+      const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
+
+      performance.mark('bcrypt.compare');
+
+      if (!isPasswordValid) {
+        performance.finish({
+          success: false,
+          reason: 'invalid_password',
+          userId: user.id,
+        });
+        throw new UnauthorizedException('Invalid username or password');
+      }
+
+      const permissions = role.permissions.map(
+        (rolePermission) => rolePermission.permission.key,
+      );
+
+      performance.mark('buildPermissions');
+
+      const payload = {
+        sub: user.id,
+        email: user.email,
+        username: user.username,
+        companyId: user.companyId,
+        roleId: user.roleId,
+        roleName: role.name,
+        permissions,
+      };
+
+      const accessToken = await this.jwtService.signAsync(payload);
+
+      performance.mark('jwt.signAsync');
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { lastLoginAt: new Date() },
+      });
+
+      performance.mark('prisma.user.updateLastLogin');
+
+      const formattedUser = this.formatUserResponse(
+        {
+          ...user,
+          role,
+        },
+        permissions,
+      );
+
+      performance.mark('formatUserResponse');
+
+      performance.finish({
+        success: true,
+        userId: user.id,
+        roleName: user.role?.name || '',
+        permissionCount: permissions.length,
+        managedProjectCount: Array.isArray(user.managedProjects)
+          ? user.managedProjects.length
+          : 0,
+        hasLinkedEmployee: Boolean(user.linkedEmployee),
+      });
+
+      return {
+        access_token: accessToken,
+        user: formattedUser,
+      };
+    } catch (error) {
+      if (!(error instanceof UnauthorizedException)) {
+        performance.finish({
+          success: false,
+          reason: 'unexpected_error',
+          errorName: error?.constructor?.name || 'Error',
+          errorMessage:
+            error instanceof Error ? error.message : String(error || ''),
+        });
+      }
+
+      throw error;
     }
-
-    const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
-
-    if (!isPasswordValid) {
-      throw new UnauthorizedException('Invalid username or password');
-    }
-
-    const permissions = user.role.permissions.map(
-      (rolePermission) => rolePermission.permission.key,
-    );
-
-    const payload = {
-      sub: user.id,
-      email: user.email,
-      username: user.username,
-      companyId: user.companyId,
-      roleId: user.roleId,
-      roleName: user.role.name,
-      permissions,
-    };
-
-    const accessToken = await this.jwtService.signAsync(payload);
-
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { lastLoginAt: new Date() },
-    });
-
-    return {
-      access_token: accessToken,
-      user: this.formatUserResponse(user, permissions),
-    };
   }
 
   async changePassword(
@@ -271,26 +535,93 @@ export class AuthService {
   }
 
   async getMe(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      include: this.buildAuthInclude(),
-    });
+    const performance = this.createPerformanceTracker('auth.getMe.isolated');
 
-    if (!user || user.deletedAt) {
-      throw new UnauthorizedException('User not found');
-    }
+    try {
+      const coreUser = await this.findAuthUserCoreById(userId, performance);
 
-    if (!user.isActive) {
-      throw new UnauthorizedException(
-        'Your account is inactive. Please contact your administrator.',
+      if (!coreUser || coreUser.deletedAt) {
+        performance.finish({
+          success: false,
+          reason: 'user_not_found',
+          userId,
+        });
+        throw new UnauthorizedException('User not found');
+      }
+
+      const relations = await this.loadAuthRelationsSeparately(
+        coreUser.id,
+        performance,
       );
+
+      if (!relations.role) {
+        performance.finish({
+          success: false,
+          reason: 'role_not_found',
+          userId,
+        });
+        throw new UnauthorizedException('User role not found');
+      }
+
+      const user = {
+        ...coreUser,
+        ...relations,
+      };
+
+      const role = relations.role;
+
+      if (!user.isActive) {
+        performance.finish({
+          success: false,
+          reason: 'inactive_user',
+          userId,
+        });
+        throw new UnauthorizedException(
+          'Your account is inactive. Please contact your administrator.',
+        );
+      }
+
+      const permissions = role.permissions.map(
+        (rolePermission) => rolePermission.permission.key,
+      );
+
+      performance.mark('buildPermissions');
+
+      const response = this.formatUserResponse(
+        {
+          ...user,
+          role,
+        },
+        permissions,
+      );
+
+      performance.mark('formatUserResponse');
+
+      performance.finish({
+        success: true,
+        userId: user.id,
+        roleName: user.role?.name || '',
+        permissionCount: permissions.length,
+        managedProjectCount: Array.isArray(user.managedProjects)
+          ? user.managedProjects.length
+          : 0,
+        hasLinkedEmployee: Boolean(user.linkedEmployee),
+      });
+
+      return response;
+    } catch (error) {
+      if (!(error instanceof UnauthorizedException)) {
+        performance.finish({
+          success: false,
+          reason: 'unexpected_error',
+          errorName: error?.constructor?.name || 'Error',
+          errorMessage:
+            error instanceof Error ? error.message : String(error || ''),
+        });
+      }
+
+      throw error;
     }
-
-    const permissions = user.role.permissions.map(
-      (rolePermission) => rolePermission.permission.key,
-    );
-
-    return this.formatUserResponse(user, permissions);
   }
 
   private formatUserResponse(user: any, permissions: string[]) {

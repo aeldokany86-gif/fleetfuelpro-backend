@@ -41,6 +41,8 @@ type CurrentUserContext = {
   role: NormalizedRole;
   companyId?: string;
   existsInDatabase: boolean;
+  assignedProjectId?: string | null;
+  managedProjectIds: string[];
 };
 
 type LoadedOperationEntities = {
@@ -64,6 +66,66 @@ type ApprovalPlanItem = {
 export class OperationsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private buildOperationListInclude() {
+    return {
+      requestedBy: {
+        select: {
+          id: true,
+          fullName: true,
+        },
+      },
+
+      approvals: {
+        select: {
+          id: true,
+          approverUserId: true,
+          projectId: true,
+          approvalStage: true,
+          status: true,
+          note: true,
+          reviewedAt: true,
+          createdAt: true,
+          approver: {
+            select: {
+              id: true,
+              fullName: true,
+            },
+          },
+        },
+      },
+
+      sourceStation: {
+        select: {
+          id: true,
+          stationId: true,
+          name: true,
+          projectId: true,
+        },
+      },
+
+      destinationStation: {
+        select: {
+          id: true,
+          stationId: true,
+          name: true,
+          projectId: true,
+        },
+      },
+
+      asset: {
+        select: {
+          id: true,
+          assetId: true,
+          type: true,
+          category: true,
+          projectId: true,
+          currentOdometer: true,
+          fuelTankCapacity: true,
+        },
+      },
+    };
+  }
+
   async create(dto: CreateOperationDto, request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(dto, request);
     const type = this.normalizeOperationType(dto.type);
@@ -86,151 +148,36 @@ export class OperationsService {
 
   async review(operationId: string, dto: ReviewOperationDto, request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(
-      {
-        type: 'DIRECT_REFUEL' as any,
-        quantity: 1,
-      } as CreateOperationDto,
+      { type: 'DIRECT_REFUEL' as any, quantity: 1 } as CreateOperationDto,
       request,
     );
 
     if (!currentUser.existsInDatabase) {
-      throw new UnauthorizedException(
-        'Real database user is required to review operation approvals.',
-      );
+      throw new UnauthorizedException('Real database user is required to review operation approvals.');
     }
-
     if (currentUser.role !== 'Manager') {
       throw new ForbiddenException('Only project managers can review operation approvals.');
     }
 
-    const action = String(dto.action || '').toUpperCase();
-
+    const action = String(dto.action || '').trim().toUpperCase();
     if (!['APPROVE', 'REJECT'].includes(action)) {
       throw new BadRequestException('Review action must be APPROVE or REJECT.');
     }
 
-    /*
-      Keep reads and validation outside the interactive transaction.
-      The old review() loaded the operation, approvals, entities, then updated stock
-      all inside one transaction. On Supabase pooler this sometimes exceeded the
-      5s Prisma interactive transaction window and caused P2028.
-    */
-    const operation = await (this.prisma as any).operation.findUnique({
-      where: { id: operationId },
-      include: {
-        approvals: true,
-      },
+    const operation = await (this.prisma as any).operation.findFirst({
+      where: { id: operationId, companyId: currentUser.companyId },
+      include: { approvals: true },
     });
-
-    if (!operation) {
-      throw new NotFoundException('Operation was not found.');
-    }
-
+    if (!operation) throw new NotFoundException('Operation was not found.');
     if (['COMPLETED', 'REJECTED', 'CANCELLED'].includes(operation.status)) {
-      throw new BadRequestException(
-        `Operation cannot be reviewed because it is already ${operation.status}.`,
-      );
+      throw new BadRequestException(`Operation cannot be reviewed because it is already ${operation.status}.`);
     }
 
     const approval = operation.approvals.find(
-      (item: any) =>
-        item.approverUserId === currentUser.id && item.status === 'PENDING',
+      (item: any) => item.approverUserId === currentUser.id && item.status === 'PENDING',
     );
-
     if (!approval) {
-      throw new ForbiddenException(
-        'You do not have a pending approval for this operation.',
-      );
-    }
-
-    if (action === 'REJECT') {
-      const result = await this.prisma.$transaction(async (tx) => {
-        const reviewedApproval = await (tx as any).operationApproval.update({
-          where: { id: approval.id },
-          data: {
-            status: 'REJECTED',
-            note: dto.note || null,
-            reviewedAt: new Date(),
-          },
-        });
-
-        const rejectedOperation = await (tx as any).operation.update({
-          where: { id: operation.id },
-          data: {
-            status: 'REJECTED',
-            rejectedAt: new Date(),
-          },
-        });
-
-        return {
-          operation: rejectedOperation,
-          reviewedApproval,
-          completedNow: false,
-          rejectedNow: true,
-        };
-      });
-
-      return {
-        ok: true,
-        operationId: result.operation.id,
-        operationNo: result.operation.operationNo,
-        status: result.operation.status,
-        completedNow: result.completedNow,
-        rejectedNow: result.rejectedNow,
-        reviewedBy: {
-          id: currentUser.id,
-          name: currentUser.fullName,
-          role: currentUser.role,
-        },
-        message: 'Operation rejected successfully.',
-      };
-    }
-
-    const allApprovedAfterThisReview = operation.approvals.every((item: any) =>
-      item.id === approval.id ? true : item.status === 'APPROVED',
-    );
-
-    if (!allApprovedAfterThisReview) {
-      const result = await this.prisma.$transaction(async (tx) => {
-        const reviewedApproval = await (tx as any).operationApproval.update({
-          where: { id: approval.id },
-          data: {
-            status: 'APPROVED',
-            note: dto.note || null,
-            reviewedAt: new Date(),
-          },
-        });
-
-        const partiallyApprovedOperation = await (tx as any).operation.update({
-          where: { id: operation.id },
-          data: {
-            status: 'PARTIALLY_APPROVED',
-            approvedAt: new Date(),
-          },
-        });
-
-        return {
-          operation: partiallyApprovedOperation,
-          reviewedApproval,
-          completedNow: false,
-          rejectedNow: false,
-        };
-      });
-
-      return {
-        ok: true,
-        operationId: result.operation.id,
-        operationNo: result.operation.operationNo,
-        status: result.operation.status,
-        completedNow: result.completedNow,
-        rejectedNow: result.rejectedNow,
-        reviewedBy: {
-          id: currentUser.id,
-          name: currentUser.fullName,
-          role: currentUser.role,
-        },
-        message: 'Operation approved and pending remaining project manager approval.',
-      };
+      throw new ForbiddenException('You do not have a pending approval for this operation.');
     }
 
     const operationDto = {
@@ -239,83 +186,92 @@ export class OperationsService {
       destinationStationId: operation.destinationStationId || undefined,
       assetId: operation.assetId || undefined,
       quantity: Number(operation.quantity),
-      odometer:
-        operation.odometer === null || operation.odometer === undefined
-          ? undefined
-          : Number(operation.odometer),
-      stationCounter:
-        operation.stationCounter === null || operation.stationCounter === undefined
-          ? undefined
-          : Number(operation.stationCounter),
+      odometer: operation.odometer == null ? undefined : Number(operation.odometer),
+      stationCounter: operation.stationCounter == null ? undefined : Number(operation.stationCounter),
       externalStationName: operation.externalStationName || undefined,
       invoiceNumber: operation.invoiceNumber || undefined,
       notes: operation.notes || undefined,
       companyId: operation.companyId,
     } as CreateOperationDto;
 
-    /*
-      Load and validate entities before opening the write transaction.
-      The transaction below now only performs writes.
-    */
-    const entities = await this.loadAndValidateEntities(
-      this.prisma as any,
-      operationDto,
-      currentUser,
-      operation.type,
-    );
+    const entities = action === 'APPROVE'
+      ? await this.loadAndValidateEntities(this.prisma as any, operationDto, currentUser, operation.type)
+      : undefined;
 
     const result = await this.prisma.$transaction(async (tx) => {
-      const reviewedApproval = await (tx as any).operationApproval.update({
-        where: { id: approval.id },
+      const claimed = await (tx as any).operationApproval.updateMany({
+        where: { id: approval.id, approverUserId: currentUser.id, status: 'PENDING' },
         data: {
-          status: 'APPROVED',
+          status: action === 'REJECT' ? 'REJECTED' : 'APPROVED',
           note: dto.note || null,
           reviewedAt: new Date(),
         },
       });
+      if (claimed.count !== 1) {
+        throw new BadRequestException('This approval was already reviewed by another request.');
+      }
 
-      const completedOperation = await (tx as any).operation.update({
-        where: { id: operation.id },
-        data: {
-          status: 'COMPLETED',
-          approvedAt: new Date(),
-          completedAt: new Date(),
-        },
+      if (action === 'REJECT') {
+        const rejected = await (tx as any).operation.updateMany({
+          where: { id: operation.id, status: { in: ['PENDING', 'PARTIALLY_APPROVED'] } },
+          data: { status: 'REJECTED', rejectedAt: new Date() },
+        });
+        if (rejected.count !== 1) {
+          throw new BadRequestException('Operation status changed before this review was completed.');
+        }
+        return { status: 'REJECTED', completedNow: false, rejectedNow: true };
+      }
+
+      const pendingCount = await (tx as any).operationApproval.count({
+        where: { operationId: operation.id, status: 'PENDING' },
       });
 
+      if (pendingCount > 0) {
+        await (tx as any).operation.updateMany({
+          where: { id: operation.id, status: { in: ['PENDING', 'PARTIALLY_APPROVED'] } },
+          data: { status: 'PARTIALLY_APPROVED', approvedAt: new Date() },
+        });
+        return { status: 'PARTIALLY_APPROVED', completedNow: false, rejectedNow: false };
+      }
+
+      const completed = await (tx as any).operation.updateMany({
+        where: { id: operation.id, status: { in: ['PENDING', 'PARTIALLY_APPROVED'] } },
+        data: { status: 'COMPLETED', approvedAt: new Date(), completedAt: new Date() },
+      });
+      if (completed.count !== 1) {
+        throw new BadRequestException('Operation was already completed by another approval request.');
+      }
+
+      const completedOperation = await (tx as any).operation.findUnique({ where: { id: operation.id } });
       await this.applyCompletedOperationEffects(tx, {
         operation: completedOperation,
         dto: operationDto,
         type: operation.type,
         currentUser,
-        entities,
+        entities: entities!,
       });
-
-      return {
-        operation: completedOperation,
-        reviewedApproval,
-        completedNow: true,
-        rejectedNow: false,
-      };
-    });
+      return { status: 'COMPLETED', completedNow: true, rejectedNow: false };
+    }, { maxWait: 5000, timeout: 5000 });
 
     return {
       ok: true,
-      operationId: result.operation.id,
-      operationNo: result.operation.operationNo,
-      status: result.operation.status,
+      operationId: operation.id,
+      operationNo: operation.operationNo,
+      status: result.status,
       completedNow: result.completedNow,
       rejectedNow: result.rejectedNow,
-      reviewedBy: {
-        id: currentUser.id,
-        name: currentUser.fullName,
-        role: currentUser.role,
-      },
-      message: 'Operation approved and completed successfully.',
+      reviewedBy: { id: currentUser.id, name: currentUser.fullName, role: currentUser.role },
+      message: result.rejectedNow
+        ? 'Operation rejected successfully.'
+        : result.completedNow
+          ? 'Operation approved and completed successfully.'
+          : 'Operation approved and pending remaining project manager approval.',
     };
   }
 
 async findAll(request?: RequestLike) {
+  const startedAt = Date.now();
+
   const currentUser = await this.resolveCurrentUser(
     {
       type: 'DIRECT_REFUEL' as any,
@@ -324,49 +280,49 @@ async findAll(request?: RequestLike) {
     request,
   );
 
+  const resolveUserMs = Date.now() - startedAt;
+
   if (!currentUser.existsInDatabase) {
     throw new UnauthorizedException(
       'Real database user is required.',
     );
   }
 
-  return (this.prisma as any).operation.findMany({
+  const queryStartedAt = Date.now();
+
+  const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
     },
 
-    include: {
-      requestedBy: {
-        select: {
-          id: true,
-          fullName: true,
-        },
-      },
-
-      approvals: {
-        include: {
-          approver: {
-            select: {
-              id: true,
-              fullName: true,
-            },
-          },
-        },
-      },
-
-      sourceStation: true,
-      destinationStation: true,
-      asset: true,
-      fuelPriceHistory: true,
-    },
+    include: this.buildOperationListInclude(),
 
     orderBy: {
       createdAt: 'desc',
     },
+
+    // Temporary safety cap until cursor pagination is added to the frontend.
+    take: 100,
   });
+
+  console.log(
+    '[PERF][operations.findAll]',
+    JSON.stringify({
+      totalMs: Date.now() - startedAt,
+      resolveUserMs,
+      queryMs: Date.now() - queryStartedAt,
+      companyId: currentUser.companyId,
+      resultCount: operations.length,
+      limit: 100,
+    }),
+  );
+
+  return operations;
 }
 
 async findPendingApprovals(request?: RequestLike) {
+  const startedAt = Date.now();
+
   const currentUser = await this.resolveCurrentUser(
     {
       type: 'DIRECT_REFUEL' as any,
@@ -375,13 +331,17 @@ async findPendingApprovals(request?: RequestLike) {
     request,
   );
 
+  const resolveUserMs = Date.now() - startedAt;
+
   if (!currentUser.existsInDatabase) {
     throw new UnauthorizedException(
       'Real database user is required.',
     );
   }
 
-  return (this.prisma as any).operation.findMany({
+  const queryStartedAt = Date.now();
+
+  const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
 
@@ -393,35 +353,29 @@ async findPendingApprovals(request?: RequestLike) {
       },
     },
 
-    include: {
-      requestedBy: {
-        select: {
-          id: true,
-          fullName: true,
-        },
-      },
-
-      approvals: {
-        include: {
-          approver: {
-            select: {
-              id: true,
-              fullName: true,
-            },
-          },
-        },
-      },
-
-      sourceStation: true,
-      destinationStation: true,
-      asset: true,
-      fuelPriceHistory: true,
-    },
+    include: this.buildOperationListInclude(),
 
     orderBy: {
       createdAt: 'desc',
     },
+
+    take: 100,
   });
+
+  console.log(
+    '[PERF][operations.findPendingApprovals]',
+    JSON.stringify({
+      totalMs: Date.now() - startedAt,
+      resolveUserMs,
+      queryMs: Date.now() - queryStartedAt,
+      companyId: currentUser.companyId,
+      userId: currentUser.id,
+      resultCount: operations.length,
+      limit: 100,
+    }),
+  );
+
+  return operations;
 }
 
   private async createPersistedOperation(
@@ -429,93 +383,109 @@ async findPendingApprovals(request?: RequestLike) {
     currentUser: CurrentUserContext,
     type: NormalizedOperationType,
   ) {
-    /*
-      Keep operation number generation outside the interactive transaction.
-      On Supabase pooler, running count() inside a long transaction can close the
-      transaction early and trigger Prisma P2028: "Transaction not found".
-    */
-    const operationNo = await this.generateOperationNo(
+    const operationDate = new Date();
+
+    const entities = await this.loadAndValidateEntities(
       this.prisma as any,
-      currentUser.companyId!,
+      dto,
+      currentUser,
+      type,
     );
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const entities = await this.loadAndValidateEntities(tx, dto, currentUser, type);
-      const approvalPlan = await this.buildApprovalPlan(tx, currentUser, type, entities);
-      const status = this.getInitialOperationStatus(type, currentUser, approvalPlan);
-      const completedAt = status === 'COMPLETED' ? new Date() : null;
-      const costSnapshot = await this.resolveOperationCostSnapshot(tx, {
+    const approvalPlan = await this.buildApprovalPlan(
+      this.prisma as any,
+      currentUser,
+      type,
+      entities,
+    );
+
+    const status = this.getInitialOperationStatus(type, currentUser, approvalPlan);
+    const completedAt = status === 'COMPLETED' ? operationDate : null;
+
+    const costSnapshot = await this.resolveOperationCostSnapshot(
+      this.prisma as any,
+      {
         type,
         entities,
         quantity: Number(dto.quantity),
-        operationDate: new Date(),
+        operationDate,
         externalInvoiceAmount: dto.externalInvoiceAmount,
-      });
+      },
+    );
 
-      const operation = await (tx as any).operation.create({
-        data: {
-          companyId: currentUser.companyId,
-          operationNo,
-          type,
-          status,
-          sourceStationId: dto.sourceStationId || null,
-          destinationStationId: dto.destinationStationId || null,
-          assetId: dto.assetId || null,
-          quantity: Number(dto.quantity),
-          odometer:
-            dto.odometer === undefined || dto.odometer === null
-              ? null
-              : Number(dto.odometer),
-          stationCounter:
-            dto.stationCounter === undefined || dto.stationCounter === null
-              ? null
-              : Number(dto.stationCounter),
-          externalStationName: dto.externalStationName || null,
-          invoiceNumber: dto.invoiceNumber || null,
-          notes: dto.notes || null,
-          attachments: dto.attachments || undefined,
-          fuelPriceHistoryId: costSnapshot.fuelPriceHistoryId,
-          pricePerLiterAtOperation: costSnapshot.pricePerLiterAtOperation,
-          totalCostAtOperation: costSnapshot.totalCostAtOperation,
-          requestedByUserId: currentUser.id,
-          completedAt,
-          approvedAt:
-            status === 'COMPLETED' || status === 'PARTIALLY_APPROVED'
-              ? new Date()
-              : null,
-        },
-      });
+    let result: any;
+    let lastError: any;
 
-      if (approvalPlan.length) {
-        await (tx as any).operationApproval.createMany({
-          data: approvalPlan.map((item) => ({
-            operationId: operation.id,
-            approverUserId: item.approverUserId,
-            projectId: item.projectId,
-            approvalStage: item.approvalStage,
-            status: item.status,
-            reviewedAt: item.reviewedAt || null,
-          })),
-          skipDuplicates: true,
-        });
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const operationNo = await this.generateOperationNo(
+        this.prisma as any,
+        currentUser.companyId!,
+      );
+
+      try {
+        result = await this.prisma.$transaction(async (tx) => {
+          const operation = await (tx as any).operation.create({
+            data: {
+              companyId: currentUser.companyId,
+              operationNo,
+              type,
+              status,
+              sourceStationId: dto.sourceStationId || null,
+              destinationStationId: dto.destinationStationId || null,
+              assetId: dto.assetId || null,
+              quantity: Number(dto.quantity),
+              odometer: dto.odometer == null ? null : Number(dto.odometer),
+              stationCounter: dto.stationCounter == null ? null : Number(dto.stationCounter),
+              externalStationName: dto.externalStationName || null,
+              invoiceNumber: dto.invoiceNumber || null,
+              notes: dto.notes || null,
+              attachments: dto.attachments || undefined,
+              fuelPriceHistoryId: costSnapshot.fuelPriceHistoryId,
+              pricePerLiterAtOperation: costSnapshot.pricePerLiterAtOperation,
+              totalCostAtOperation: costSnapshot.totalCostAtOperation,
+              requestedByUserId: currentUser.id,
+              completedAt,
+              approvedAt:
+                status === 'COMPLETED' || status === 'PARTIALLY_APPROVED'
+                  ? operationDate
+                  : null,
+            },
+          });
+
+          if (approvalPlan.length) {
+            await (tx as any).operationApproval.createMany({
+              data: approvalPlan.map((item) => ({
+                operationId: operation.id,
+                approverUserId: item.approverUserId,
+                projectId: item.projectId,
+                approvalStage: item.approvalStage,
+                status: item.status,
+                reviewedAt: item.reviewedAt || null,
+              })),
+              skipDuplicates: true,
+            });
+          }
+
+          if (status === 'COMPLETED') {
+            await this.applyCompletedOperationEffects(tx, {
+              operation,
+              dto,
+              type,
+              currentUser,
+              entities,
+            });
+          }
+
+          return { operation, status, approvalPlan };
+        }, { maxWait: 5000, timeout: 5000 });
+        break;
+      } catch (error: any) {
+        lastError = error;
+        if (!this.isOperationNoConflict(error) || attempt === 3) throw error;
       }
+    }
 
-      if (status === 'COMPLETED') {
-        await this.applyCompletedOperationEffects(tx, {
-          operation,
-          dto,
-          type,
-          currentUser,
-          entities,
-        });
-      }
-
-      return {
-        operation,
-        status,
-        approvalPlan,
-      };
-    });
+    if (!result) throw lastError;
 
     return {
       ok: true,
@@ -524,7 +494,7 @@ async findPendingApprovals(request?: RequestLike) {
       operationNo: result.operation.operationNo,
       operationType: type,
       status: result.status,
-      requiresApproval: result.approvalPlan.some((item) => item.status === 'PENDING'),
+      requiresApproval: result.approvalPlan.some((item: ApprovalPlanItem) => item.status === 'PENDING'),
       createdBy: {
         id: currentUser.id,
         name: currentUser.fullName,
@@ -532,6 +502,12 @@ async findPendingApprovals(request?: RequestLike) {
       },
       approvals: result.approvalPlan,
     };
+  }
+
+  private isOperationNoConflict(error: any) {
+    return error?.code === 'P2002' &&
+      Array.isArray(error?.meta?.target) &&
+      error.meta.target.includes('operationNo');
   }
 
   private async createDryRun(
@@ -580,38 +556,24 @@ async findPendingApprovals(request?: RequestLike) {
     request?: RequestLike,
   ): Promise<CurrentUserContext> {
     const requestUser = request?.user as any;
-
-    const userId =
-      requestUser?.id ||
-      this.getHeader(request, 'x-user-id') ||
-      dto.requestedByUserId;
-
-    const fallbackRole =
-      requestUser?.roleName ||
-      requestUser?.role ||
-      requestUser?.systemRole ||
-      this.getHeader(request, 'x-user-role') ||
-      dto.requestedByRole;
-
-    const fallbackName =
-      requestUser?.fullName ||
-      requestUser?.name ||
-      requestUser?.email ||
-      this.getHeader(request, 'x-user-name') ||
-      dto.requestedByName;
+    const userId = requestUser?.id || this.getHeader(request, 'x-user-id') || dto.requestedByUserId;
+    const fallbackRole = requestUser?.roleName || requestUser?.role || requestUser?.systemRole ||
+      this.getHeader(request, 'x-user-role') || dto.requestedByRole;
+    const fallbackName = requestUser?.fullName || requestUser?.name || requestUser?.email ||
+      this.getHeader(request, 'x-user-name') || dto.requestedByName;
 
     if (!userId || !fallbackRole) {
-      throw new UnauthorizedException(
-        'Current user was not found. Connect AuthGuard or send temporary x-user-id and x-user-role headers for local testing.',
-      );
+      throw new UnauthorizedException('Current user was not found. Connect AuthGuard or send temporary x-user-id and x-user-role headers for local testing.');
     }
 
-    const dbUser = await (this.prisma as any).user
-      .findUnique({
-        where: { id: userId },
-        include: { role: true },
-      })
-      .catch(() => null);
+    const dbUser = await (this.prisma as any).user.findUnique({
+      where: { id: userId },
+      include: {
+        role: true,
+        linkedEmployee: { select: { projectId: true } },
+        managedProjects: { where: { deletedAt: null, isActive: true }, select: { id: true } },
+      },
+    }).catch(() => null);
 
     if (dbUser) {
       return {
@@ -620,6 +582,8 @@ async findPendingApprovals(request?: RequestLike) {
         role: this.normalizeRole(dbUser.role?.name || fallbackRole),
         companyId: dbUser.companyId,
         existsInDatabase: true,
+        assignedProjectId: dbUser.linkedEmployee?.projectId || null,
+        managedProjectIds: dbUser.managedProjects.map((project: any) => project.id),
       };
     }
 
@@ -629,6 +593,8 @@ async findPendingApprovals(request?: RequestLike) {
       role: this.normalizeRole(fallbackRole),
       companyId: dto.companyId,
       existsInDatabase: false,
+      assignedProjectId: null,
+      managedProjectIds: [],
     };
   }
 
@@ -638,72 +604,106 @@ async findPendingApprovals(request?: RequestLike) {
     user: CurrentUserContext,
     type: NormalizedOperationType,
   ): Promise<LoadedOperationEntities> {
-    const entities: LoadedOperationEntities = {};
+    if (!user.companyId) throw new BadRequestException('User companyId is required.');
 
-    if (!user.companyId) {
-      throw new BadRequestException('User companyId is required.');
-    }
+    const [sourceStation, destinationStation, asset] = await Promise.all([
+      dto.sourceStationId
+        ? tx.station.findFirst({
+            where: { id: dto.sourceStationId, companyId: user.companyId, deletedAt: null },
+            include: { project: true },
+          })
+        : Promise.resolve(undefined),
+      dto.destinationStationId
+        ? tx.station.findFirst({
+            where: { id: dto.destinationStationId, companyId: user.companyId, deletedAt: null },
+            include: { project: true },
+          })
+        : Promise.resolve(undefined),
+      dto.assetId
+        ? tx.asset.findFirst({
+            where: { id: dto.assetId, companyId: user.companyId, deletedAt: null },
+            include: { project: true },
+          })
+        : Promise.resolve(undefined),
+    ]);
 
-    if (dto.sourceStationId) {
-      entities.sourceStation = await tx.station.findFirst({
-        where: {
-          id: dto.sourceStationId,
-          companyId: user.companyId,
-          deletedAt: null,
-        },
-        include: { project: true },
-      });
+    if (dto.sourceStationId && !sourceStation) throw new NotFoundException('Source station was not found.');
+    if (dto.destinationStationId && !destinationStation) throw new NotFoundException('Destination station was not found.');
+    if (dto.assetId && !asset) throw new NotFoundException('Asset was not found.');
 
-      if (!entities.sourceStation) {
-        throw new NotFoundException('Source station was not found.');
-      }
-
-      entities.sourceProjectId = entities.sourceStation.projectId || null;
-    }
-
-    if (dto.destinationStationId) {
-      entities.destinationStation = await tx.station.findFirst({
-        where: {
-          id: dto.destinationStationId,
-          companyId: user.companyId,
-          deletedAt: null,
-        },
-        include: { project: true },
-      });
-
-      if (!entities.destinationStation) {
-        throw new NotFoundException('Destination station was not found.');
-      }
-
-      entities.destinationProjectId = entities.destinationStation.projectId || null;
-    }
-
-    if (dto.assetId) {
-      entities.asset = await tx.asset.findFirst({
-        where: {
-          id: dto.assetId,
-          companyId: user.companyId,
-          deletedAt: null,
-        },
-        include: { project: true },
-      });
-
-      if (!entities.asset) {
-        throw new NotFoundException('Asset was not found.');
-      }
-
-      entities.assetProjectId = entities.asset.projectId || null;
-    }
+    const entities: LoadedOperationEntities = {
+      sourceStation,
+      destinationStation,
+      asset,
+      sourceProjectId: sourceStation?.projectId || null,
+      destinationProjectId: destinationStation?.projectId || null,
+      assetProjectId: asset?.projectId || null,
+    };
 
     this.validateProjectRules(type, entities);
-
+    this.validateTankCapacity(type, entities, Number(dto.quantity));
+    this.validateUserProjectAccess(user, type, entities);
     return entities;
+  }
+
+  private validateTankCapacity(
+    type: NormalizedOperationType,
+    entities: LoadedOperationEntities,
+    quantity: number,
+  ) {
+    if (!['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type)) return;
+    const capacity = Number(entities.asset?.fuelTankCapacity || 0);
+    if (capacity > 0 && quantity > capacity) {
+      throw new BadRequestException(`Quantity cannot exceed asset fuel tank capacity (${capacity} L).`);
+    }
+  }
+
+  private validateUserProjectAccess(
+    user: CurrentUserContext,
+    type: NormalizedOperationType,
+    entities: LoadedOperationEntities,
+  ) {
+    if (!['Operator', 'Supervisor', 'Manager'].includes(user.role)) return;
+
+    const requiredProjectIds = new Set<string>();
+    if (type === 'DIRECT_REFUEL') {
+      if (entities.sourceProjectId) requiredProjectIds.add(entities.sourceProjectId);
+      if (entities.assetProjectId) requiredProjectIds.add(entities.assetProjectId);
+    } else if (type === 'EXTERNAL_DIRECT_REFUEL') {
+      if (entities.assetProjectId) requiredProjectIds.add(entities.assetProjectId);
+    } else if (type === 'EXTERNAL_SUPPLY') {
+      if (entities.destinationProjectId) requiredProjectIds.add(entities.destinationProjectId);
+    } else if (type === 'INTERNAL_TRANSFER') {
+      if (entities.sourceProjectId) requiredProjectIds.add(entities.sourceProjectId);
+    } else if (type === 'EXTERNAL_TRANSFER') {
+      if (entities.sourceProjectId) requiredProjectIds.add(entities.sourceProjectId);
+      if (entities.destinationProjectId) requiredProjectIds.add(entities.destinationProjectId);
+    }
+
+    if (user.role === 'Manager') {
+      const hasAccess = [...requiredProjectIds].some((id) => user.managedProjectIds.includes(id));
+      if (!hasAccess) throw new ForbiddenException('Manager is not assigned to any project involved in this operation.');
+      return;
+    }
+
+    if (!user.assignedProjectId || !requiredProjectIds.has(user.assignedProjectId)) {
+      throw new ForbiddenException('User can create operations for the assigned project only.');
+    }
   }
 
   private validateProjectRules(
     type: NormalizedOperationType,
     entities: LoadedOperationEntities,
   ) {
+    if (type === 'DIRECT_REFUEL') {
+      if (!entities.sourceProjectId || !entities.assetProjectId) {
+        throw new BadRequestException('Source station and asset must be assigned to projects for Direct Refuel.');
+      }
+      if (entities.sourceProjectId !== entities.assetProjectId) {
+        throw new BadRequestException('Direct Refuel requires the source station and asset to be in the same project.');
+      }
+    }
+
     if (type === 'INTERNAL_TRANSFER') {
       if (!entities.sourceProjectId || !entities.destinationProjectId) {
         throw new BadRequestException(
@@ -771,11 +771,10 @@ async findPendingApprovals(request?: RequestLike) {
       const sourceProjectId = entities.sourceProjectId;
       const destinationProjectId = entities.destinationProjectId;
 
-      const sourceManagerId = await this.getProjectManagerId(tx, sourceProjectId);
-      const destinationManagerId = await this.getProjectManagerId(
-        tx,
-        destinationProjectId,
-      );
+      const [sourceManagerId, destinationManagerId] = await Promise.all([
+        this.getProjectManagerId(tx, sourceProjectId),
+        this.getProjectManagerId(tx, destinationProjectId),
+      ]);
 
       if (sourceManagerId === destinationManagerId) {
         return [
@@ -958,31 +957,29 @@ async findPendingApprovals(request?: RequestLike) {
     },
   ) {
     const { station, operation, movementType, quantity, reason, currentUser } = args;
+    if (!station) throw new BadRequestException('Station is required for stock movement.');
 
-    if (!station) {
-      throw new BadRequestException('Station is required for stock movement.');
-    }
-
-    const balanceBefore = Number(station.currentStock || 0);
-    const balanceAfter = balanceBefore + quantity;
-
-    await tx.station.update({
+    const movementQuantity = Number(quantity || 0);
+    const updatedStation = await tx.station.update({
       where: { id: station.id },
       data: {
-        currentStock: balanceAfter,
-        currentCounter:
-          operation.stationCounter === undefined || operation.stationCounter === null
-            ? station.currentCounter
-            : Number(operation.stationCounter),
+        currentStock: { increment: movementQuantity },
+        ...(operation.stationCounter == null
+          ? {}
+          : { currentCounter: Number(operation.stationCounter) }),
       },
+      select: { currentStock: true },
     });
+
+    const balanceAfter = Number(updatedStation.currentStock || 0);
+    const balanceBefore = balanceAfter - movementQuantity;
 
     await tx.stationStockMovement.create({
       data: {
         stationId: station.id,
         companyId: currentUser.companyId,
         movementType,
-        quantity,
+        quantity: movementQuantity,
         balanceBefore,
         balanceAfter,
         referenceType: 'Operation',
@@ -1113,12 +1110,13 @@ async findPendingApprovals(request?: RequestLike) {
   }
 
   private async generateOperationNo(tx: any, companyId: string) {
-    const count = await tx.operation.count({
+    const latest = await tx.operation.findFirst({
       where: { companyId },
+      orderBy: { operationNo: 'desc' },
+      select: { operationNo: true },
     });
-
-    const next = count + 1;
-    return `OP-${String(next).padStart(6, '0')}`;
+    const current = Number(String(latest?.operationNo || '').replace(/\D/g, '')) || 0;
+    return `OP-${String(current + 1).padStart(6, '0')}`;
   }
 
   private getPersistedSuccessMessage(

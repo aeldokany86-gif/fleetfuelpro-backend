@@ -817,6 +817,11 @@ export class AssetsService {
     approve: boolean,
     rejectionReason?: string,
   ) {
+    /*
+      Load the request and all current approvals before starting the transaction.
+      This keeps the interactive transaction focused on writes and avoids Prisma
+      P2028 errors when a remote database connection exceeds the 5-second limit.
+    */
     const request = await this.prisma.assetTransferRequest.findFirst({
       where: { id: transferId },
       include: {
@@ -845,7 +850,9 @@ export class AssetsService {
     );
 
     if (!pendingApproval) {
-      throw new BadRequestException('User cannot approve this asset transfer');
+      throw new BadRequestException(
+        'User cannot approve this asset transfer',
+      );
     }
 
     if (!approve) {
@@ -876,29 +883,33 @@ export class AssetsService {
       });
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      await tx.assetTransferApproval.update({
-        where: { id: pendingApproval.id },
-        data: {
-          status: 'APPROVED',
-          reviewedAt: now,
-        },
-      });
+    /*
+      Decide whether this is the final required approval from the approvals that
+      were already loaded. The current pending approval is treated as approved.
+    */
+    const hasOtherPendingApprovals = request.approvals.some(
+      (approval) =>
+        approval.id !== pendingApproval.id &&
+        approval.status === 'PENDING',
+    );
 
-      const approvals = await tx.assetTransferApproval.findMany({
-        where: { transferRequestId: transferId },
-      });
+    if (hasOtherPendingApprovals) {
+      return this.prisma.$transaction(async (tx) => {
+        await tx.assetTransferApproval.update({
+          where: { id: pendingApproval.id },
+          data: {
+            status: 'APPROVED',
+            reviewedAt: now,
+          },
+        });
 
-      const fullyApproved = approvals.every(
-        (approval) => approval.status === 'APPROVED',
-      );
-
-      if (!fullyApproved) {
         return tx.assetTransferRequest.update({
           where: { id: transferId },
           data: {
             status: 'PARTIALLY_APPROVED',
-            reason: `First approval by manager ${managerUserId}`,
+            reason: request.reason
+              ? `${request.reason}; Approval by manager ${managerUserId}`
+              : `First approval by manager ${managerUserId}`,
           },
           include: {
             asset: true,
@@ -907,7 +918,26 @@ export class AssetsService {
             approvals: true,
           },
         });
-      }
+      });
+    }
+
+    /*
+      Final approval transaction:
+      - approve the pending approval
+      - move the asset
+      - create assignment history
+      - finalize the transfer request
+
+      No additional reads run inside this transaction.
+    */
+    return this.prisma.$transaction(async (tx) => {
+      await tx.assetTransferApproval.update({
+        where: { id: pendingApproval.id },
+        data: {
+          status: 'APPROVED',
+          reviewedAt: now,
+        },
+      });
 
       await tx.asset.update({
         where: { id: request.assetId },
