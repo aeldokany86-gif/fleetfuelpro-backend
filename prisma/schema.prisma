@@ -24,20 +24,20 @@ model Company {
   updatedAt                DateTime                   @updatedAt
   deletedAt                DateTime?
   assets                   Asset[]
-  assetTransferRequests    AssetTransferRequest[]
   assetAssignmentHistory   AssetAssignmentHistory[]
-  stations                 Station[]
-  stationTransferRequests  StationTransferRequest[]
-  stationAssignmentHistory StationAssignmentHistory[]
-  stationStockMovements    StationStockMovement[]
-  projectFuelPriceHistory  ProjectFuelPriceHistory[]
+  assetTransferRequests    AssetTransferRequest[]
   employees                Employee[]
   employeeTransferRequests EmployeeTransferRequest[]
-  projects                 Project[]
-  roles                    Role[]
-  users                    User[]
   operations               Operation[]
   operationCorrections     OperationCorrection[]
+  projects                 Project[]
+  projectFuelPriceHistory  ProjectFuelPriceHistory[]
+  roles                    Role[]
+  stations                 Station[]
+  stationAssignmentHistory StationAssignmentHistory[]
+  stationStockMovements    StationStockMovement[]
+  stationTransferRequests  StationTransferRequest[]
+  users                    User[]
 }
 
 model Project {
@@ -48,28 +48,21 @@ model Project {
   location                     String?
   description                  String?
   isActive                     Boolean                    @default(true)
-  currentFuelPrice             Float                      @default(0)
-  fuelPriceCurrency            String                     @default("SAR")
-  fuelPriceEffectiveFrom       DateTime?
   createdById                  String?
   createdAt                    DateTime                   @default(now())
   updatedAt                    DateTime                   @updatedAt
   deletedAt                    DateTime?
   projectManagerId             String?
-  assetTransferApprovals       AssetTransferApproval[]    @relation("AssetTransferApprovalProject")
-  stationTransferApprovals     StationTransferApproval[]  @relation("StationTransferApprovalProject")
-  assetTransferRequestsFrom    AssetTransferRequest[]     @relation("AssetTransferFromProject")
-  stationTransferRequestsFrom  StationTransferRequest[]   @relation("StationTransferFromProject")
-  assetTransferRequestsTo      AssetTransferRequest[]     @relation("AssetTransferToProject")
-  stationTransferRequestsTo    StationTransferRequest[]   @relation("StationTransferToProject")
-  assetAssignmentHistoryFrom   AssetAssignmentHistory[]   @relation("AssetAssignmentFromProject")
-  stationAssignmentHistoryFrom StationAssignmentHistory[] @relation("StationAssignmentFromProject")
-  assetAssignmentHistoryTo     AssetAssignmentHistory[]   @relation("AssetAssignmentToProject")
-  stationAssignmentHistoryTo   StationAssignmentHistory[] @relation("StationAssignmentToProject")
+  currentFuelPrice             Float                      @default(0)
+  fuelPriceCurrency            String                     @default("SAR")
+  fuelPriceEffectiveFrom       DateTime?
   assets                       Asset[]
-  stations                     Station[]
+  assetAssignmentHistoryFrom   AssetAssignmentHistory[]   @relation("AssetAssignmentFromProject")
+  assetAssignmentHistoryTo     AssetAssignmentHistory[]   @relation("AssetAssignmentToProject")
+  assetTransferApprovals       AssetTransferApproval[]    @relation("AssetTransferApprovalProject")
+  assetTransferRequestsFrom    AssetTransferRequest[]     @relation("AssetTransferFromProject")
+  assetTransferRequestsTo      AssetTransferRequest[]     @relation("AssetTransferToProject")
   employees                    Employee[]
-  fuelPriceHistory             ProjectFuelPriceHistory[]
   employeeTransferApprovals    EmployeeTransferApproval[] @relation("EmployeeTransferApprovalProject")
   employeeTransferRequestsFrom EmployeeTransferRequest[]  @relation("EmployeeTransferFromProject")
   employeeTransferRequestsTo   EmployeeTransferRequest[]  @relation("EmployeeTransferToProject")
@@ -77,6 +70,13 @@ model Project {
   company                      Company                    @relation(fields: [companyId], references: [id])
   createdBy                    User?                      @relation("ProjectCreatedBy", fields: [createdById], references: [id])
   projectManager               User?                      @relation("ProjectManager", fields: [projectManagerId], references: [id])
+  fuelPriceHistory             ProjectFuelPriceHistory[]
+  stations                     Station[]
+  stationAssignmentHistoryFrom StationAssignmentHistory[] @relation("StationAssignmentFromProject")
+  stationAssignmentHistoryTo   StationAssignmentHistory[] @relation("StationAssignmentToProject")
+  stationTransferApprovals     StationTransferApproval[]  @relation("StationTransferApprovalProject")
+  stationTransferRequestsFrom  StationTransferRequest[]   @relation("StationTransferFromProject")
+  stationTransferRequestsTo    StationTransferRequest[]   @relation("StationTransferToProject")
 
   @@unique([companyId, code])
   @@index([companyId])
@@ -123,8 +123,6 @@ model User {
   companyId                     String
   roleId                        String
   fullName                      String
-  employeeId                    String?
-  username                      String?                    @unique
   email                         String?                    @unique
   phone                         String?
   passwordHash                  String
@@ -135,18 +133,13 @@ model User {
   createdAt                     DateTime                   @default(now())
   updatedAt                     DateTime                   @updatedAt
   deletedAt                     DateTime?
-  assetOdometerResets           AssetOdometerReset[]
-  stationCounterResets          StationCounterReset[]
-  stationStockMovements         StationStockMovement[]
-  projectFuelPriceHistory       ProjectFuelPriceHistory[]
-  assetTransferApprovals        AssetTransferApproval[]    @relation("AssetTransferApprover")
-  stationTransferApprovals      StationTransferApproval[]  @relation("StationTransferApprover")
-  assetAssignmentHistory        AssetAssignmentHistory[]   @relation("AssetAssignmentAssignedBy")
-  stationAssignmentHistory      StationAssignmentHistory[] @relation("StationAssignmentAssignedBy")
+  employeeId                    String?
+  username                      String?                    @unique
   createdAssets                 Asset[]                    @relation("AssetCreatedBy")
-  createdStations               Station[]                  @relation("StationCreatedBy")
+  assetAssignmentHistory        AssetAssignmentHistory[]   @relation("AssetAssignmentAssignedBy")
+  assetOdometerResets           AssetOdometerReset[]
+  assetTransferApprovals        AssetTransferApproval[]    @relation("AssetTransferApprover")
   requestedAssetTransfers       AssetTransferRequest[]     @relation("AssetTransferRequestedBy")
-  requestedStationTransfers     StationTransferRequest[]   @relation("StationTransferRequestedBy")
   createdEmployees              Employee[]                 @relation("EmployeeCreatedBy")
   linkedEmployee                Employee?                  @relation("EmployeeLinkedUser")
   employeeTransferApprovals     EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
@@ -157,7 +150,14 @@ model User {
   reviewedOperationCorrections  OperationCorrection[]      @relation("OperationCorrectionReviewedBy")
   createdProjects               Project[]                  @relation("ProjectCreatedBy")
   managedProjects               Project[]                  @relation("ProjectManager")
+  projectFuelPriceHistory       ProjectFuelPriceHistory[]
   refreshTokens                 RefreshToken[]
+  createdStations               Station[]                  @relation("StationCreatedBy")
+  stationAssignmentHistory      StationAssignmentHistory[] @relation("StationAssignmentAssignedBy")
+  stationCounterResets          StationCounterReset[]
+  stationStockMovements         StationStockMovement[]
+  stationTransferApprovals      StationTransferApproval[]  @relation("StationTransferApprover")
+  requestedStationTransfers     StationTransferRequest[]   @relation("StationTransferRequestedBy")
   company                       Company                    @relation(fields: [companyId], references: [id])
   createdBy                     User?                      @relation("UserCreatedBy", fields: [createdById], references: [id])
   createdUsers                  User[]                     @relation("UserCreatedBy")
@@ -211,9 +211,9 @@ model EmployeeTransferRequest {
   rejectedAt        DateTime?
   cancelledAt       DateTime?
   appliedAt         DateTime?
-  effectiveDate     DateTime?
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
+  effectiveDate     DateTime?
   approvals         EmployeeTransferApproval[]
   company           Company                    @relation(fields: [companyId], references: [id])
   employee          Employee                   @relation(fields: [employeeId], references: [id])
@@ -268,8 +268,8 @@ model Asset {
   company              Company                  @relation(fields: [companyId], references: [id])
   createdBy            User?                    @relation("AssetCreatedBy", fields: [createdById], references: [id])
   project              Project?                 @relation(fields: [projectId], references: [id])
-  odometerResetHistory AssetOdometerReset[]
   assignmentHistory    AssetAssignmentHistory[]
+  odometerResetHistory AssetOdometerReset[]
   transferRequests     AssetTransferRequest[]
   operations           Operation[]
 
@@ -311,11 +311,11 @@ model AssetTransferRequest {
   rejectedAt        DateTime?
   cancelledAt       DateTime?
   appliedAt         DateTime?
-  effectiveDate     DateTime?
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
-  approvals         AssetTransferApproval[]
+  effectiveDate     DateTime?
   assignmentHistory AssetAssignmentHistory[]
+  approvals         AssetTransferApproval[]
   asset             Asset                    @relation(fields: [assetId], references: [id])
   company           Company                  @relation(fields: [companyId], references: [id])
   fromProject       Project                  @relation("AssetTransferFromProject", fields: [fromProjectId], references: [id])
@@ -365,10 +365,10 @@ model AssetAssignmentHistory {
   assignedByUserId  String?
   createdAt         DateTime              @default(now())
   asset             Asset                 @relation(fields: [assetId], references: [id])
+  assignedBy        User?                 @relation("AssetAssignmentAssignedBy", fields: [assignedByUserId], references: [id])
   company           Company               @relation(fields: [companyId], references: [id])
   fromProject       Project?              @relation("AssetAssignmentFromProject", fields: [fromProjectId], references: [id])
   toProject         Project               @relation("AssetAssignmentToProject", fields: [toProjectId], references: [id])
-  assignedBy        User?                 @relation("AssetAssignmentAssignedBy", fields: [assignedByUserId], references: [id])
   transferRequest   AssetTransferRequest? @relation(fields: [transferRequestId], references: [id])
 
   @@index([companyId])
@@ -378,16 +378,6 @@ model AssetAssignmentHistory {
   @@index([transferRequestId])
   @@index([assignedByUserId])
   @@index([assignedAt])
-}
-
-enum AssetAssignmentType {
-  INITIAL_ASSIGNMENT
-  TRANSFER
-}
-
-enum AssetStatus {
-  ACTIVE
-  INACTIVE
 }
 
 model Station {
@@ -406,15 +396,15 @@ model Station {
   createdAt             DateTime                   @default(now())
   updatedAt             DateTime                   @updatedAt
   deletedAt             DateTime?
+  destinationOperations Operation[]                @relation("OperationDestinationStation")
+  sourceOperations      Operation[]                @relation("OperationSourceStation")
   company               Company                    @relation(fields: [companyId], references: [id])
-  project               Project?                   @relation(fields: [projectId], references: [id])
   createdBy             User?                      @relation("StationCreatedBy", fields: [createdById], references: [id])
+  project               Project?                   @relation(fields: [projectId], references: [id])
+  assignmentHistory     StationAssignmentHistory[]
   counterResetHistory   StationCounterReset[]
   stockMovements        StationStockMovement[]
-  assignmentHistory     StationAssignmentHistory[]
   transferRequests      StationTransferRequest[]
-  sourceOperations      Operation[]                @relation("OperationSourceStation")
-  destinationOperations Operation[]                @relation("OperationDestinationStation")
 
   @@unique([companyId, stationId])
   @@index([companyId])
@@ -432,8 +422,8 @@ model StationCounterReset {
   effectiveAt     DateTime @default(now())
   createdByUserId String?
   createdAt       DateTime @default(now())
-  station         Station  @relation(fields: [stationId], references: [id])
   createdBy       User?    @relation(fields: [createdByUserId], references: [id])
+  station         Station  @relation(fields: [stationId], references: [id])
 
   @@index([stationId])
   @@index([companyId])
@@ -454,9 +444,9 @@ model StationStockMovement {
   movementAt      DateTime                 @default(now())
   createdByUserId String?
   createdAt       DateTime                 @default(now())
-  station         Station                  @relation(fields: [stationId], references: [id])
   company         Company                  @relation(fields: [companyId], references: [id])
   createdBy       User?                    @relation(fields: [createdByUserId], references: [id])
+  station         Station                  @relation(fields: [stationId], references: [id])
 
   @@index([stationId])
   @@index([companyId])
@@ -481,9 +471,6 @@ model Operation {
   invoiceNumber            String?
   notes                    String?
   attachments              Json?
-  fuelPriceHistoryId       String?
-  pricePerLiterAtOperation Float?
-  totalCostAtOperation     Float?
   requestedByUserId        String
   completedAt              DateTime?
   approvedAt               DateTime?
@@ -491,12 +478,15 @@ model Operation {
   cancelledAt              DateTime?
   createdAt                DateTime                 @default(now())
   updatedAt                DateTime                 @updatedAt
-  company                  Company                  @relation(fields: [companyId], references: [id])
-  sourceStation            Station?                 @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
-  destinationStation       Station?                 @relation("OperationDestinationStation", fields: [destinationStationId], references: [id])
+  fuelPriceHistoryId       String?
+  pricePerLiterAtOperation Float?
+  totalCostAtOperation     Float?
   asset                    Asset?                   @relation(fields: [assetId], references: [id])
-  requestedBy              User                     @relation("OperationRequestedBy", fields: [requestedByUserId], references: [id])
+  company                  Company                  @relation(fields: [companyId], references: [id])
+  destinationStation       Station?                 @relation("OperationDestinationStation", fields: [destinationStationId], references: [id])
   fuelPriceHistory         ProjectFuelPriceHistory? @relation(fields: [fuelPriceHistoryId], references: [id])
+  requestedBy              User                     @relation("OperationRequestedBy", fields: [requestedByUserId], references: [id])
+  sourceStation            Station?                 @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
   approvals                OperationApproval[]
   corrections              OperationCorrection[]
 
@@ -525,8 +515,8 @@ model OperationApproval {
   reviewedAt     DateTime?
   createdAt      DateTime                @default(now())
   updatedAt      DateTime                @updatedAt
-  operation      Operation               @relation(fields: [operationId], references: [id])
   approver       User                    @relation("OperationApprover", fields: [approverUserId], references: [id])
+  operation      Operation               @relation(fields: [operationId], references: [id])
   project        Project                 @relation("OperationApprovalProject", fields: [projectId], references: [id])
 
   @@unique([operationId, approverUserId, projectId])
@@ -553,11 +543,10 @@ model OperationCorrection {
   rejectedAt        DateTime?
   createdAt         DateTime                  @default(now())
   updatedAt         DateTime                  @updatedAt
-
-  company     Company   @relation(fields: [companyId], references: [id])
-  operation   Operation @relation(fields: [operationId], references: [id])
-  requestedBy User      @relation("OperationCorrectionRequestedBy", fields: [requestedByUserId], references: [id])
-  reviewedBy  User?     @relation("OperationCorrectionReviewedBy", fields: [reviewedByUserId], references: [id])
+  company           Company                   @relation(fields: [companyId], references: [id])
+  operation         Operation                 @relation(fields: [operationId], references: [id])
+  requestedBy       User                      @relation("OperationCorrectionRequestedBy", fields: [requestedByUserId], references: [id])
+  reviewedBy        User?                     @relation("OperationCorrectionReviewedBy", fields: [reviewedByUserId], references: [id])
 
   @@index([companyId])
   @@index([operationId])
@@ -583,10 +572,10 @@ model ProjectFuelPriceHistory {
   reason            String?
   createdByUserId   String?
   createdAt         DateTime    @default(now())
-  project           Project     @relation(fields: [projectId], references: [id])
+  operations        Operation[]
   company           Company     @relation(fields: [companyId], references: [id])
   createdBy         User?       @relation(fields: [createdByUserId], references: [id])
-  operations        Operation[]
+  project           Project     @relation(fields: [projectId], references: [id])
 
   @@index([projectId])
   @@index([companyId])
@@ -608,16 +597,16 @@ model StationTransferRequest {
   rejectedAt        DateTime?
   cancelledAt       DateTime?
   appliedAt         DateTime?
-  effectiveDate     DateTime?
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
-  approvals         StationTransferApproval[]
+  effectiveDate     DateTime?
   assignmentHistory StationAssignmentHistory[]
-  station           Station                    @relation(fields: [stationId], references: [id])
+  approvals         StationTransferApproval[]
   company           Company                    @relation(fields: [companyId], references: [id])
   fromProject       Project                    @relation("StationTransferFromProject", fields: [fromProjectId], references: [id])
-  toProject         Project                    @relation("StationTransferToProject", fields: [toProjectId], references: [id])
   requestedBy       User                       @relation("StationTransferRequestedBy", fields: [requestedByUserId], references: [id])
+  station           Station                    @relation(fields: [stationId], references: [id])
+  toProject         Project                    @relation("StationTransferToProject", fields: [toProjectId], references: [id])
 
   @@index([companyId])
   @@index([stationId])
@@ -661,11 +650,11 @@ model StationAssignmentHistory {
   assignedAt        DateTime                @default(now())
   assignedByUserId  String?
   createdAt         DateTime                @default(now())
-  station           Station                 @relation(fields: [stationId], references: [id])
+  assignedBy        User?                   @relation("StationAssignmentAssignedBy", fields: [assignedByUserId], references: [id])
   company           Company                 @relation(fields: [companyId], references: [id])
   fromProject       Project?                @relation("StationAssignmentFromProject", fields: [fromProjectId], references: [id])
+  station           Station                 @relation(fields: [stationId], references: [id])
   toProject         Project                 @relation("StationAssignmentToProject", fields: [toProjectId], references: [id])
-  assignedBy        User?                   @relation("StationAssignmentAssignedBy", fields: [assignedByUserId], references: [id])
   transferRequest   StationTransferRequest? @relation(fields: [transferRequestId], references: [id])
 
   @@index([companyId])
@@ -675,6 +664,26 @@ model StationAssignmentHistory {
   @@index([transferRequestId])
   @@index([assignedByUserId])
   @@index([assignedAt])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id])
+}
+
+enum AssetAssignmentType {
+  INITIAL_ASSIGNMENT
+  TRANSFER
+}
+
+enum AssetStatus {
+  ACTIVE
+  INACTIVE
 }
 
 enum StationAssignmentType {
@@ -690,7 +699,6 @@ enum StationStatus {
 enum StationStockMovementType {
   OPENING_BALANCE
   ADJUSTMENT
-  PHYSICAL_ADJUSTMENT
   ZERO_BALANCE
   DIRECT_REFUEL_OUT
   INTERNAL_TRANSFER_IN
@@ -699,6 +707,7 @@ enum StationStockMovementType {
   EXTERNAL_TRANSFER_IN
   EXTERNAL_TRANSFER_OUT
   COUNTER_CORRECTION
+  PHYSICAL_ADJUSTMENT
 }
 
 enum StationTransferStatus {
@@ -757,16 +766,7 @@ enum OperationCorrectionField {
   INVOICE_NUMBER
   TOTAL_COST_AT_OPERATION
   NOTES
-}
-
-model RefreshToken {
-  id        String    @id @default(cuid())
-  userId    String
-  tokenHash String
-  expiresAt DateTime
-  revokedAt DateTime?
-  createdAt DateTime  @default(now())
-  user      User      @relation(fields: [userId], references: [id])
+  FUELER_ID
 }
 
 enum EmployeeStatus {

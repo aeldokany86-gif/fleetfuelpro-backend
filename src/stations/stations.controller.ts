@@ -47,6 +47,27 @@ export class StationsController {
     return this.stationsService.getPendingTransferRequests();
   }
 
+  @Get('stock-movements')
+  getAllStockMovements(
+    @Query('companyId') companyId?: string,
+    @Query('projectId') projectId?: string,
+    @Query('stationId') stationId?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('movementType') movementType?: string,
+    @Query('direction') direction?: string,
+  ) {
+    return this.stationsService.getAllStockMovements({
+      companyId,
+      projectId,
+      stationId,
+      dateFrom,
+      dateTo,
+      movementType,
+      direction,
+    });
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.stationsService.findOne(id);

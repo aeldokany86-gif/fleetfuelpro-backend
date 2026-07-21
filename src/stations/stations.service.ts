@@ -643,6 +643,140 @@ export class StationsService {
     });
   }
 
+  async getAllStockMovements(filters: {
+    companyId?: string;
+    projectId?: string;
+    stationId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    movementType?: string;
+    direction?: string;
+  }) {
+    const dateFrom = filters.dateFrom
+      ? this.parseOptionalDate(filters.dateFrom)
+      : undefined;
+    const dateTo = filters.dateTo
+      ? this.parseOptionalDate(filters.dateTo)
+      : undefined;
+
+    if (dateTo) {
+      dateTo.setHours(23, 59, 59, 999);
+    }
+
+    const direction = String(filters.direction || 'all').trim().toLowerCase();
+    const movementType = String(filters.movementType || '').trim().toUpperCase();
+
+    const movements = await this.prisma.stationStockMovement.findMany({
+      where: {
+        ...(filters.companyId ? { companyId: filters.companyId } : {}),
+        ...(filters.stationId ? { stationId: filters.stationId } : {}),
+        ...(movementType && movementType !== 'ALL'
+          ? { movementType: movementType as any }
+          : {}),
+        ...(direction === 'inbound' ? { quantity: { gt: 0 } } : {}),
+        ...(direction === 'outbound' ? { quantity: { lt: 0 } } : {}),
+        ...(dateFrom || dateTo
+          ? {
+              movementAt: {
+                ...(dateFrom ? { gte: dateFrom } : {}),
+                ...(dateTo ? { lte: dateTo } : {}),
+              },
+            }
+          : {}),
+        station: {
+          is: {
+            deletedAt: null,
+            ...(filters.projectId ? { projectId: filters.projectId } : {}),
+          },
+        },
+      },
+      include: {
+        station: {
+          include: {
+            project: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+              },
+            },
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+      },
+      orderBy: [{ movementAt: 'asc' }, { createdAt: 'asc' }],
+    });
+
+    const operationIds = Array.from(
+      new Set(
+        movements
+          .filter(
+            (movement) =>
+              String(movement.referenceType || '').toLowerCase() === 'operation' &&
+              movement.referenceId,
+          )
+          .map((movement) => movement.referenceId as string),
+      ),
+    );
+
+    const operations = operationIds.length
+      ? await this.prisma.operation.findMany({
+          where: { id: { in: operationIds } },
+          select: {
+            id: true,
+            operationNo: true,
+            type: true,
+            status: true,
+            sourceStationId: true,
+            destinationStationId: true,
+            asset: {
+              select: {
+                id: true,
+                assetId: true,
+                type: true,
+              },
+            },
+          },
+        })
+      : [];
+
+    const operationMap = new Map(
+      operations.map((operation) => [operation.id, operation]),
+    );
+
+    return movements.map((movement) => {
+      const operation = movement.referenceId
+        ? operationMap.get(movement.referenceId)
+        : undefined;
+
+      let relatedEntity = '';
+      if (operation?.asset) {
+        relatedEntity = operation.asset.assetId || operation.asset.type || '';
+      } else if (operation) {
+        const relatedStationId =
+          movement.stationId === operation.sourceStationId
+            ? operation.destinationStationId
+            : operation.sourceStationId;
+        relatedEntity = relatedStationId || '';
+      }
+
+      return {
+        ...movement,
+        referenceNo:
+          operation?.operationNo || movement.referenceId || movement.id,
+        referenceStatus: operation?.status || 'COMPLETED',
+        relatedEntity,
+        operationType: operation?.type || null,
+      };
+    });
+  }
+
   async getStockMovements(stationId: string) {
     const station = await this.prisma.station.findFirst({
       where: {

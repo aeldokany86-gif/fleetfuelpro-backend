@@ -882,12 +882,22 @@ async findPendingApprovals(request?: RequestLike) {
         currentUser,
       });
 
-      await this.updateAssetOdometerIfNeeded(tx, entities.asset, dto.odometer);
+      await this.updateAssetOdometerIfNeeded(
+        tx,
+        entities.asset,
+        dto.odometer,
+        operation.id,
+      );
       return;
     }
 
     if (type === 'EXTERNAL_DIRECT_REFUEL') {
-      await this.updateAssetOdometerIfNeeded(tx, entities.asset, dto.odometer);
+      await this.updateAssetOdometerIfNeeded(
+        tx,
+        entities.asset,
+        dto.odometer,
+        operation.id,
+      );
       return;
     }
 
@@ -994,18 +1004,77 @@ async findPendingApprovals(request?: RequestLike) {
     tx: any,
     asset: any,
     odometer?: number,
+    currentOperationId?: string,
   ) {
     if (!asset || odometer === undefined || odometer === null) return;
 
-    if (Number(odometer) < Number(asset.currentOdometer || 0)) {
+    const nextReading = Number(odometer);
+    if (!Number.isFinite(nextReading) || nextReading < 0) {
       throw new BadRequestException(
-        'New odometer/hour meter cannot be lower than current asset odometer.',
+        'New odometer/hour meter must be a valid non-negative number.',
+      );
+    }
+
+    const now = new Date();
+
+    const [latestEffectiveReset, nextFutureReset] = await Promise.all([
+      tx.assetOdometerReset.findFirst({
+        where: {
+          assetId: asset.id,
+          effectiveAt: { lte: now },
+        },
+        orderBy: [{ effectiveAt: 'desc' }, { createdAt: 'desc' }],
+        select: {
+          newOdometer: true,
+          effectiveAt: true,
+        },
+      }),
+      tx.assetOdometerReset.findFirst({
+        where: {
+          assetId: asset.id,
+          effectiveAt: { gt: now },
+        },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          oldOdometer: true,
+          effectiveAt: true,
+        },
+      }),
+    ]);
+
+    const latestCompletedOperation = await tx.operation.findFirst({
+      where: {
+        assetId: asset.id,
+        status: 'COMPLETED',
+        odometer: { not: null },
+        ...(currentOperationId ? { id: { not: currentOperationId } } : {}),
+        ...(latestEffectiveReset
+          ? { createdAt: { gte: latestEffectiveReset.effectiveAt } }
+          : {}),
+      },
+      orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }],
+      select: {
+        odometer: true,
+      },
+    });
+
+    const effectiveCurrentReading = latestCompletedOperation?.odometer != null
+      ? Number(latestCompletedOperation.odometer)
+      : latestEffectiveReset
+        ? Number(latestEffectiveReset.newOdometer || 0)
+        : nextFutureReset
+          ? Number(nextFutureReset.oldOdometer || 0)
+          : Number(asset.currentOdometer || 0);
+
+    if (nextReading < effectiveCurrentReading) {
+      throw new BadRequestException(
+        `New odometer/hour meter cannot be lower than the current meter-cycle reading (${effectiveCurrentReading}).`,
       );
     }
 
     await tx.asset.update({
       where: { id: asset.id },
-      data: { currentOdometer: Number(odometer) },
+      data: { currentOdometer: nextReading },
     });
   }
 

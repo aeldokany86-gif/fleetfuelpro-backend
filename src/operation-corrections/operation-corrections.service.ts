@@ -26,6 +26,7 @@ type CorrectionField =
   | 'ASSET_ID'
   | 'SOURCE_STATION_ID'
   | 'DESTINATION_STATION_ID'
+  | 'FUELER_ID'
   | 'QUANTITY'
   | 'ODOMETER'
   | 'STATION_COUNTER'
@@ -83,29 +84,41 @@ export class OperationCorrectionsService {
     const autoApprove = ['Manager', 'Admin', 'PlatformAdmin'].includes(currentUser.role);
 
     if (!autoApprove) {
-      const correction = await this.prisma.$transaction(async (tx) => {
-        const duplicate = await (tx as any).operationCorrection.findFirst({
-          where: { operationId: operation.id, fieldName, status: 'PENDING' },
-          select: { id: true },
-        });
-        if (duplicate) {
-          throw new BadRequestException('There is already a pending correction for this field.');
-        }
+      const correctionId = await this.prisma.$transaction(
+        async (tx) => {
+          const duplicate = await (tx as any).operationCorrection.findFirst({
+            where: { operationId: operation.id, fieldName, status: 'PENDING' },
+            select: { id: true },
+          });
+          if (duplicate) {
+            throw new BadRequestException('There is already a pending correction for this field.');
+          }
 
-        return (tx as any).operationCorrection.create({
-          data: {
-            companyId: currentUser.companyId,
-            operationId: operation.id,
-            fieldName,
-            oldValue: this.toJsonValue(oldValue),
-            newValue: this.toJsonValue(newValue),
-            reason,
-            status: 'PENDING',
-            requestedByUserId: currentUser.id,
-          },
-          include: this.correctionInclude(),
-        });
-      }, { maxWait: 5000, timeout: 5000, isolationLevel: 'Serializable' as any });
+          const created = await (tx as any).operationCorrection.create({
+            data: {
+              companyId: currentUser.companyId,
+              operationId: operation.id,
+              fieldName,
+              oldValue: this.toJsonValue(oldValue),
+              newValue: this.toJsonValue(newValue),
+              reason,
+              status: 'PENDING',
+              requestedByUserId: currentUser.id,
+            },
+            select: { id: true },
+          });
+
+          return created.id;
+        },
+        { maxWait: 5000, timeout: 5000, isolationLevel: 'Serializable' as any },
+      );
+
+      // Keep response hydration outside the interactive transaction so the
+      // transaction only contains the race-sensitive write path.
+      const correction = await (this.prisma as any).operationCorrection.findUnique({
+        where: { id: correctionId },
+        include: this.correctionInclude(),
+      });
 
       return {
         ok: true,
@@ -114,7 +127,7 @@ export class OperationCorrectionsService {
       };
     }
 
-    const correction = await this.prisma.$transaction(
+    const correctionId = await this.prisma.$transaction(
       async (tx) => {
         const duplicate = await (tx as any).operationCorrection.findFirst({
           where: { operationId: operation.id, fieldName, status: 'PENDING' },
@@ -139,25 +152,32 @@ export class OperationCorrectionsService {
             reviewedAt: new Date(),
             appliedAt: new Date(),
           },
-          include: this.correctionInclude(),
+          select: { id: true },
         });
 
         await this.applyCorrection(
           tx,
           {
-            ...created,
+            id: created.id,
+            fieldName,
+            newValue: this.toJsonValue(newValue),
             operation,
           },
           currentUser,
         );
 
-        return (tx as any).operationCorrection.findUnique({
-          where: { id: created.id },
-          include: this.correctionInclude(),
-        });
+        return created.id;
       },
       { maxWait: 5000, timeout: 5000, isolationLevel: 'Serializable' as any },
     );
+
+    // The relation-heavy response query is intentionally outside the
+    // transaction. This removes one database round trip from the 5-second
+    // transaction window without weakening atomic correction application.
+    const correction = await (this.prisma as any).operationCorrection.findUnique({
+      where: { id: correctionId },
+      include: this.correctionInclude(),
+    });
 
     return {
       ok: true,
@@ -275,7 +295,7 @@ export class OperationCorrectionsService {
       };
     }
 
-    const result = await this.prisma.$transaction(
+    await this.prisma.$transaction(
       async (tx) => {
         const claimed = await (tx as any).operationCorrection.updateMany({
           where: { id: correction.id, status: 'PENDING' },
@@ -296,14 +316,16 @@ export class OperationCorrectionsService {
           where: { id: correction.id },
           data: { status: 'APPLIED', appliedAt: new Date() },
         });
-
-        return (tx as any).operationCorrection.findUnique({
-          where: { id: correction.id },
-          include: this.correctionInclude(),
-        });
       },
       { maxWait: 5000, timeout: 5000 },
     );
+
+    // Fetch the response after commit; relation hydration is not part of the
+    // atomic state change and should not consume transaction time.
+    const result = await (this.prisma as any).operationCorrection.findUnique({
+      where: { id: correction.id },
+      include: this.correctionInclude(),
+    });
 
     return {
       ok: true,
@@ -333,6 +355,11 @@ export class OperationCorrectionsService {
 
     if (fieldName === 'DESTINATION_STATION_ID') {
       await this.applyDestinationStationCorrection(tx, operation, String(newValue), currentUser);
+      return;
+    }
+
+    if (fieldName === 'FUELER_ID') {
+      await this.applyFuelerCorrection(tx, operation, String(newValue));
       return;
     }
 
@@ -414,9 +441,9 @@ export class OperationCorrectionsService {
       throw new BadRequestException('Source station correction is not allowed for this operation type.');
     }
 
-    const oldStation = operation.sourceStationId
-      ? await tx.station.findFirst({ where: { id: operation.sourceStationId, companyId: operation.companyId } })
-      : null;
+    // The operation was loaded with its source station before the transaction.
+    // Reuse it instead of spending another transaction query on the same row.
+    const oldStation = operation.sourceStation || null;
     const newStation = await tx.station.findFirst({ where: { id: newStationId, companyId: operation.companyId, deletedAt: null } });
 
     if (!newStation) throw new NotFoundException('New source station was not found.');
@@ -459,9 +486,9 @@ export class OperationCorrectionsService {
       throw new BadRequestException('Destination station correction is not allowed for this operation type.');
     }
 
-    const oldStation = operation.destinationStationId
-      ? await tx.station.findFirst({ where: { id: operation.destinationStationId, companyId: operation.companyId } })
-      : null;
+    // The operation was loaded with its destination station before the
+    // transaction, so no additional lookup is required here.
+    const oldStation = operation.destinationStation || null;
     const newStation = await tx.station.findFirst({ where: { id: newStationId, companyId: operation.companyId, deletedAt: null } });
 
     if (!newStation) throw new NotFoundException('New destination station was not found.');
@@ -499,6 +526,91 @@ export class OperationCorrectionsService {
     });
   }
 
+  private async applyFuelerCorrection(
+    tx: any,
+    operation: any,
+    newRequestedByUserId: string,
+  ) {
+    const fueler = await (tx as any).employee.findFirst({
+      where: {
+        linkedUserId: newRequestedByUserId,
+        companyId: operation.companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        status: true,
+        projectId: true,
+        linkedUserId: true,
+        linkedUser: {
+          select: {
+            id: true,
+            companyId: true,
+            isActive: true,
+          },
+        },
+      },
+    });
+
+    if (!fueler) {
+      throw new NotFoundException(
+        'Fueler linked to the selected system user was not found.',
+      );
+    }
+
+    const normalizedStatus = String(fueler.status || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, '');
+
+    if (!['onduty', 'active'].includes(normalizedStatus)) {
+      throw new BadRequestException(
+        'Selected fueler must be active or on duty.',
+      );
+    }
+
+    if (!fueler.linkedUserId || !fueler.linkedUser) {
+      throw new BadRequestException(
+        'Selected fueler must be linked to a system user.',
+      );
+    }
+
+    if (fueler.linkedUser.companyId !== operation.companyId) {
+      throw new BadRequestException(
+        'Selected fueler user must belong to the operation company.',
+      );
+    }
+
+    if (fueler.linkedUser.isActive === false) {
+      throw new BadRequestException(
+        'Selected fueler user must be active.',
+      );
+    }
+
+    const operationProjectIds = [
+      operation.sourceStation?.projectId,
+      operation.destinationStation?.projectId,
+      operation.asset?.projectId,
+    ].filter(Boolean);
+
+    if (
+      fueler.projectId &&
+      operationProjectIds.length > 0 &&
+      !operationProjectIds.includes(fueler.projectId)
+    ) {
+      throw new BadRequestException(
+        'Selected fueler must belong to one of the operation projects.',
+      );
+    }
+
+    await (tx as any).operation.update({
+      where: { id: operation.id },
+      data: {
+        requestedByUserId: fueler.linkedUserId,
+      },
+    });
+  }
+
   private async applyQuantityCorrection(tx: any, operation: any, newQuantity: number, currentUser: CurrentUserContext) {
     if (!newQuantity || Number(newQuantity) <= 0) {
       throw new BadRequestException('New quantity must be greater than zero.');
@@ -510,7 +622,7 @@ export class OperationCorrectionsService {
     if (diff === 0) return;
 
     if (operation.type === 'DIRECT_REFUEL') {
-      const sourceStation = await tx.station.findFirst({ where: { id: operation.sourceStationId, companyId: operation.companyId } });
+      const sourceStation = operation.sourceStation;
       await this.createStockMovement(tx, {
         station: sourceStation,
         operation,
@@ -522,8 +634,8 @@ export class OperationCorrectionsService {
     }
 
     if (operation.type === 'INTERNAL_TRANSFER' || operation.type === 'EXTERNAL_TRANSFER') {
-      const sourceStation = await tx.station.findFirst({ where: { id: operation.sourceStationId, companyId: operation.companyId } });
-      const destinationStation = await tx.station.findFirst({ where: { id: operation.destinationStationId, companyId: operation.companyId } });
+      const sourceStation = operation.sourceStation;
+      const destinationStation = operation.destinationStation;
 
       await this.createStockMovement(tx, {
         station: sourceStation,
@@ -545,7 +657,7 @@ export class OperationCorrectionsService {
     }
 
     if (operation.type === 'EXTERNAL_SUPPLY') {
-      const destinationStation = await tx.station.findFirst({ where: { id: operation.destinationStationId, companyId: operation.companyId } });
+      const destinationStation = operation.destinationStation;
 
       await this.createStockMovement(tx, {
         station: destinationStation,
@@ -575,9 +687,7 @@ export class OperationCorrectionsService {
     }
 
     if (!operation.assetId) throw new BadRequestException('Operation asset is required for odometer correction.');
-
-    const asset = await tx.asset.findFirst({ where: { id: operation.assetId, companyId: operation.companyId } });
-    if (!asset) throw new NotFoundException('Asset was not found.');
+    if (!operation.asset) throw new NotFoundException('Asset was not found.');
 
     if (Number(newOdometer) < 0) throw new BadRequestException('Odometer cannot be negative.');
 
@@ -747,6 +857,83 @@ export class OperationCorrectionsService {
       return station.id;
     }
 
+    if (fieldName === 'FUELER_ID') {
+      const fueler = await (this.prisma as any).employee.findFirst({
+        where: {
+          id: String(value),
+          companyId,
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          status: true,
+          projectId: true,
+          linkedUserId: true,
+          linkedUser: {
+            select: {
+              id: true,
+              companyId: true,
+              isActive: true,
+            },
+          },
+        },
+      });
+
+      if (!fueler) {
+        throw new NotFoundException('Fueler was not found.');
+      }
+
+      const normalizedStatus = String(fueler.status || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[\s_-]+/g, '');
+
+      if (!['onduty', 'active'].includes(normalizedStatus)) {
+        throw new BadRequestException(
+          'Selected fueler must be active or on duty.',
+        );
+      }
+
+      if (!fueler.linkedUserId || !fueler.linkedUser) {
+        throw new BadRequestException(
+          'Selected fueler must be linked to a system user.',
+        );
+      }
+
+      if (fueler.linkedUser.companyId !== companyId) {
+        throw new BadRequestException(
+          'Selected fueler user must belong to the operation company.',
+        );
+      }
+
+      if (fueler.linkedUser.isActive === false) {
+        throw new BadRequestException(
+          'Selected fueler user must be active.',
+        );
+      }
+
+      const operationProjectIds = [
+        operation.sourceStation?.projectId,
+        operation.destinationStation?.projectId,
+        operation.asset?.projectId,
+      ].filter(Boolean);
+
+      if (
+        fueler.projectId &&
+        operationProjectIds.length > 0 &&
+        !operationProjectIds.includes(fueler.projectId)
+      ) {
+        throw new BadRequestException(
+          'Selected fueler must belong to one of the operation projects.',
+        );
+      }
+
+      // Operation stores the executing person in requestedByUserId.
+      // The correction payload starts with an Employee ID, so normalize it
+      // to the linked system User ID before persisting the correction.
+      return fueler.linkedUserId;
+    }
+
     return String(value ?? '').trim();
   }
 
@@ -791,6 +978,7 @@ export class OperationCorrectionsService {
       ASSET_ID: operation.assetId,
       SOURCE_STATION_ID: operation.sourceStationId,
       DESTINATION_STATION_ID: operation.destinationStationId,
+      FUELER_ID: operation.requestedByUserId,
       QUANTITY: operation.quantity,
       ODOMETER: operation.odometer,
       STATION_COUNTER: operation.stationCounter,
@@ -876,6 +1064,12 @@ export class OperationCorrectionsService {
       DESTINATION_STATION: 'DESTINATION_STATION_ID',
       DESTINATION_STATION_ID: 'DESTINATION_STATION_ID',
       DESTINATIONSTATIONID: 'DESTINATION_STATION_ID',
+      FUELER: 'FUELER_ID',
+      FUELER_ID: 'FUELER_ID',
+      FUELERID: 'FUELER_ID',
+      OPERATOR: 'FUELER_ID',
+      OPERATOR_ID: 'FUELER_ID',
+      OPERATORID: 'FUELER_ID',
       QUANTITY: 'QUANTITY',
       DIESEL_QUANTITY: 'QUANTITY',
       ODOMETER: 'ODOMETER',
