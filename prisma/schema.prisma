@@ -252,28 +252,31 @@ model EmployeeTransferApproval {
 }
 
 model Asset {
-  id                   String                   @id @default(cuid())
-  companyId            String
-  assetId              String
-  type                 String
-  category             String?
-  fuelTankCapacity     Float?
-  currentOdometer      Float                    @default(0)
-  status               AssetStatus              @default(ACTIVE)
-  projectId            String?
-  createdById          String?
-  createdAt            DateTime                 @default(now())
-  updatedAt            DateTime                 @updatedAt
-  deletedAt            DateTime?
-  company              Company                  @relation(fields: [companyId], references: [id])
-  createdBy            User?                    @relation("AssetCreatedBy", fields: [createdById], references: [id])
-  project              Project?                 @relation(fields: [projectId], references: [id])
-  assignmentHistory    AssetAssignmentHistory[]
-  odometerResetHistory AssetOdometerReset[]
-  transferRequests     AssetTransferRequest[]
-  operations           Operation[]
+  id                      String                   @id @default(cuid())
+  companyId               String
+  assetId                 String
+  type                    String
+  category                String?
+  fuelTankCapacity        Float?
+  currentOdometer         Float                    @default(0)
+  currentLifetimeOdometer Float                    @default(0)
+  currentMeterCycle       Int                      @default(1)
+  status                  AssetStatus              @default(ACTIVE)
+  projectId               String?
+  createdById             String?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  deletedAt               DateTime?
+  company                 Company                  @relation(fields: [companyId], references: [id])
+  createdBy               User?                    @relation("AssetCreatedBy", fields: [createdById], references: [id])
+  project                 Project?                 @relation(fields: [projectId], references: [id])
+  assignmentHistory       AssetAssignmentHistory[]
+  odometerResetHistory    AssetOdometerReset[]
+  transferRequests        AssetTransferRequest[]
+  operations              Operation[]
 
-  @@unique([companyId, assetId])
+  // Asset codes remain reserved inside the company even after soft delete.
+  @@unique([companyId, assetId], map: "Asset_companyId_assetId_key")
   @@index([companyId])
   @@index([projectId])
   @@index([status])
@@ -285,6 +288,9 @@ model AssetOdometerReset {
   companyId       String
   oldOdometer     Float
   newOdometer     Float
+  lifetimeAtReset Float    @default(0)
+  oldMeterCycle   Int      @default(1)
+  newMeterCycle   Int      @default(1)
   reason          String
   effectiveAt     DateTime @default(now())
   createdByUserId String?
@@ -381,30 +387,32 @@ model AssetAssignmentHistory {
 }
 
 model Station {
-  id                    String                     @id @default(cuid())
-  companyId             String
-  stationId             String
-  name                  String?
-  type                  String?
-  capacity              Float?
-  openingBalance        Float                      @default(0)
-  currentStock          Float                      @default(0)
-  currentCounter        Float                      @default(0)
-  status                StationStatus              @default(ACTIVE)
-  projectId             String?
-  createdById           String?
-  createdAt             DateTime                   @default(now())
-  updatedAt             DateTime                   @updatedAt
-  deletedAt             DateTime?
-  destinationOperations Operation[]                @relation("OperationDestinationStation")
-  sourceOperations      Operation[]                @relation("OperationSourceStation")
-  company               Company                    @relation(fields: [companyId], references: [id])
-  createdBy             User?                      @relation("StationCreatedBy", fields: [createdById], references: [id])
-  project               Project?                   @relation(fields: [projectId], references: [id])
-  assignmentHistory     StationAssignmentHistory[]
-  counterResetHistory   StationCounterReset[]
-  stockMovements        StationStockMovement[]
-  transferRequests      StationTransferRequest[]
+  id                     String                     @id @default(cuid())
+  companyId              String
+  stationId              String
+  name                   String?
+  type                   String?
+  capacity               Float?
+  openingBalance         Float                      @default(0)
+  currentStock           Float                      @default(0)
+  currentCounter         Float                      @default(0)
+  currentLifetimeCounter Float                      @default(0)
+  currentCounterCycle    Int                        @default(1)
+  status                 StationStatus              @default(ACTIVE)
+  projectId              String?
+  createdById            String?
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  deletedAt              DateTime?
+  destinationOperations  Operation[]                @relation("OperationDestinationStation")
+  sourceOperations       Operation[]                @relation("OperationSourceStation")
+  company                Company                    @relation(fields: [companyId], references: [id])
+  createdBy              User?                      @relation("StationCreatedBy", fields: [createdById], references: [id])
+  project                Project?                   @relation(fields: [projectId], references: [id])
+  assignmentHistory      StationAssignmentHistory[]
+  counterResetHistory    StationCounterReset[]
+  stockMovements         StationStockMovement[]
+  transferRequests       StationTransferRequest[]
 
   @@unique([companyId, stationId])
   @@index([companyId])
@@ -418,6 +426,9 @@ model StationCounterReset {
   companyId       String
   oldCounter      Float
   newCounter      Float
+  lifetimeAtReset Float    @default(0)
+  oldCounterCycle Int      @default(1)
+  newCounterCycle Int      @default(1)
   reason          String
   effectiveAt     DateTime @default(now())
   createdByUserId String?
@@ -456,39 +467,43 @@ model StationStockMovement {
 }
 
 model Operation {
-  id                       String                   @id @default(cuid())
-  companyId                String
-  operationNo              String
-  type                     OperationType
-  status                   OperationStatus          @default(COMPLETED)
-  sourceStationId          String?
-  destinationStationId     String?
-  assetId                  String?
-  quantity                 Float
-  odometer                 Float?
-  stationCounter           Float?
-  externalStationName      String?
-  invoiceNumber            String?
-  notes                    String?
-  attachments              Json?
-  requestedByUserId        String
-  completedAt              DateTime?
-  approvedAt               DateTime?
-  rejectedAt               DateTime?
-  cancelledAt              DateTime?
-  createdAt                DateTime                 @default(now())
-  updatedAt                DateTime                 @updatedAt
-  fuelPriceHistoryId       String?
-  pricePerLiterAtOperation Float?
-  totalCostAtOperation     Float?
-  asset                    Asset?                   @relation(fields: [assetId], references: [id])
-  company                  Company                  @relation(fields: [companyId], references: [id])
-  destinationStation       Station?                 @relation("OperationDestinationStation", fields: [destinationStationId], references: [id])
-  fuelPriceHistory         ProjectFuelPriceHistory? @relation(fields: [fuelPriceHistoryId], references: [id])
-  requestedBy              User                     @relation("OperationRequestedBy", fields: [requestedByUserId], references: [id])
-  sourceStation            Station?                 @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
-  approvals                OperationApproval[]
-  corrections              OperationCorrection[]
+  id                        String                   @id @default(cuid())
+  companyId                 String
+  operationNo               String
+  type                      OperationType
+  status                    OperationStatus          @default(COMPLETED)
+  sourceStationId           String?
+  destinationStationId      String?
+  assetId                   String?
+  quantity                  Float
+  odometer                  Float?
+  lifetimeOdometer          Float?
+  assetMeterCycleNumber     Int?
+  stationCounter            Float?
+  lifetimeCounter           Float?
+  stationCounterCycleNumber Int?
+  externalStationName       String?
+  invoiceNumber             String?
+  notes                     String?
+  attachments               Json?
+  requestedByUserId         String
+  completedAt               DateTime?
+  approvedAt                DateTime?
+  rejectedAt                DateTime?
+  cancelledAt               DateTime?
+  createdAt                 DateTime                 @default(now())
+  updatedAt                 DateTime                 @updatedAt
+  fuelPriceHistoryId        String?
+  pricePerLiterAtOperation  Float?
+  totalCostAtOperation      Float?
+  asset                     Asset?                   @relation(fields: [assetId], references: [id])
+  company                   Company                  @relation(fields: [companyId], references: [id])
+  destinationStation        Station?                 @relation("OperationDestinationStation", fields: [destinationStationId], references: [id])
+  fuelPriceHistory          ProjectFuelPriceHistory? @relation(fields: [fuelPriceHistoryId], references: [id])
+  requestedBy               User                     @relation("OperationRequestedBy", fields: [requestedByUserId], references: [id])
+  sourceStation             Station?                 @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
+  approvals                 OperationApproval[]
+  corrections               OperationCorrection[]
 
   @@unique([companyId, operationNo])
   @@index([companyId])

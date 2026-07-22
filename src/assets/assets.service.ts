@@ -11,7 +11,10 @@ export class AssetsService {
   constructor(private prisma: PrismaService) {}
 
   private normalizeAssetId(assetId: string) {
-    return String(assetId || '').trim();
+    return String(assetId || '')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, '');
   }
 
   private mapAssetStatus(status?: string) {
@@ -120,7 +123,6 @@ export class AssetsService {
   async findAll(companyId?: string, projectId?: string) {
     return this.prisma.asset.findMany({
       where: {
-        deletedAt: null,
         ...(companyId ? { companyId } : {}),
         ...(projectId ? { projectId } : {}),
       },
@@ -246,13 +248,13 @@ export class AssetsService {
     const [company, project, duplicate] = await Promise.all([
       this.ensureCompany(body.companyId),
       this.ensureProject(body.projectId ?? null, body.companyId),
-      this.prisma.asset.findFirst({
+      this.prisma.asset.findMany({
         where: {
           companyId: body.companyId,
-          assetId,
         },
         select: {
           id: true,
+          assetId: true,
           deletedAt: true,
         },
       }),
@@ -263,8 +265,12 @@ export class AssetsService {
     void company;
     void project;
 
-    if (duplicate) {
-      if (duplicate.deletedAt) {
+    const duplicateAsset = duplicate.find(
+      (item) => this.normalizeAssetId(item.assetId) === assetId,
+    );
+
+    if (duplicateAsset) {
+      if (duplicateAsset.deletedAt) {
         throw new BadRequestException(
           'This Asset ID was previously used and cannot be reused',
         );
@@ -290,6 +296,11 @@ export class AssetsService {
             body.currentOdometer === undefined || body.currentOdometer === null
               ? 0
               : Number(body.currentOdometer),
+          currentLifetimeOdometer:
+            body.currentOdometer === undefined || body.currentOdometer === null
+              ? 0
+              : Number(body.currentOdometer),
+          currentMeterCycle: 1,
           projectId: body.projectId || null,
           status: this.mapAssetStatus(body.status) as any,
           createdById: body.createdById || null,
@@ -356,21 +367,27 @@ export class AssetsService {
       throw new BadRequestException('Asset ID is required');
     }
 
-    if (nextAssetId !== existingAsset.assetId) {
-      const duplicate = await this.prisma.asset.findFirst({
+    if (
+      nextAssetId !== this.normalizeAssetId(existingAsset.assetId)
+    ) {
+      const companyAssets = await this.prisma.asset.findMany({
         where: {
           companyId: existingAsset.companyId,
-          assetId: nextAssetId,
           NOT: { id },
         },
         select: {
           id: true,
+          assetId: true,
           deletedAt: true,
         },
       });
 
-      if (duplicate) {
-        if (duplicate.deletedAt) {
+      const duplicateAsset = companyAssets.find(
+        (item) => this.normalizeAssetId(item.assetId) === nextAssetId,
+      );
+
+      if (duplicateAsset) {
+        if (duplicateAsset.deletedAt) {
           throw new BadRequestException(
             'This Asset ID was previously used and cannot be reused',
           );
@@ -439,10 +456,172 @@ export class AssetsService {
       createdByUserId?: string;
     },
   ) {
-    const asset = await this.prisma.asset.findFirst({
-      where: {
-        id,
-        deletedAt: null,
+    const newOdometer = Number(body.newOdometer);
+
+    if (!Number.isFinite(newOdometer) || newOdometer < 0) {
+      throw new BadRequestException(
+        'New odometer must be a valid non-negative number',
+      );
+    }
+
+    if (!body.reason?.trim()) {
+      throw new BadRequestException('Reset reason is required');
+    }
+
+    const now = new Date();
+    const rawEffectiveAt = String(body.effectiveAt || '').trim();
+    const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(rawEffectiveAt);
+
+    let effectiveAt = rawEffectiveAt ? new Date(rawEffectiveAt) : now;
+
+    if (Number.isNaN(effectiveAt.getTime())) {
+      throw new BadRequestException('Invalid effective date');
+    }
+
+    /*
+      The frontend date input sends YYYY-MM-DD without a clock time.
+      When the selected date is today, treat the reset as happening now,
+      otherwise JavaScript would parse it at midnight and incorrectly make
+      a normal operational reset look historical.
+    */
+    if (isDateOnly) {
+      const todayUtc = now.toISOString().slice(0, 10);
+
+      if (rawEffectiveAt === todayUtc) {
+        effectiveAt = now;
+      }
+    }
+
+    /*
+      Load validation data before opening the interactive transaction.
+      The transaction below is write-only and contains only:
+      1) reset history creation
+      2) asset current-state update
+
+      A normal reset must never rebuild or rewrite historical operations.
+    */
+    const [asset, latestCompletedOperation] = await Promise.all([
+      this.prisma.asset.findFirst({
+        where: {
+          id,
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          companyId: true,
+          currentOdometer: true,
+          currentLifetimeOdometer: true,
+          currentMeterCycle: true,
+        },
+      }),
+      this.prisma.operation.findFirst({
+        where: {
+          assetId: id,
+          status: 'COMPLETED',
+          odometer: { not: null },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: {
+          id: true,
+          operationNo: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    if (!asset) {
+      throw new NotFoundException('Asset not found');
+    }
+
+    /*
+      Backdated resets change the meaning of later operations and therefore
+      belong to the historical-correction workflow, not the normal reset flow.
+    */
+    if (
+      latestCompletedOperation &&
+      effectiveAt.getTime() < latestCompletedOperation.createdAt.getTime()
+    ) {
+      throw new BadRequestException(
+        `Reset effective date cannot be earlier than the latest completed operation (${latestCompletedOperation.operationNo}). Use the historical correction workflow for a backdated reset.`,
+      );
+    }
+
+    const currentLifetime = this.getEffectiveAssetLifetime(asset);
+    const oldMeterCycle = Number(asset.currentMeterCycle || 1);
+    const newMeterCycle = oldMeterCycle + 1;
+    const oldOdometer = Number(asset.currentOdometer || 0);
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        const resetRecord = await tx.assetOdometerReset.create({
+          data: {
+            assetId: asset.id,
+            companyId: asset.companyId,
+            oldOdometer,
+            newOdometer,
+            lifetimeAtReset: currentLifetime,
+            oldMeterCycle,
+            newMeterCycle,
+            reason: body.reason.trim(),
+            effectiveAt,
+            createdByUserId: body.createdByUserId || null,
+          },
+        });
+
+        const updatedAsset = await tx.asset.update({
+          where: { id: asset.id },
+          data: {
+            currentOdometer: newOdometer,
+            currentLifetimeOdometer: currentLifetime,
+            currentMeterCycle: newMeterCycle,
+          },
+          include: {
+            company: {
+              select: { id: true, name: true, code: true },
+            },
+            project: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+                projectManagerId: true,
+              },
+            },
+          },
+        });
+
+        return { asset: updatedAsset, resetRecord };
+      },
+      {
+        maxWait: 5000,
+        timeout: 10000,
+      },
+    );
+  }
+
+
+  private getEffectiveAssetLifetime(asset: any) {
+    const storedLifetime = Number(asset?.currentLifetimeOdometer || 0);
+    const currentReading = Number(asset?.currentOdometer || 0);
+    const currentCycle = Number(asset?.currentMeterCycle || 1);
+
+    // Existing assets received the new lifetime field with a database default of 0.
+    // During cycle 1, the physical reading itself is the safe initial lifetime baseline.
+    if (currentCycle === 1 && storedLifetime === 0 && currentReading > 0) {
+      return currentReading;
+    }
+
+    return storedLifetime;
+  }
+
+  private async rebuildAssetLifetimeHistory(tx: any, assetId: string) {
+    const asset = await tx.asset.findUnique({
+      where: { id: assetId },
+      select: {
+        id: true,
+        currentOdometer: true,
+        currentLifetimeOdometer: true,
+        currentMeterCycle: true,
       },
     });
 
@@ -450,51 +629,147 @@ export class AssetsService {
       throw new NotFoundException('Asset not found');
     }
 
-    const newOdometer = Number(body.newOdometer);
-    if (!Number.isFinite(newOdometer) || newOdometer < 0) {
-      throw new BadRequestException('New odometer must be a valid positive number');
-    }
+    const [operations, resets] = await Promise.all([
+      tx.operation.findMany({
+        where: {
+          assetId,
+          status: 'COMPLETED',
+          odometer: { not: null },
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          odometer: true,
+          createdAt: true,
+        },
+      }),
+      tx.assetOdometerReset.findMany({
+        where: { assetId },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true,
+          oldOdometer: true,
+          newOdometer: true,
+          effectiveAt: true,
+          createdAt: true,
+        },
+      }),
+    ]);
 
-    if (!body.reason?.trim()) {
-      throw new BadRequestException('Reset reason is required');
-    }
+    const events = [
+      ...operations.map((operation: any) => ({
+        kind: 'OPERATION' as const,
+        at: operation.createdAt,
+        createdAt: operation.createdAt,
+        item: operation,
+      })),
+      ...resets.map((reset: any) => ({
+        kind: 'RESET' as const,
+        at: reset.effectiveAt,
+        createdAt: reset.createdAt,
+        item: reset,
+      })),
+    ].sort((a, b) => {
+      const effectiveTime =
+        new Date(a.at).getTime() - new Date(b.at).getTime();
 
-    const effectiveAt = body.effectiveAt
-      ? new Date(body.effectiveAt)
-      : new Date();
+      if (effectiveTime !== 0) {
+        return effectiveTime;
+      }
 
-    if (Number.isNaN(effectiveAt.getTime())) {
-      throw new BadRequestException('Invalid effective date');
-    }
+      const createdTime =
+        new Date(a.createdAt).getTime() -
+        new Date(b.createdAt).getTime();
 
-    return this.prisma.$transaction(async (tx) => {
-      const resetRecord = await tx.assetOdometerReset.create({
+      if (createdTime !== 0) {
+        return createdTime;
+      }
+
+      return a.kind === 'RESET' ? -1 : 1;
+    });
+
+    let cycleNumber = 1;
+    let lifetimeOdometer: number | null = null;
+    let previousReading: number | null = null;
+    let latestReading = Number(asset.currentOdometer || 0);
+    let hasHistoricalEvent = false;
+
+    for (const event of events) {
+      hasHistoricalEvent = true;
+
+      if (event.kind === 'RESET') {
+        const reset = event.item;
+        const oldMeterCycle = cycleNumber;
+        const newMeterCycle = oldMeterCycle + 1;
+        const oldReading = Number(reset.oldOdometer || 0);
+        const newCycleStartReading = Number(reset.newOdometer || 0);
+
+        if (lifetimeOdometer === null) {
+          lifetimeOdometer = oldReading;
+        }
+
+        await tx.assetOdometerReset.update({
+          where: { id: reset.id },
+          data: {
+            lifetimeAtReset: lifetimeOdometer,
+            oldMeterCycle,
+            newMeterCycle,
+          },
+        });
+
+        cycleNumber = newMeterCycle;
+        previousReading = newCycleStartReading;
+        latestReading = newCycleStartReading;
+        continue;
+      }
+
+      const reading = Number(event.item.odometer);
+
+      if (!Number.isFinite(reading) || reading < 0) {
+        throw new BadRequestException(
+          'Historical operation contains an invalid odometer reading.',
+        );
+      }
+
+      if (previousReading === null) {
+        lifetimeOdometer = reading;
+        previousReading = reading;
+      } else {
+        if (reading < previousReading) {
+          throw new BadRequestException(
+            `Operation odometer (${reading}) cannot be lower than the previous reading (${previousReading}) in meter cycle ${cycleNumber}.`,
+          );
+        }
+
+        lifetimeOdometer =
+          Number(lifetimeOdometer || 0) + (reading - previousReading);
+        previousReading = reading;
+      }
+
+      latestReading = reading;
+
+      await tx.operation.update({
+        where: { id: event.item.id },
         data: {
-          assetId: asset.id,
-          companyId: asset.companyId,
-          oldOdometer: Number(asset.currentOdometer || 0),
-          newOdometer,
-          reason: body.reason.trim(),
-          effectiveAt,
-          createdByUserId: body.createdByUserId || null,
+          lifetimeOdometer,
+          assetMeterCycleNumber: cycleNumber,
         },
       });
+    }
 
-      const updatedAsset = await tx.asset.update({
-        where: { id: asset.id },
-        data: { currentOdometer: newOdometer },
-        include: {
-          // ✅ OPTIMIZATION: select بدل include الكامل
-          company: {
-            select: { id: true, name: true, code: true },
-          },
-          project: {
-            select: { id: true, code: true, name: true, projectManagerId: true },
-          },
-        },
-      });
+    if (!hasHistoricalEvent) {
+      latestReading = Number(asset.currentOdometer || 0);
+      lifetimeOdometer = this.getEffectiveAssetLifetime(asset);
+      cycleNumber = Number(asset.currentMeterCycle || 1);
+    }
 
-      return { asset: updatedAsset, resetRecord };
+    await tx.asset.update({
+      where: { id: assetId },
+      data: {
+        currentOdometer: latestReading,
+        currentLifetimeOdometer: Number(lifetimeOdometer || 0),
+        currentMeterCycle: cycleNumber,
+      },
     });
   }
 
@@ -993,7 +1268,23 @@ export class AssetsService {
 
     return this.prisma.asset.update({
       where: { id },
-      data: { deletedAt: new Date() },
+      data: {
+        deletedAt: new Date(),
+        status: 'INACTIVE',
+      },
+      include: {
+        company: {
+          select: { id: true, name: true, code: true },
+        },
+        project: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            projectManagerId: true,
+          },
+        },
+      },
     });
   }
 }

@@ -337,6 +337,8 @@ export class StationsService {
         openingBalance,
         currentStock: openingBalance,
         currentCounter,
+        currentLifetimeCounter: currentCounter,
+        currentCounterCycle: 1,
         projectId: body.projectId || null,
         status: this.mapStationStatus(body.status) as any,
         createdById: body.createdById || null,
@@ -531,25 +533,29 @@ export class StationsService {
     const effectiveAt = this.parseOptionalDate(body.effectiveAt);
 
     return this.prisma.$transaction(async (tx) => {
+      const currentLifetime = this.getEffectiveStationLifetime(station);
+      const oldCounterCycle = Number(station.currentCounterCycle || 1);
+      const newCounterCycle = oldCounterCycle + 1;
+
       const resetRecord = await tx.stationCounterReset.create({
         data: {
           stationId: station.id,
           companyId: station.companyId,
           oldCounter: Number(station.currentCounter || 0),
           newCounter,
+          lifetimeAtReset: currentLifetime,
+          oldCounterCycle,
+          newCounterCycle,
           reason: body.reason.trim(),
           effectiveAt,
           createdByUserId: body.createdByUserId || null,
         },
       });
 
-      const updatedStation = await tx.station.update({
-        where: {
-          id: station.id,
-        },
-        data: {
-          currentCounter: newCounter,
-        },
+      await this.rebuildStationLifetimeHistory(tx, station.id);
+
+      const updatedStation = await tx.station.findUnique({
+        where: { id: station.id },
         include: {
           company: true,
           project: true,
@@ -560,6 +566,152 @@ export class StationsService {
         station: updatedStation,
         resetRecord,
       };
+    }, { maxWait: 5000, timeout: 15000 });
+  }
+
+
+  private getEffectiveStationLifetime(station: any) {
+    const storedLifetime = Number(station?.currentLifetimeCounter || 0);
+    const currentReading = Number(station?.currentCounter || 0);
+    const currentCycle = Number(station?.currentCounterCycle || 1);
+
+    if (currentCycle === 1 && storedLifetime === 0 && currentReading > 0) {
+      return currentReading;
+    }
+
+    return storedLifetime;
+  }
+
+  private operationUsesStationCounter(operation: any, stationId: string) {
+    if (operation.type === 'DIRECT_REFUEL') {
+      return operation.sourceStationId === stationId;
+    }
+    if (operation.type === 'INTERNAL_TRANSFER') {
+      return operation.sourceStationId === stationId;
+    }
+    if (operation.type === 'EXTERNAL_SUPPLY') {
+      return operation.destinationStationId === stationId;
+    }
+    if (operation.type === 'EXTERNAL_TRANSFER') {
+      return operation.sourceStationId === stationId;
+    }
+    return false;
+  }
+
+  private async rebuildStationLifetimeHistory(tx: any, stationId: string) {
+    const station = await tx.station.findUnique({ where: { id: stationId } });
+    if (!station) throw new NotFoundException('Station not found');
+
+    const [candidateOperations, resets] = await Promise.all([
+      tx.operation.findMany({
+        where: {
+          status: 'COMPLETED',
+          stationCounter: { not: null },
+          OR: [{ sourceStationId: stationId }, { destinationStationId: stationId }],
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          type: true,
+          sourceStationId: true,
+          destinationStationId: true,
+          stationCounter: true,
+          createdAt: true,
+        },
+      }),
+      tx.stationCounterReset.findMany({
+        where: { stationId },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true,
+          newCounter: true,
+          effectiveAt: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    const operations = candidateOperations.filter((operation: any) =>
+      this.operationUsesStationCounter(operation, stationId),
+    );
+
+    const events = [
+      ...operations.map((operation: any) => ({
+        kind: 'OPERATION' as const,
+        at: operation.createdAt,
+        item: operation,
+      })),
+      ...resets.map((reset: any) => ({
+        kind: 'RESET' as const,
+        at: reset.effectiveAt,
+        item: reset,
+      })),
+    ].sort((a, b) => {
+      const timeDiff = new Date(a.at).getTime() - new Date(b.at).getTime();
+      if (timeDiff !== 0) return timeDiff;
+      return a.kind === 'RESET' ? -1 : 1;
+    });
+
+    let cycleNumber = 1;
+    let cycleStartReading = 0;
+    let lifetimeAtCycleStart = 0;
+    let latestReading = 0;
+    let latestLifetime = 0;
+
+    for (const event of events) {
+      if (event.kind === 'RESET') {
+        const reset = event.item;
+        const oldCycle = cycleNumber;
+        const newCycle = oldCycle + 1;
+
+        await tx.stationCounterReset.update({
+          where: { id: reset.id },
+          data: {
+            lifetimeAtReset: latestLifetime,
+            oldCounterCycle: oldCycle,
+            newCounterCycle: newCycle,
+          },
+        });
+
+        cycleNumber = newCycle;
+        cycleStartReading = Number(reset.newCounter || 0);
+        lifetimeAtCycleStart = latestLifetime;
+        latestReading = cycleStartReading;
+        continue;
+      }
+
+      const reading = Number(event.item.stationCounter || 0);
+      if (reading < cycleStartReading) {
+        throw new BadRequestException(
+          `Station counter cannot be lower than cycle start reading (${cycleStartReading}).`,
+        );
+      }
+
+      latestReading = reading;
+      latestLifetime = lifetimeAtCycleStart + (reading - cycleStartReading);
+
+      await tx.operation.update({
+        where: { id: event.item.id },
+        data: {
+          lifetimeCounter: latestLifetime,
+          stationCounterCycleNumber: cycleNumber,
+        },
+      });
+    }
+
+    if (events.length === 0) {
+      latestReading = Number(station.currentCounter || 0);
+      latestLifetime = this.getEffectiveStationLifetime(station);
+      cycleNumber = Number(station.currentCounterCycle || 1);
+    }
+
+    await tx.station.update({
+      where: { id: stationId },
+      data: {
+        currentCounter: latestReading,
+        currentLifetimeCounter: latestLifetime,
+        currentCounterCycle: cycleNumber,
+      },
     });
   }
 

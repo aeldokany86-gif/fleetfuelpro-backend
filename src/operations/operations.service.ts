@@ -62,6 +62,13 @@ type ApprovalPlanItem = {
   reviewedAt?: Date | null;
 };
 
+type OperationMeterSnapshot = {
+  lifetimeOdometer: number | null;
+  assetMeterCycleNumber: number | null;
+  lifetimeCounter: number | null;
+  stationCounterCycleNumber: number | null;
+};
+
 @Injectable()
 export class OperationsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -120,6 +127,8 @@ export class OperationsService {
           category: true,
           projectId: true,
           currentOdometer: true,
+          currentLifetimeOdometer: true,
+          currentMeterCycle: true,
           fuelTankCapacity: true,
         },
       },
@@ -195,8 +204,22 @@ export class OperationsService {
     } as CreateOperationDto;
 
     const entities = action === 'APPROVE'
-      ? await this.loadAndValidateEntities(this.prisma as any, operationDto, currentUser, operation.type)
+      ? await this.loadAndValidateEntities(
+          this.prisma as any,
+          operationDto,
+          currentUser,
+          operation.type,
+        )
       : undefined;
+
+    const meterSnapshot =
+      action === 'APPROVE' && entities
+        ? this.buildOperationMeterSnapshot(
+            operation.type,
+            operationDto,
+            entities,
+          )
+        : this.emptyOperationMeterSnapshot();
 
     const result = await this.prisma.$transaction(async (tx) => {
       const claimed = await (tx as any).operationApproval.updateMany({
@@ -235,14 +258,33 @@ export class OperationsService {
       }
 
       const completed = await (tx as any).operation.updateMany({
-        where: { id: operation.id, status: { in: ['PENDING', 'PARTIALLY_APPROVED'] } },
-        data: { status: 'COMPLETED', approvedAt: new Date(), completedAt: new Date() },
+        where: {
+          id: operation.id,
+          status: { in: ['PENDING', 'PARTIALLY_APPROVED'] },
+        },
+        data: {
+          status: 'COMPLETED',
+          approvedAt: new Date(),
+          completedAt: new Date(),
+          lifetimeOdometer: meterSnapshot.lifetimeOdometer,
+          assetMeterCycleNumber: meterSnapshot.assetMeterCycleNumber,
+          lifetimeCounter: meterSnapshot.lifetimeCounter,
+          stationCounterCycleNumber:
+            meterSnapshot.stationCounterCycleNumber,
+        },
       });
       if (completed.count !== 1) {
-        throw new BadRequestException('Operation was already completed by another approval request.');
+        throw new BadRequestException(
+          'Operation was already completed by another approval request.',
+        );
       }
 
-      const completedOperation = await (tx as any).operation.findUnique({ where: { id: operation.id } });
+      const completedOperation = {
+        ...operation,
+        status: 'COMPLETED',
+        ...meterSnapshot,
+      };
+
       await this.applyCompletedOperationEffects(tx, {
         operation: completedOperation,
         dto: operationDto,
@@ -251,7 +293,7 @@ export class OperationsService {
         entities: entities!,
       });
       return { status: 'COMPLETED', completedNow: true, rejectedNow: false };
-    }, { maxWait: 5000, timeout: 5000 });
+    }, { maxWait: 10000, timeout: 15000 });
 
     return {
       ok: true,
@@ -413,6 +455,13 @@ async findPendingApprovals(request?: RequestLike) {
       },
     );
 
+    // Calculate meter snapshots before opening the interactive transaction.
+    // This keeps the transaction focused on writes and avoids Supabase pooler timeouts.
+    const meterSnapshot =
+      status === 'COMPLETED'
+        ? this.buildOperationMeterSnapshot(type, dto, entities)
+        : this.emptyOperationMeterSnapshot();
+
     let result: any;
     let lastError: any;
 
@@ -435,7 +484,12 @@ async findPendingApprovals(request?: RequestLike) {
               assetId: dto.assetId || null,
               quantity: Number(dto.quantity),
               odometer: dto.odometer == null ? null : Number(dto.odometer),
+              lifetimeOdometer: meterSnapshot.lifetimeOdometer,
+              assetMeterCycleNumber: meterSnapshot.assetMeterCycleNumber,
               stationCounter: dto.stationCounter == null ? null : Number(dto.stationCounter),
+              lifetimeCounter: meterSnapshot.lifetimeCounter,
+              stationCounterCycleNumber:
+                meterSnapshot.stationCounterCycleNumber,
               externalStationName: dto.externalStationName || null,
               invoiceNumber: dto.invoiceNumber || null,
               notes: dto.notes || null,
@@ -477,7 +531,7 @@ async findPendingApprovals(request?: RequestLike) {
           }
 
           return { operation, status, approvalPlan };
-        }, { maxWait: 5000, timeout: 5000 });
+        }, { maxWait: 10000, timeout: 15000 });
         break;
       } catch (error: any) {
         lastError = error;
@@ -970,15 +1024,34 @@ async findPendingApprovals(request?: RequestLike) {
     if (!station) throw new BadRequestException('Station is required for stock movement.');
 
     const movementQuantity = Number(quantity || 0);
+    const counterStationId = this.getOperationCounterStationId(operation);
+    const shouldApplyCounter =
+      operation.stationCounter != null && counterStationId === station.id;
+
     const updatedStation = await tx.station.update({
       where: { id: station.id },
       data: {
         currentStock: { increment: movementQuantity },
-        ...(operation.stationCounter == null
-          ? {}
-          : { currentCounter: Number(operation.stationCounter) }),
+        ...(shouldApplyCounter
+          ? {
+              currentCounter: Number(operation.stationCounter),
+              currentLifetimeCounter:
+                operation.lifetimeCounter == null
+                  ? this.calculateStationLifetimeSnapshot(
+                      station,
+                      Number(operation.stationCounter),
+                    ).lifetimeCounter
+                  : Number(operation.lifetimeCounter),
+              currentCounterCycle:
+                operation.stationCounterCycleNumber == null
+                  ? Number(station.currentCounterCycle || 1)
+                  : Number(operation.stationCounterCycleNumber),
+            }
+          : {}),
       },
-      select: { currentStock: true },
+      select: {
+        currentStock: true,
+      },
     });
 
     const balanceAfter = Number(updatedStation.currentStock || 0);
@@ -1015,56 +1088,47 @@ async findPendingApprovals(request?: RequestLike) {
       );
     }
 
-    const now = new Date();
+    const operation = currentOperationId
+      ? await tx.operation.findUnique({
+          where: { id: currentOperationId },
+          select: {
+            lifetimeOdometer: true,
+            assetMeterCycleNumber: true,
+          },
+        })
+      : null;
 
-    const [latestEffectiveReset, nextFutureReset] = await Promise.all([
-      tx.assetOdometerReset.findFirst({
-        where: {
-          assetId: asset.id,
-          effectiveAt: { lte: now },
-        },
-        orderBy: [{ effectiveAt: 'desc' }, { createdAt: 'desc' }],
-        select: {
-          newOdometer: true,
-          effectiveAt: true,
-        },
-      }),
-      tx.assetOdometerReset.findFirst({
-        where: {
-          assetId: asset.id,
-          effectiveAt: { gt: now },
-        },
-        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }],
-        select: {
-          oldOdometer: true,
-          effectiveAt: true,
-        },
-      }),
-    ]);
+    const lifetimeOdometer =
+      operation?.lifetimeOdometer == null
+        ? this.calculateAssetLifetimeSnapshot(asset, nextReading).lifetimeOdometer
+        : Number(operation.lifetimeOdometer);
 
-    const latestCompletedOperation = await tx.operation.findFirst({
-      where: {
-        assetId: asset.id,
-        status: 'COMPLETED',
-        odometer: { not: null },
-        ...(currentOperationId ? { id: { not: currentOperationId } } : {}),
-        ...(latestEffectiveReset
-          ? { createdAt: { gte: latestEffectiveReset.effectiveAt } }
-          : {}),
-      },
-      orderBy: [{ completedAt: 'desc' }, { createdAt: 'desc' }],
-      select: {
-        odometer: true,
+    const meterCycleNumber =
+      operation?.assetMeterCycleNumber == null
+        ? Number(asset.currentMeterCycle || 1)
+        : Number(operation.assetMeterCycleNumber);
+
+    await tx.asset.update({
+      where: { id: asset.id },
+      data: {
+        currentOdometer: nextReading,
+        currentLifetimeOdometer: lifetimeOdometer,
+        currentMeterCycle: meterCycleNumber,
       },
     });
+  }
 
-    const effectiveCurrentReading = latestCompletedOperation?.odometer != null
-      ? Number(latestCompletedOperation.odometer)
-      : latestEffectiveReset
-        ? Number(latestEffectiveReset.newOdometer || 0)
-        : nextFutureReset
-          ? Number(nextFutureReset.oldOdometer || 0)
-          : Number(asset.currentOdometer || 0);
+  private emptyOperationMeterSnapshot(): OperationMeterSnapshot {
+    return {
+      lifetimeOdometer: null,
+      assetMeterCycleNumber: null,
+      lifetimeCounter: null,
+      stationCounterCycleNumber: null,
+    };
+  }
+
+  private calculateAssetLifetimeSnapshot(asset: any, nextReading: number) {
+    const effectiveCurrentReading = Number(asset?.currentOdometer || 0);
 
     if (nextReading < effectiveCurrentReading) {
       throw new BadRequestException(
@@ -1072,10 +1136,112 @@ async findPendingApprovals(request?: RequestLike) {
       );
     }
 
-    await tx.asset.update({
-      where: { id: asset.id },
-      data: { currentOdometer: nextReading },
-    });
+    const currentLifetime = this.getEffectiveAssetLifetime(asset);
+
+    return {
+      lifetimeOdometer:
+        currentLifetime + (nextReading - effectiveCurrentReading),
+      assetMeterCycleNumber: Number(asset?.currentMeterCycle || 1),
+    };
+  }
+
+  private calculateStationLifetimeSnapshot(station: any, nextReading: number) {
+    const effectiveCurrentReading = Number(station?.currentCounter || 0);
+
+    if (nextReading < effectiveCurrentReading) {
+      throw new BadRequestException(
+        `New station counter cannot be lower than the current counter-cycle reading (${effectiveCurrentReading}).`,
+      );
+    }
+
+    const currentLifetime = this.getEffectiveStationLifetime(station);
+
+    return {
+      lifetimeCounter:
+        currentLifetime + (nextReading - effectiveCurrentReading),
+      stationCounterCycleNumber: Number(
+        station?.currentCounterCycle || 1,
+      ),
+    };
+  }
+
+  private buildOperationMeterSnapshot(
+    type: NormalizedOperationType,
+    dto: CreateOperationDto,
+    entities: LoadedOperationEntities,
+  ): OperationMeterSnapshot {
+    const snapshot = this.emptyOperationMeterSnapshot();
+
+    if (
+      ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type) &&
+      dto.odometer !== undefined &&
+      dto.odometer !== null
+    ) {
+      Object.assign(
+        snapshot,
+        this.calculateAssetLifetimeSnapshot(
+          entities.asset,
+          Number(dto.odometer),
+        ),
+      );
+    }
+
+    const counterStation =
+      type === 'DIRECT_REFUEL' ||
+      type === 'INTERNAL_TRANSFER' ||
+      type === 'EXTERNAL_TRANSFER'
+        ? entities.sourceStation
+        : type === 'EXTERNAL_SUPPLY'
+          ? entities.destinationStation
+          : null;
+
+    if (
+      counterStation &&
+      dto.stationCounter !== undefined &&
+      dto.stationCounter !== null
+    ) {
+      Object.assign(
+        snapshot,
+        this.calculateStationLifetimeSnapshot(
+          counterStation,
+          Number(dto.stationCounter),
+        ),
+      );
+    }
+
+    return snapshot;
+  }
+
+  private getEffectiveAssetLifetime(asset: any) {
+    const storedLifetime = Number(asset?.currentLifetimeOdometer || 0);
+    const currentReading = Number(asset?.currentOdometer || 0);
+    const currentCycle = Number(asset?.currentMeterCycle || 1);
+
+    if (currentCycle === 1 && storedLifetime === 0 && currentReading > 0) {
+      return currentReading;
+    }
+
+    return storedLifetime;
+  }
+
+  private getEffectiveStationLifetime(station: any) {
+    const storedLifetime = Number(station?.currentLifetimeCounter || 0);
+    const currentReading = Number(station?.currentCounter || 0);
+    const currentCycle = Number(station?.currentCounterCycle || 1);
+
+    if (currentCycle === 1 && storedLifetime === 0 && currentReading > 0) {
+      return currentReading;
+    }
+
+    return storedLifetime;
+  }
+
+  private getOperationCounterStationId(operation: any) {
+    if (operation.type === 'DIRECT_REFUEL') return operation.sourceStationId || null;
+    if (operation.type === 'INTERNAL_TRANSFER') return operation.sourceStationId || null;
+    if (operation.type === 'EXTERNAL_SUPPLY') return operation.destinationStationId || null;
+    if (operation.type === 'EXTERNAL_TRANSFER') return operation.sourceStationId || null;
+    return null;
   }
 
 

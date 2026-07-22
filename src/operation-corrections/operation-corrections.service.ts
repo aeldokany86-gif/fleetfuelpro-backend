@@ -110,7 +110,7 @@ export class OperationCorrectionsService {
 
           return created.id;
         },
-        { maxWait: 5000, timeout: 5000, isolationLevel: 'Serializable' as any },
+        { maxWait: 5000, timeout: 15000, isolationLevel: 'Serializable' as any },
       );
 
       // Keep response hydration outside the interactive transaction so the
@@ -168,7 +168,7 @@ export class OperationCorrectionsService {
 
         return created.id;
       },
-      { maxWait: 5000, timeout: 5000, isolationLevel: 'Serializable' as any },
+      { maxWait: 5000, timeout: 15000, isolationLevel: 'Serializable' as any },
     );
 
     // The relation-heavy response query is intentionally outside the
@@ -317,7 +317,7 @@ export class OperationCorrectionsService {
           data: { status: 'APPLIED', appliedAt: new Date() },
         });
       },
-      { maxWait: 5000, timeout: 5000 },
+      { maxWait: 5000, timeout: 15000 },
     );
 
     // Fetch the response after commit; relation hydration is not part of the
@@ -407,6 +407,7 @@ export class OperationCorrectionsService {
       throw new BadRequestException('Asset correction is allowed only for refuel operations.');
     }
 
+    const oldAssetId = operation.assetId;
     const newAsset = await tx.asset.findFirst({
       where: {
         id: newAssetId,
@@ -434,6 +435,11 @@ export class OperationCorrectionsService {
       where: { id: operation.id },
       data: { assetId: newAsset.id },
     });
+
+    if (oldAssetId) await this.rebuildAssetLifetimeHistory(tx, oldAssetId);
+    if (newAsset.id !== oldAssetId) {
+      await this.rebuildAssetLifetimeHistory(tx, newAsset.id);
+    }
   }
 
   private async applySourceStationCorrection(tx: any, operation: any, newStationId: string, currentUser: CurrentUserContext) {
@@ -479,6 +485,13 @@ export class OperationCorrectionsService {
       where: { id: operation.id },
       data: { sourceStationId: newStation.id },
     });
+
+    if (operation.stationCounter != null && this.counterUsesSourceStation(operation.type)) {
+      if (oldStation?.id) await this.rebuildStationLifetimeHistory(tx, oldStation.id);
+      if (newStation.id !== oldStation?.id) {
+        await this.rebuildStationLifetimeHistory(tx, newStation.id);
+      }
+    }
   }
 
   private async applyDestinationStationCorrection(tx: any, operation: any, newStationId: string, currentUser: CurrentUserContext) {
@@ -524,6 +537,13 @@ export class OperationCorrectionsService {
       where: { id: operation.id },
       data: { destinationStationId: newStation.id },
     });
+
+    if (operation.stationCounter != null && operation.type === 'EXTERNAL_SUPPLY') {
+      if (oldStation?.id) await this.rebuildStationLifetimeHistory(tx, oldStation.id);
+      if (newStation.id !== oldStation?.id) {
+        await this.rebuildStationLifetimeHistory(tx, newStation.id);
+      }
+    }
   }
 
   private async applyFuelerCorrection(
@@ -681,42 +701,454 @@ export class OperationCorrectionsService {
     });
   }
 
-  private async applyOdometerCorrection(tx: any, operation: any, newOdometer: number) {
+  private async applyOdometerCorrection(
+    tx: any,
+    operation: any,
+    newOdometer: number,
+  ) {
     if (!['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(operation.type)) {
-      throw new BadRequestException('Odometer correction is allowed only for refuel operations.');
+      throw new BadRequestException(
+        'Odometer correction is allowed only for refuel operations.',
+      );
     }
 
-    if (!operation.assetId) throw new BadRequestException('Operation asset is required for odometer correction.');
-    if (!operation.asset) throw new NotFoundException('Asset was not found.');
+    if (!operation.assetId) {
+      throw new BadRequestException(
+        'Operation asset is required for odometer correction.',
+      );
+    }
 
-    if (Number(newOdometer) < 0) throw new BadRequestException('Odometer cannot be negative.');
+    if (!operation.asset) {
+      throw new NotFoundException('Asset was not found.');
+    }
+
+    const normalizedOdometer = Number(newOdometer);
+
+    if (!Number.isFinite(normalizedOdometer) || normalizedOdometer < 0) {
+      throw new BadRequestException(
+        'Odometer must be a valid non-negative number.',
+      );
+    }
+
+    await this.validateCorrectedOdometerSequence(
+      tx,
+      operation,
+      normalizedOdometer,
+    );
 
     await tx.operation.update({
       where: { id: operation.id },
-      data: { odometer: Number(newOdometer) },
+      data: { odometer: normalizedOdometer },
     });
 
-    /*
-      Do not update asset.currentOdometer here.
-      This correction may target an old operation while the asset already has newer
-      readings. Updating the current odometer from one correction can corrupt the
-      live asset state.
-    */
+    await this.rebuildAssetLifetimeHistory(tx, operation.assetId);
+  }
+
+  private async validateCorrectedOdometerSequence(
+    tx: any,
+    operation: any,
+    newOdometer: number,
+  ) {
+    const [operations, resets] = await Promise.all([
+      tx.operation.findMany({
+        where: {
+          assetId: operation.assetId,
+          status: 'COMPLETED',
+          odometer: { not: null },
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          operationNo: true,
+          odometer: true,
+          createdAt: true,
+        },
+      }),
+      tx.assetOdometerReset.findMany({
+        where: {
+          assetId: operation.assetId,
+        },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }],
+        select: {
+          id: true,
+          newOdometer: true,
+          effectiveAt: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    const events = [
+      ...operations.map((item: any) => ({
+        kind: 'OPERATION' as const,
+        at: item.createdAt,
+        createdAt: item.createdAt,
+        item,
+      })),
+      ...resets.map((item: any) => ({
+        kind: 'RESET' as const,
+        at: item.effectiveAt,
+        createdAt: item.createdAt,
+        item,
+      })),
+    ].sort((a, b) => {
+      const effectiveTime =
+        new Date(a.at).getTime() - new Date(b.at).getTime();
+
+      if (effectiveTime !== 0) {
+        return effectiveTime;
+      }
+
+      const createdTime =
+        new Date(a.createdAt).getTime() -
+        new Date(b.createdAt).getTime();
+
+      if (createdTime !== 0) {
+        return createdTime;
+      }
+
+      return a.kind === 'RESET' ? -1 : 1;
+    });
+
+    const targetIndex = events.findIndex(
+      (event) =>
+        event.kind === 'OPERATION' &&
+        event.item.id === operation.id,
+    );
+
+    if (targetIndex < 0) {
+      throw new NotFoundException(
+        'Operation was not found in the completed odometer history.',
+      );
+    }
+
+    let cycleStartReading: number | null = null;
+    let previousOperation: any = null;
+
+    for (let index = targetIndex - 1; index >= 0; index -= 1) {
+      const event = events[index];
+
+      if (event.kind === 'RESET') {
+        cycleStartReading = Number(event.item.newOdometer || 0);
+        break;
+      }
+
+      if (!previousOperation) {
+        previousOperation = event.item;
+      }
+    }
+
+    let nextOperation: any = null;
+
+    for (let index = targetIndex + 1; index < events.length; index += 1) {
+      const event = events[index];
+
+      if (event.kind === 'RESET') {
+        break;
+      }
+
+      if (event.kind === 'OPERATION') {
+        nextOperation = event.item;
+        break;
+      }
+    }
+
+    const lowerBounds: Array<{
+      value: number;
+      label: string;
+    }> = [];
+
+    if (cycleStartReading !== null) {
+      lowerBounds.push({
+        value: cycleStartReading,
+        label: `meter-cycle start reading (${cycleStartReading})`,
+      });
+    }
+
+    if (previousOperation) {
+      const previousReading = Number(previousOperation.odometer);
+
+      lowerBounds.push({
+        value: previousReading,
+        label: `previous operation ${
+          previousOperation.operationNo || previousOperation.id
+        } reading (${previousReading})`,
+      });
+    }
+
+    const strongestLowerBound = lowerBounds.sort(
+      (a, b) => b.value - a.value,
+    )[0];
+
+    if (
+      strongestLowerBound &&
+      newOdometer < strongestLowerBound.value
+    ) {
+      throw new BadRequestException(
+        `Corrected odometer (${newOdometer}) cannot be lower than the ${strongestLowerBound.label}.`,
+      );
+    }
+
+    if (nextOperation) {
+      const nextReading = Number(nextOperation.odometer);
+
+      if (newOdometer > nextReading) {
+        throw new BadRequestException(
+          `Corrected odometer (${newOdometer}) cannot be higher than the next operation ${
+            nextOperation.operationNo || nextOperation.id
+          } reading (${nextReading}) in the same meter cycle.`,
+        );
+      }
+    }
   }
 
   private async applyStationCounterCorrection(tx: any, operation: any, newCounter: number) {
     if (Number(newCounter) < 0) throw new BadRequestException('Station counter cannot be negative.');
+
+    const stationId = this.getOperationCounterStationId(operation);
+    if (!stationId) {
+      throw new BadRequestException('This operation type does not use an internal station counter.');
+    }
 
     await tx.operation.update({
       where: { id: operation.id },
       data: { stationCounter: Number(newCounter) },
     });
 
-    /*
-      Do not update station.currentCounter here.
-      Station counter is a current-state value and may already reflect later
-      operations. Counter rebuild/recalculation should be a separate controlled job.
-    */
+    await this.rebuildStationLifetimeHistory(tx, stationId);
+  }
+
+
+  private getEffectiveAssetLifetime(asset: any) {
+    const storedLifetime = Number(asset?.currentLifetimeOdometer || 0);
+    const currentReading = Number(asset?.currentOdometer || 0);
+    const currentCycle = Number(asset?.currentMeterCycle || 1);
+    if (currentCycle === 1 && storedLifetime === 0 && currentReading > 0) {
+      return currentReading;
+    }
+    return storedLifetime;
+  }
+
+  private getEffectiveStationLifetime(station: any) {
+    const storedLifetime = Number(station?.currentLifetimeCounter || 0);
+    const currentReading = Number(station?.currentCounter || 0);
+    const currentCycle = Number(station?.currentCounterCycle || 1);
+    if (currentCycle === 1 && storedLifetime === 0 && currentReading > 0) {
+      return currentReading;
+    }
+    return storedLifetime;
+  }
+
+  private counterUsesSourceStation(type: string) {
+    return ['DIRECT_REFUEL', 'INTERNAL_TRANSFER', 'EXTERNAL_TRANSFER'].includes(type);
+  }
+
+  private getOperationCounterStationId(operation: any) {
+    if (this.counterUsesSourceStation(operation.type)) {
+      return operation.sourceStationId || operation.sourceStation?.id || null;
+    }
+    if (operation.type === 'EXTERNAL_SUPPLY') {
+      return operation.destinationStationId || operation.destinationStation?.id || null;
+    }
+    return null;
+  }
+
+  private operationUsesStationCounter(operation: any, stationId: string) {
+    return this.getOperationCounterStationId(operation) === stationId;
+  }
+
+  private async rebuildAssetLifetimeHistory(tx: any, assetId: string) {
+    const asset = await tx.asset.findUnique({ where: { id: assetId } });
+    if (!asset) throw new NotFoundException('Asset was not found.');
+
+    const [operations, resets] = await Promise.all([
+      tx.operation.findMany({
+        where: { assetId, status: 'COMPLETED', odometer: { not: null } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: { id: true, odometer: true, createdAt: true },
+      }),
+      tx.assetOdometerReset.findMany({
+        where: { assetId },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }],
+        select: { id: true, newOdometer: true, effectiveAt: true, createdAt: true },
+      }),
+    ]);
+
+    const events = [
+      ...operations.map((item: any) => ({ kind: 'OPERATION' as const, at: item.createdAt, item })),
+      ...resets.map((item: any) => ({ kind: 'RESET' as const, at: item.effectiveAt, item })),
+    ].sort((a, b) => {
+      const diff = new Date(a.at).getTime() - new Date(b.at).getTime();
+      if (diff !== 0) return diff;
+      return a.kind === 'RESET' ? -1 : 1;
+    });
+
+    let cycle = 1;
+    let cycleStart = 0;
+    let lifetimeAtStart = 0;
+    let latestReading = 0;
+    let latestLifetime = 0;
+    let previousReadingInCycle: number | null = null;
+
+    for (const event of events) {
+      if (event.kind === 'RESET') {
+        const oldCycle = cycle;
+        cycle += 1;
+        await tx.assetOdometerReset.update({
+          where: { id: event.item.id },
+          data: {
+            lifetimeAtReset: latestLifetime,
+            oldMeterCycle: oldCycle,
+            newMeterCycle: cycle,
+          },
+        });
+        cycleStart = Number(event.item.newOdometer || 0);
+        lifetimeAtStart = latestLifetime;
+        latestReading = cycleStart;
+        previousReadingInCycle = cycleStart;
+        continue;
+      }
+
+      const reading = Number(event.item.odometer || 0);
+
+      if (!Number.isFinite(reading) || reading < 0) {
+        throw new BadRequestException(
+          'Historical operation contains an invalid odometer reading.',
+        );
+      }
+
+      if (reading < cycleStart) {
+        throw new BadRequestException(
+          `Odometer cannot be lower than cycle start reading (${cycleStart}).`,
+        );
+      }
+
+      if (
+        previousReadingInCycle !== null &&
+        reading < previousReadingInCycle
+      ) {
+        throw new BadRequestException(
+          `Operation odometer (${reading}) cannot be lower than the previous reading (${previousReadingInCycle}) in meter cycle ${cycle}.`,
+        );
+      }
+
+      previousReadingInCycle = reading;
+      latestReading = reading;
+      latestLifetime = lifetimeAtStart + (reading - cycleStart);
+      await tx.operation.update({
+        where: { id: event.item.id },
+        data: { lifetimeOdometer: latestLifetime, assetMeterCycleNumber: cycle },
+      });
+    }
+
+    if (events.length === 0) {
+      latestReading = Number(asset.currentOdometer || 0);
+      latestLifetime = this.getEffectiveAssetLifetime(asset);
+      cycle = Number(asset.currentMeterCycle || 1);
+    }
+
+    await tx.asset.update({
+      where: { id: assetId },
+      data: {
+        currentOdometer: latestReading,
+        currentLifetimeOdometer: latestLifetime,
+        currentMeterCycle: cycle,
+      },
+    });
+  }
+
+  private async rebuildStationLifetimeHistory(tx: any, stationId: string) {
+    const station = await tx.station.findUnique({ where: { id: stationId } });
+    if (!station) throw new NotFoundException('Station was not found.');
+
+    const [candidateOperations, resets] = await Promise.all([
+      tx.operation.findMany({
+        where: {
+          status: 'COMPLETED',
+          stationCounter: { not: null },
+          OR: [{ sourceStationId: stationId }, { destinationStationId: stationId }],
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          type: true,
+          sourceStationId: true,
+          destinationStationId: true,
+          stationCounter: true,
+          createdAt: true,
+        },
+      }),
+      tx.stationCounterReset.findMany({
+        where: { stationId },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }],
+        select: { id: true, newCounter: true, effectiveAt: true, createdAt: true },
+      }),
+    ]);
+
+    const operations = candidateOperations.filter((item: any) =>
+      this.operationUsesStationCounter(item, stationId),
+    );
+    const events = [
+      ...operations.map((item: any) => ({ kind: 'OPERATION' as const, at: item.createdAt, item })),
+      ...resets.map((item: any) => ({ kind: 'RESET' as const, at: item.effectiveAt, item })),
+    ].sort((a, b) => {
+      const diff = new Date(a.at).getTime() - new Date(b.at).getTime();
+      if (diff !== 0) return diff;
+      return a.kind === 'RESET' ? -1 : 1;
+    });
+
+    let cycle = 1;
+    let cycleStart = 0;
+    let lifetimeAtStart = 0;
+    let latestReading = 0;
+    let latestLifetime = 0;
+
+    for (const event of events) {
+      if (event.kind === 'RESET') {
+        const oldCycle = cycle;
+        cycle += 1;
+        await tx.stationCounterReset.update({
+          where: { id: event.item.id },
+          data: {
+            lifetimeAtReset: latestLifetime,
+            oldCounterCycle: oldCycle,
+            newCounterCycle: cycle,
+          },
+        });
+        cycleStart = Number(event.item.newCounter || 0);
+        lifetimeAtStart = latestLifetime;
+        latestReading = cycleStart;
+        continue;
+      }
+
+      const reading = Number(event.item.stationCounter || 0);
+      if (reading < cycleStart) {
+        throw new BadRequestException(
+          `Station counter cannot be lower than cycle start reading (${cycleStart}).`,
+        );
+      }
+      latestReading = reading;
+      latestLifetime = lifetimeAtStart + (reading - cycleStart);
+      await tx.operation.update({
+        where: { id: event.item.id },
+        data: { lifetimeCounter: latestLifetime, stationCounterCycleNumber: cycle },
+      });
+    }
+
+    if (events.length === 0) {
+      latestReading = Number(station.currentCounter || 0);
+      latestLifetime = this.getEffectiveStationLifetime(station);
+      cycle = Number(station.currentCounterCycle || 1);
+    }
+
+    await tx.station.update({
+      where: { id: stationId },
+      data: {
+        currentCounter: latestReading,
+        currentLifetimeCounter: latestLifetime,
+        currentCounterCycle: cycle,
+      },
+    });
   }
 
   private async createStockMovement(
