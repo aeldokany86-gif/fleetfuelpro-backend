@@ -310,6 +310,7 @@ model AssetTransferRequest {
   fromProjectId     String
   toProjectId       String
   requestedByUserId String
+  transferBatchId   String?
   status            EmployeeTransferStatus   @default(PENDING)
   reason            String?
   rejectionReason   String?
@@ -333,6 +334,7 @@ model AssetTransferRequest {
   @@index([fromProjectId])
   @@index([toProjectId])
   @@index([requestedByUserId])
+  @@index([transferBatchId])
   @@index([status])
 }
 
@@ -605,6 +607,7 @@ model StationTransferRequest {
   fromProjectId     String
   toProjectId       String
   requestedByUserId String
+  stockAtTransfer   Float                      @default(0)
   status            StationTransferStatus      @default(PENDING)
   reason            String?
   rejectionReason   String?

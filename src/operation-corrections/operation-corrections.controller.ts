@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import { CreateOperationCorrectionDto } from './dto/create-operation-correction.dto';
 import { ReviewOperationCorrectionDto } from './dto/review-operation-correction.dto';
 import { OperationCorrectionsService } from './operation-corrections.service';
@@ -10,6 +10,23 @@ export class OperationCorrectionsController {
   @Post()
   create(@Body() dto: CreateOperationCorrectionDto, @Req() req: any) {
     return this.service.create(dto, req);
+  }
+
+  @Get('reports/odometer-history')
+  getOdometerCorrectionHistory(
+    @Query('companyId') companyId?: string,
+    @Query('projectId') projectId?: string,
+    @Query('assetId') assetId?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    return this.service.getOdometerCorrectionHistoryReport({
+      companyId,
+      projectId,
+      assetId,
+      dateFrom,
+      dateTo,
+    });
   }
 
   @Get('pending')

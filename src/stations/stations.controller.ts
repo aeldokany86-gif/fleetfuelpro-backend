@@ -38,8 +38,34 @@ export class StationsController {
   findAll(
     @Query('companyId') companyId?: string,
     @Query('projectId') projectId?: string,
+    @Query('includeDeleted') includeDeleted?: string,
   ) {
-    return this.stationsService.findAll(companyId, projectId);
+    return this.stationsService.findAll(
+      companyId,
+      projectId,
+      includeDeleted === 'true',
+    );
+  }
+
+  @Get('transfers/report')
+  getTransferReport(
+    @Query('companyId') companyId?: string,
+    @Query('fromProjectId') fromProjectId?: string,
+    @Query('toProjectId') toProjectId?: string,
+    @Query('stationId') stationId?: string,
+    @Query('status') status?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    return this.stationsService.getTransferReport({
+      companyId,
+      fromProjectId,
+      toProjectId,
+      stationId,
+      status,
+      dateFrom,
+      dateTo,
+    });
   }
 
   @Get('transfers/pending')
@@ -65,6 +91,25 @@ export class StationsController {
       dateTo,
       movementType,
       direction,
+    });
+  }
+
+  @Get('counter-meter-history')
+  getCounterMeterHistory(
+    @Query('companyId') companyId?: string,
+    @Query('projectId') projectId?: string,
+    @Query('stationId') stationId?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('eventType') eventType?: string,
+  ) {
+    return this.stationsService.getCounterMeterHistory({
+      companyId,
+      projectId,
+      stationId,
+      dateFrom,
+      dateTo,
+      eventType,
     });
   }
 

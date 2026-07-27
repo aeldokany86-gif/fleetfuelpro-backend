@@ -186,6 +186,180 @@ export class OperationCorrectionsService {
     };
   }
 
+  async getOdometerCorrectionHistoryReport(filters: {
+    companyId?: string;
+    projectId?: string;
+    assetId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) {
+    const companyId = String(filters.companyId || '').trim();
+
+    if (!companyId) {
+      throw new BadRequestException('Company ID is required.');
+    }
+
+    const parseReportDate = (
+      value: string | undefined,
+      fieldName: string,
+      endOfDay = false,
+    ) => {
+      const raw = String(value || '').trim();
+      if (!raw) return undefined;
+
+      const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+      const parsed = new Date(
+        dateOnly
+          ? `${raw}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}`
+          : raw,
+      );
+
+      if (Number.isNaN(parsed.getTime())) {
+        throw new BadRequestException(`Invalid ${fieldName}.`);
+      }
+
+      return parsed;
+    };
+
+    const dateFrom = parseReportDate(filters.dateFrom, 'dateFrom');
+    const dateTo = parseReportDate(filters.dateTo, 'dateTo', true);
+
+    if (dateFrom && dateTo && dateFrom.getTime() > dateTo.getTime()) {
+      throw new BadRequestException('Date From cannot be later than Date To.');
+    }
+
+    const history = await (this.prisma as any).operationCorrection.findMany({
+      where: {
+        companyId,
+        fieldName: 'ODOMETER',
+        status: 'APPLIED',
+        ...(dateFrom || dateTo
+          ? {
+              appliedAt: {
+                ...(dateFrom ? { gte: dateFrom } : {}),
+                ...(dateTo ? { lte: dateTo } : {}),
+              },
+            }
+          : {}),
+        operation: {
+          ...(filters.assetId ? { assetId: filters.assetId } : {}),
+          ...(filters.projectId
+            ? {
+                asset: {
+                  projectId: filters.projectId,
+                },
+              }
+            : {}),
+        },
+      },
+      select: {
+        id: true,
+        companyId: true,
+        operationId: true,
+        oldValue: true,
+        newValue: true,
+        reason: true,
+        status: true,
+        createdAt: true,
+        reviewedAt: true,
+        appliedAt: true,
+        requestedByUserId: true,
+        reviewedByUserId: true,
+        requestedBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        reviewedBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        operation: {
+          select: {
+            id: true,
+            operationNo: true,
+            type: true,
+            status: true,
+            createdAt: true,
+            odometer: true,
+            lifetimeOdometer: true,
+            assetMeterCycleNumber: true,
+            assetId: true,
+            asset: {
+              select: {
+                id: true,
+                assetId: true,
+                type: true,
+                category: true,
+                projectId: true,
+                project: {
+                  select: {
+                    id: true,
+                    code: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      orderBy: [
+        { appliedAt: 'desc' },
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+    });
+
+    return history.map((correction: any) => {
+      const operation = correction.operation;
+      const asset = operation?.asset;
+      const performedBy = correction.reviewedBy || correction.requestedBy;
+
+      return {
+        id: correction.id,
+        eventType: 'CORRECTION',
+        eventSource: 'OPERATION_CORRECTION',
+        eventDate:
+          correction.appliedAt ||
+          correction.reviewedAt ||
+          correction.createdAt,
+        createdAt: correction.createdAt,
+        companyId: correction.companyId,
+        operationBackendId: operation?.id || correction.operationId,
+        operationNo: operation?.operationNo || '-',
+        assetBackendId: asset?.id || operation?.assetId || null,
+        assetId: asset?.assetId || operation?.assetId || '-',
+        assetType: asset?.type || null,
+        category: asset?.category || null,
+        projectId: asset?.projectId || null,
+        projectCode: asset?.project?.code || null,
+        projectName: asset?.project?.name || null,
+        previousReading: Number(this.fromJsonValue(correction.oldValue)),
+        currentReading: Number(this.fromJsonValue(correction.newValue)),
+        lifetimeReading:
+          operation?.lifetimeOdometer == null
+            ? null
+            : Number(operation.lifetimeOdometer),
+        meterCycle:
+          operation?.assetMeterCycleNumber == null
+            ? null
+            : Number(operation.assetMeterCycleNumber),
+        reason: correction.reason || 'Operation odometer correction',
+        reference: correction.id,
+        status: correction.status,
+        performedByUserId: performedBy?.id || null,
+        performedBy: performedBy?.fullName || performedBy?.email || '-',
+        performedByEmail: performedBy?.email || null,
+      };
+    });
+  }
+
   async findPending(request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(request);
 

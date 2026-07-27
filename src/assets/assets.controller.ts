@@ -49,6 +49,40 @@ export class AssetsController {
     return this.assetsService.getPendingTransferRequests();
   }
 
+  @Get('transfers/history')
+  transferHistory(
+    @Query('companyId')
+    companyId?: string,
+  ) {
+    return this.assetsService.getTransferHistory(companyId);
+  }
+
+  @Get('reports/odometer-history')
+  odometerHistoryReport(
+    @Query('companyId')
+    companyId?: string,
+
+    @Query('projectId')
+    projectId?: string,
+
+    @Query('assetId')
+    assetId?: string,
+
+    @Query('dateFrom')
+    dateFrom?: string,
+
+    @Query('dateTo')
+    dateTo?: string,
+  ) {
+    return this.assetsService.getOdometerHistoryReport({
+      companyId,
+      projectId,
+      assetId,
+      dateFrom,
+      dateTo,
+    });
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.assetsService.findOne(id);
@@ -97,6 +131,24 @@ export class AssetsController {
   @Get(':id/assignment-history')
   getAssignmentHistory(@Param('id') id: string) {
     return this.assetsService.getAssignmentHistory(id);
+  }
+
+  @Post('transfers/bulk')
+  createBulkTransfer(
+    @Body()
+    body: {
+      assetIds: string[];
+      toProjectId: string;
+      requestedByUserId: string;
+      effectiveDate?: string;
+    },
+  ) {
+    return this.assetsService.createBulkTransferRequests(
+      body.assetIds,
+      body.toProjectId,
+      body.requestedByUserId,
+      body.effectiveDate,
+    );
   }
 
   @Post(':id/transfer')

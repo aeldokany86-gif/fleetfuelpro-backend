@@ -4,6 +4,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
+import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
@@ -773,6 +775,146 @@ export class AssetsService {
     });
   }
 
+  async getOdometerHistoryReport(filters: {
+    companyId?: string;
+    projectId?: string;
+    assetId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) {
+    const companyId = String(filters.companyId || '').trim();
+    const projectId = String(filters.projectId || '').trim();
+    const assetId = String(filters.assetId || '').trim();
+
+    if (!companyId) {
+      throw new BadRequestException('Company ID is required');
+    }
+
+    const parseReportDate = (
+      value: string | undefined,
+      fieldName: 'dateFrom' | 'dateTo',
+    ) => {
+      const rawValue = String(value || '').trim();
+      if (!rawValue) return null;
+
+      const parsedDate = new Date(rawValue);
+      if (Number.isNaN(parsedDate.getTime())) {
+        throw new BadRequestException(`Invalid ${fieldName}`);
+      }
+
+      /*
+        Date-only report filters are interpreted as full UTC calendar days.
+        This keeps dateTo inclusive instead of stopping at midnight.
+      */
+      if (/^\d{4}-\d{2}-\d{2}$/.test(rawValue)) {
+        if (fieldName === 'dateFrom') {
+          parsedDate.setUTCHours(0, 0, 0, 0);
+        } else {
+          parsedDate.setUTCHours(23, 59, 59, 999);
+        }
+      }
+
+      return parsedDate;
+    };
+
+    const dateFrom = parseReportDate(filters.dateFrom, 'dateFrom');
+    const dateTo = parseReportDate(filters.dateTo, 'dateTo');
+
+    if (dateFrom && dateTo && dateFrom.getTime() > dateTo.getTime()) {
+      throw new BadRequestException(
+        'Date From cannot be later than Date To',
+      );
+    }
+
+    const history = await this.prisma.assetOdometerReset.findMany({
+      where: {
+        companyId,
+        ...(assetId ? { assetId } : {}),
+        ...(dateFrom || dateTo
+          ? {
+              effectiveAt: {
+                ...(dateFrom ? { gte: dateFrom } : {}),
+                ...(dateTo ? { lte: dateTo } : {}),
+              },
+            }
+          : {}),
+        asset: {
+          is: {
+            companyId,
+            ...(projectId ? { projectId } : {}),
+          },
+        },
+      },
+      select: {
+        id: true,
+        assetId: true,
+        companyId: true,
+        oldOdometer: true,
+        newOdometer: true,
+        lifetimeAtReset: true,
+        oldMeterCycle: true,
+        newMeterCycle: true,
+        reason: true,
+        effectiveAt: true,
+        createdAt: true,
+        createdBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        asset: {
+          select: {
+            id: true,
+            assetId: true,
+            type: true,
+            category: true,
+            projectId: true,
+            project: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: [
+        { effectiveAt: 'desc' },
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+    });
+
+    return history.map((record) => ({
+      id: record.id,
+      eventType: 'RESET',
+      eventSource: 'ODOMETER_RESET',
+      eventDate: record.effectiveAt,
+      createdAt: record.createdAt,
+      companyId: record.companyId,
+      assetBackendId: record.asset.id,
+      assetId: record.asset.assetId,
+      assetType: record.asset.type,
+      category: record.asset.category,
+      projectId: record.asset.projectId,
+      projectCode: record.asset.project?.code || null,
+      projectName: record.asset.project?.name || null,
+      previousReading: Number(record.oldOdometer || 0),
+      currentReading: Number(record.newOdometer || 0),
+      lifetimeReading: Number(record.lifetimeAtReset || 0),
+      previousMeterCycle: Number(record.oldMeterCycle || 1),
+      meterCycle: Number(record.newMeterCycle || 1),
+      reason: record.reason,
+      reference: record.id,
+      performedByUserId: record.createdBy?.id || null,
+      performedBy: record.createdBy?.fullName || null,
+      performedByEmail: record.createdBy?.email || null,
+    }));
+  }
+
   // ✅ OPTIMIZATION: دمج الـ asset check مع الـ history في query واحدة
   async getOdometerResetHistory(assetId: string) {
     const asset = await this.prisma.asset.findFirst({
@@ -850,49 +992,63 @@ export class AssetsService {
     return asset.assignmentHistory;
   }
 
-  async createTransferRequest(
+  private async createTransferRequestCore(
     assetId: string,
     toProjectId: string,
     requestedByUserId: string,
     effectiveDateInput?: string,
+    transferBatchId?: string | null,
   ) {
-    // ✅ OPTIMIZATION: كل الـ validation queries بتشتغل بالتوازي
-    // الأصل: 4 queries متسلسلة × ~500ms = ~2000ms+
-    // بعد التعديل: 4 queries معاً = ~500ms فقط
-    const [asset, targetProject, requester, pending] = await Promise.all([
-      this.prisma.asset.findFirst({
-        where: { id: assetId, deletedAt: null },
-        include: { project: true },
-      }),
-      this.prisma.project.findFirst({
-        where: {
-          id: toProjectId,
-          deletedAt: null,
-          isActive: true,
-        },
-      }),
-      this.prisma.user.findFirst({
-        where: {
-          id: requestedByUserId,
-          deletedAt: null,
-          isActive: true,
-        },
-        include: { role: true },
-      }),
-      this.prisma.assetTransferRequest.findFirst({
-        where: {
-          assetId,
-          status: { in: ['PENDING', 'PARTIALLY_APPROVED'] },
-        },
-        select: { id: true },
-      }),
-    ]);
+    /*
+      Shared source of truth for both single and bulk asset transfers.
 
-    // --- Validations (نفس المنطق الأصلي بالظبط) ---
+      All validation reads run before the write transaction. The transaction
+      itself is intentionally limited to creating the request/approvals and,
+      when fully auto-approved, applying the asset movement and history.
+    */
+    /*
+      Run validation reads sequentially.
+
+      The production database connection/pooler was closing the connection
+      when four Prisma queries were opened together through Promise.all
+      (Prisma P1017: Server has closed the connection). Sequential reads keep
+      this workflow reliable on remote/pooler-backed databases.
+    */
+    const asset = await this.prisma.asset.findFirst({
+      where: { id: assetId, deletedAt: null },
+      include: { project: true },
+    });
 
     if (!asset) {
       throw new NotFoundException('Asset not found');
     }
+
+    const targetProject = await this.prisma.project.findFirst({
+      where: {
+        id: toProjectId,
+        deletedAt: null,
+        isActive: true,
+        companyId: asset.companyId,
+      },
+    });
+
+    const requester = await this.prisma.user.findFirst({
+      where: {
+        id: requestedByUserId,
+        companyId: asset.companyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      include: { role: true },
+    });
+
+    const pending = await this.prisma.assetTransferRequest.findFirst({
+      where: {
+        assetId,
+        status: { in: ['PENDING', 'PARTIALLY_APPROVED'] },
+      },
+      select: { id: true },
+    });
 
     if (!asset.projectId) {
       throw new BadRequestException('Asset has no current project');
@@ -937,10 +1093,9 @@ export class AssetsService {
       throw new BadRequestException('Pending transfer already exists');
     }
 
-    // --- Transfer Logic (نفس المنطق الأصلي بالظبط) ---
-
     const now = new Date();
-    const requestedEffectiveDate = this.parseOptionalEffectiveDate(effectiveDateInput);
+    const requestedEffectiveDate =
+      this.parseOptionalEffectiveDate(effectiveDateInput);
 
     const approvers = [
       {
@@ -955,10 +1110,9 @@ export class AssetsService {
       },
     ].filter(
       (item, index, list) =>
-        // If the same manager is responsible for both source and destination projects,
-        // one approval is enough.
         list.findIndex(
-          (candidate) => candidate.approverUserId === item.approverUserId,
+          (candidate) =>
+            candidate.approverUserId === item.approverUserId,
         ) === index,
     );
 
@@ -986,85 +1140,183 @@ export class AssetsService {
       (approval) => approval.status === 'APPROVED',
     );
 
-    return this.prisma.$transaction(async (tx) => {
-      const transferRequest = await tx.assetTransferRequest.create({
-        data: {
-          companyId: asset.companyId,
-          assetId: asset.id,
-          fromProjectId: asset.projectId!,
+    /*
+      Avoid Prisma interactive transactions here.
+
+      The remote/pooler-backed database was expiring the interactive
+      transaction before the first write completed (P2028), even with a
+      20-second timeout. These writes are therefore executed as short,
+      independent Prisma calls. The shared validation above still guarantees
+      the same business rules for single and bulk requests.
+    */
+    const transferRequest = await this.prisma.assetTransferRequest.create({
+      data: {
+        companyId: asset.companyId,
+        assetId: asset.id,
+        fromProjectId: asset.projectId!,
+        toProjectId,
+        requestedByUserId,
+        transferBatchId: transferBatchId || null,
+        effectiveDate: fullyApproved
+          ? requestedEffectiveDate || now
+          : requestedEffectiveDate,
+        status: fullyApproved
+          ? 'APPROVED'
+          : partiallyApproved
+            ? 'PARTIALLY_APPROVED'
+            : 'PENDING',
+        ...(fullyApproved
+          ? {
+              approvedAt: now,
+              appliedAt: now,
+              reason:
+                'Auto-applied because the requester manages all required approval stages',
+            }
+          : partiallyApproved
+            ? {
+                reason:
+                  'Partially auto-approved because the requester manages one required approval stage',
+              }
+            : {}),
+        approvals: {
+          create: approvalsToCreate.map((approval) => ({
+            approverUserId: approval.approverUserId,
+            projectId: approval.projectId,
+            approvalStage: approval.approvalStage,
+            status: approval.status as any,
+            reviewedAt: approval.reviewedAt,
+            note: approval.note,
+          })),
+        },
+      },
+      include: {
+        asset: true,
+        fromProject: true,
+        toProject: true,
+        approvals: true,
+      },
+    });
+
+    if (!fullyApproved) {
+      return transferRequest;
+    }
+
+    await this.prisma.asset.update({
+      where: { id: asset.id },
+      data: { projectId: toProjectId },
+    });
+
+    await this.prisma.assetAssignmentHistory.create({
+      data: {
+        companyId: asset.companyId,
+        assetId: asset.id,
+        fromProjectId: asset.projectId,
+        toProjectId,
+        transferRequestId: transferRequest.id,
+        assignmentType: 'TRANSFER' as any,
+        reason: 'Asset transfer auto-approved and applied',
+        assignedAt: requestedEffectiveDate || now,
+        assignedByUserId: requestedByUserId,
+      },
+    });
+
+    return this.prisma.assetTransferRequest.findFirst({
+      where: { id: transferRequest.id },
+      include: {
+        asset: true,
+        fromProject: true,
+        toProject: true,
+        approvals: true,
+      },
+    });
+  }
+
+  async createTransferRequest(
+    assetId: string,
+    toProjectId: string,
+    requestedByUserId: string,
+    effectiveDateInput?: string,
+  ) {
+    if (!String(assetId || '').trim()) {
+      throw new BadRequestException('Asset is required');
+    }
+
+    if (!String(toProjectId || '').trim()) {
+      throw new BadRequestException('Target project is required');
+    }
+
+    if (!String(requestedByUserId || '').trim()) {
+      throw new BadRequestException('Requester user is required');
+    }
+
+    return this.createTransferRequestCore(
+      assetId,
+      toProjectId,
+      requestedByUserId,
+      effectiveDateInput,
+      null,
+    );
+  }
+
+  async createBulkTransferRequests(
+    assetIds: string[],
+    toProjectId: string,
+    requestedByUserId: string,
+    effectiveDateInput?: string,
+  ) {
+    const uniqueAssetIds = Array.from(
+      new Set(
+        (assetIds || [])
+          .map((id) => String(id || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (!uniqueAssetIds.length) {
+      throw new BadRequestException('At least one asset is required');
+    }
+
+    if (!String(toProjectId || '').trim()) {
+      throw new BadRequestException('Target project is required');
+    }
+
+    if (!String(requestedByUserId || '').trim()) {
+      throw new BadRequestException('Requester user is required');
+    }
+
+    /*
+      One batch reference is shared by all asset-transfer records created from
+      this bulk submission. Each asset still keeps its own unique request ID,
+      status, approvals and assignment history.
+    */
+    const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const transferBatchId =
+      `ATB-${datePart}-${randomUUID().slice(0, 8).toUpperCase()}`;
+
+    /*
+      Process each asset sequentially to avoid overloading the remote database
+      connection pool. Every item uses the same shared transfer logic.
+    */
+    const transfers: any[] = [];
+
+    for (const assetId of uniqueAssetIds) {
+      transfers.push(
+        await this.createTransferRequestCore(
+          assetId,
           toProjectId,
           requestedByUserId,
-          effectiveDate: fullyApproved
-            ? requestedEffectiveDate || now
-            : requestedEffectiveDate,
-          status: fullyApproved
-            ? 'APPROVED'
-            : partiallyApproved
-              ? 'PARTIALLY_APPROVED'
-              : 'PENDING',
-          ...(fullyApproved
-            ? {
-                approvedAt: now,
-                appliedAt: now,
-                reason: 'Auto-applied because the requester manages all required approval stages',
-              }
-            : partiallyApproved
-              ? {
-                  reason: 'Partially auto-approved because the requester manages one required approval stage',
-                }
-              : {}),
-          approvals: {
-            create: approvalsToCreate.map((approval) => ({
-              approverUserId: approval.approverUserId,
-              projectId: approval.projectId,
-              approvalStage: approval.approvalStage,
-              status: approval.status as any,
-              reviewedAt: approval.reviewedAt,
-              note: approval.note,
-            })),
-          },
-        },
-        include: {
-          asset: true,
-          fromProject: true,
-          toProject: true,
-          approvals: true,
-        },
-      });
+          effectiveDateInput,
+          transferBatchId,
+        ),
+      );
+    }
 
-      if (!fullyApproved) {
-        return transferRequest;
-      }
-
-      await tx.asset.update({
-        where: { id: asset.id },
-        data: { projectId: toProjectId },
-      });
-
-      await tx.assetAssignmentHistory.create({
-        data: {
-          companyId: asset.companyId,
-          assetId: asset.id,
-          fromProjectId: asset.projectId,
-          toProjectId,
-          transferRequestId: transferRequest.id,
-          assignmentType: 'TRANSFER' as any,
-          reason: 'Asset transfer auto-approved and applied',
-          assignedAt: requestedEffectiveDate || now,
-          assignedByUserId: requestedByUserId,
-        },
-      });
-
-      return tx.assetTransferRequest.findFirst({
-        where: { id: transferRequest.id },
-        include: {
-          asset: true,
-          fromProject: true,
-          toProject: true,
-          approvals: true,
-        },
-      });
-    });
+    return {
+      transferBatchId,
+      requestedCount: uniqueAssetIds.length,
+      createdCount: transfers.length,
+      transfers,
+    };
   }
 
   async getPendingTransferRequests() {
@@ -1083,6 +1335,75 @@ export class AssetsService {
       orderBy: {
         createdAt: 'desc',
       },
+    });
+  }
+
+  async getTransferHistory(companyId?: string) {
+    return this.prisma.assetTransferRequest.findMany({
+      where: {
+        ...(companyId ? { companyId } : {}),
+      },
+      include: {
+        asset: {
+          select: {
+            id: true,
+            assetId: true,
+            type: true,
+            category: true,
+            companyId: true,
+          },
+        },
+        company: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+          },
+        },
+        fromProject: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+          },
+        },
+        toProject: {
+          select: {
+            id: true,
+            name: true,
+            code: true,
+          },
+        },
+        requestedBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        approvals: {
+          include: {
+            approver: {
+              select: {
+                id: true,
+                fullName: true,
+                email: true,
+              },
+            },
+            project: {
+              select: {
+                id: true,
+                name: true,
+                code: true,
+              },
+            },
+          },
+          orderBy: {
+            createdAt: 'asc',
+          },
+        },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     });
   }
 
