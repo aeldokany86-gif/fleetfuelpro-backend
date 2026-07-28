@@ -498,6 +498,12 @@ model Operation {
   fuelPriceHistoryId        String?
   pricePerLiterAtOperation  Float?
   totalCostAtOperation      Float?
+  projectIdAtOperation      String?
+  projectNameAtOperation    String?
+  sourceProjectIdAtOperation String?
+  sourceProjectNameAtOperation String?
+  destinationProjectIdAtOperation String?
+  destinationProjectNameAtOperation String?
   asset                     Asset?                   @relation(fields: [assetId], references: [id])
   company                   Company                  @relation(fields: [companyId], references: [id])
   destinationStation        Station?                 @relation("OperationDestinationStation", fields: [destinationStationId], references: [id])
@@ -516,6 +522,9 @@ model Operation {
   @@index([assetId])
   @@index([requestedByUserId])
   @@index([fuelPriceHistoryId])
+  @@index([projectIdAtOperation])
+  @@index([sourceProjectIdAtOperation])
+  @@index([destinationProjectIdAtOperation])
   @@index([createdAt])
   @@index([companyId, createdAt])
   @@index([companyId, status, createdAt])

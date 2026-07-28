@@ -480,112 +480,128 @@ export class ProjectsService {
       ? new Date(data.effectiveFrom)
       : new Date();
 
-    const history =
-      await this.prisma.projectFuelPriceHistory.create({
-        data: {
-          projectId: project.id,
-          companyId: project.companyId,
-          country:
-            project.company?.country || 'Unknown',
-          currency:
-            project.company?.currency || 'SAR',
-          pricePerLiter,
-          effectiveFrom,
-          reason: data.reason?.trim() || null,
-          createdByUserId:
-            data.createdByUserId || null,
-        },
-        include: {
-          project: true,
-          company: true,
-          createdBy: true,
-        },
-      });
-
-    const latestPrice =
-      await this.prisma.projectFuelPriceHistory.findFirst({
-        where: {
-          projectId: project.id,
-        },
-        orderBy: {
-          effectiveFrom: 'desc',
-        },
-      });
-
-    await this.prisma.project.update({
-      where: {
-        id: project.id,
-      },
-      data: {
-        currentFuelPrice:
-          latestPrice?.pricePerLiter || 0,
-        fuelPriceEffectiveFrom:
-          latestPrice?.effectiveFrom || new Date(),
-      },
-    });
-
-    const operationsToReprice =
-      await this.prisma.operation.findMany({
-        where: {
-          companyId: project.companyId,
-          status: 'COMPLETED',
-          type: { not: 'EXTERNAL_DIRECT_REFUEL' },
-          completedAt: {
-            gte: effectiveFrom,
-          },
-          OR: [
-            {
-              asset: {
-                projectId: project.id,
-              },
-            },
-            {
-              destinationStation: {
-                projectId: project.id,
-              },
-            },
-            {
-              sourceStation: {
-                projectId: project.id,
-              },
-            },
-          ],
-        },
-        select: {
-          id: true,
-          quantity: true,
-        },
-      });
-
-    const repricedOperations =
-      operationsToReprice.length;
-
-    if (repricedOperations > 0) {
-      const valuesSql =
-        operationsToReprice
-          .map(
-            (operation) =>
-              `('${operation.id}', ${Number(operation.quantity)})`,
-          )
-          .join(', ');
-
-      await this.prisma.$executeRawUnsafe(`
-        UPDATE "Operation" AS op
-        SET
-          "fuelPriceHistoryId" = '${history.id}',
-          "pricePerLiterAtOperation" = ${Number(pricePerLiter)},
-          "totalCostAtOperation" = values.quantity * ${Number(pricePerLiter)}
-        FROM (
-          VALUES ${valuesSql}
-        ) AS values(id, quantity)
-        WHERE op.id = values.id
-      `);
+    if (Number.isNaN(effectiveFrom.getTime())) {
+      throw new BadRequestException(
+        'Effective date is invalid',
+      );
     }
 
-    return {
-      ...history,
-      repricedOperations,
-    };
+    return this.prisma.$transaction(
+      async (tx) => {
+        const history =
+          await tx.projectFuelPriceHistory.create({
+            data: {
+              projectId: project.id,
+              companyId: project.companyId,
+              country:
+                project.company?.country || 'Unknown',
+              currency:
+                project.company?.currency || 'SAR',
+              pricePerLiter,
+              effectiveFrom,
+              reason: data.reason?.trim() || null,
+              createdByUserId:
+                data.createdByUserId || null,
+            },
+            include: {
+              project: true,
+              company: true,
+              createdBy: true,
+            },
+          });
+
+        const [latestPrice, nextPrice] = await Promise.all([
+          tx.projectFuelPriceHistory.findFirst({
+            where: {
+              projectId: project.id,
+            },
+            orderBy: [
+              { effectiveFrom: 'desc' },
+              { createdAt: 'desc' },
+            ],
+          }),
+          tx.projectFuelPriceHistory.findFirst({
+            where: {
+              projectId: project.id,
+              effectiveFrom: {
+                gt: effectiveFrom,
+              },
+            },
+            orderBy: [
+              { effectiveFrom: 'asc' },
+              { createdAt: 'asc' },
+            ],
+          }),
+        ]);
+
+        await tx.project.update({
+          where: {
+            id: project.id,
+          },
+          data: {
+            currentFuelPrice:
+              latestPrice?.pricePerLiter || 0,
+            fuelPriceEffectiveFrom:
+              latestPrice?.effectiveFrom || new Date(),
+          },
+        });
+
+        const operationsToReprice =
+          await tx.operation.findMany({
+            where: {
+              companyId: project.companyId,
+              projectIdAtOperation: project.id,
+              status: 'COMPLETED',
+              type: {
+                not: 'EXTERNAL_DIRECT_REFUEL',
+              },
+              completedAt: {
+                gte: effectiveFrom,
+                ...(nextPrice?.effectiveFrom
+                  ? { lt: nextPrice.effectiveFrom }
+                  : {}),
+              },
+            },
+            select: {
+              id: true,
+              quantity: true,
+            },
+          });
+
+        const repricedOperations =
+          operationsToReprice.length;
+
+        if (repricedOperations > 0) {
+          for (const operation of operationsToReprice) {
+            await tx.operation.update({
+              where: {
+                id: operation.id,
+              },
+              data: {
+                fuelPriceHistoryId: history.id,
+                pricePerLiterAtOperation:
+                  pricePerLiter,
+                totalCostAtOperation:
+                  Number(operation.quantity || 0) *
+                  pricePerLiter,
+              },
+            });
+          }
+        }
+
+        return {
+          ...history,
+          repricedOperations,
+          repricedFrom: effectiveFrom,
+          repricedUntil:
+            nextPrice?.effectiveFrom || null,
+        };
+      },
+      {
+        maxWait: 10000,
+        timeout: 20000,
+      },
+    );
   }
 
   async getFuelPriceHistory(projectId: string) {

@@ -69,6 +69,15 @@ type OperationMeterSnapshot = {
   stationCounterCycleNumber: number | null;
 };
 
+type OperationProjectSnapshot = {
+  projectIdAtOperation: string | null;
+  projectNameAtOperation: string | null;
+  sourceProjectIdAtOperation: string | null;
+  sourceProjectNameAtOperation: string | null;
+  destinationProjectIdAtOperation: string | null;
+  destinationProjectNameAtOperation: string | null;
+};
+
 @Injectable()
 export class OperationsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -455,6 +464,11 @@ async findPendingApprovals(request?: RequestLike) {
       },
     );
 
+    const projectSnapshot = this.buildOperationProjectSnapshot(
+      type,
+      entities,
+    );
+
     // Calculate meter snapshots before opening the interactive transaction.
     // This keeps the transaction focused on writes and avoids Supabase pooler timeouts.
     const meterSnapshot =
@@ -497,6 +511,18 @@ async findPendingApprovals(request?: RequestLike) {
               fuelPriceHistoryId: costSnapshot.fuelPriceHistoryId,
               pricePerLiterAtOperation: costSnapshot.pricePerLiterAtOperation,
               totalCostAtOperation: costSnapshot.totalCostAtOperation,
+              projectIdAtOperation:
+                projectSnapshot.projectIdAtOperation,
+              projectNameAtOperation:
+                projectSnapshot.projectNameAtOperation,
+              sourceProjectIdAtOperation:
+                projectSnapshot.sourceProjectIdAtOperation,
+              sourceProjectNameAtOperation:
+                projectSnapshot.sourceProjectNameAtOperation,
+              destinationProjectIdAtOperation:
+                projectSnapshot.destinationProjectIdAtOperation,
+              destinationProjectNameAtOperation:
+                projectSnapshot.destinationProjectNameAtOperation,
               requestedByUserId: currentUser.id,
               completedAt,
               approvedAt:
@@ -1244,6 +1270,60 @@ async findPendingApprovals(request?: RequestLike) {
     return null;
   }
 
+
+  private buildOperationProjectSnapshot(
+    type: NormalizedOperationType,
+    entities: LoadedOperationEntities,
+  ): OperationProjectSnapshot {
+    const sourceProjectId = entities.sourceProjectId || null;
+    const sourceProjectName =
+      entities.sourceStation?.project?.name ||
+      entities.sourceStation?.project?.code ||
+      null;
+
+    const destinationProjectId = entities.destinationProjectId || null;
+    const destinationProjectName =
+      entities.destinationStation?.project?.name ||
+      entities.destinationStation?.project?.code ||
+      null;
+
+    const assetProjectId = entities.assetProjectId || null;
+    const assetProjectName =
+      entities.asset?.project?.name ||
+      entities.asset?.project?.code ||
+      null;
+
+    let projectIdAtOperation: string | null = null;
+    let projectNameAtOperation: string | null = null;
+
+    if (type === 'DIRECT_REFUEL' || type === 'EXTERNAL_DIRECT_REFUEL') {
+      projectIdAtOperation = assetProjectId;
+      projectNameAtOperation = assetProjectName;
+    } else if (type === 'EXTERNAL_SUPPLY') {
+      projectIdAtOperation = destinationProjectId;
+      projectNameAtOperation = destinationProjectName;
+    } else if (type === 'INTERNAL_TRANSFER') {
+      projectIdAtOperation = sourceProjectId || destinationProjectId;
+      projectNameAtOperation =
+        sourceProjectName || destinationProjectName;
+    } else if (type === 'EXTERNAL_TRANSFER') {
+      // Keep the same primary-project rule currently used for cost:
+      // destination first, then source. Source and destination snapshots
+      // are also stored independently below.
+      projectIdAtOperation = destinationProjectId || sourceProjectId;
+      projectNameAtOperation =
+        destinationProjectName || sourceProjectName;
+    }
+
+    return {
+      projectIdAtOperation,
+      projectNameAtOperation,
+      sourceProjectIdAtOperation: sourceProjectId,
+      sourceProjectNameAtOperation: sourceProjectName,
+      destinationProjectIdAtOperation: destinationProjectId,
+      destinationProjectNameAtOperation: destinationProjectName,
+    };
+  }
 
   private getOperationProjectIdForCost(
     type: NormalizedOperationType,

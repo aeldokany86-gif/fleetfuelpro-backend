@@ -76,16 +76,6 @@ export class AssetsService {
     return requester;
   }
 
-  private parseOptionalEffectiveDate(value?: string | null) {
-    if (!value) return null;
-
-    const effectiveDate = new Date(value);
-    if (Number.isNaN(effectiveDate.getTime())) {
-      throw new BadRequestException('Invalid effective date');
-    }
-
-    return effectiveDate;
-  }
 
   private async ensureCompany(companyId: string) {
     const company = await this.prisma.company.findFirst({
@@ -996,7 +986,7 @@ export class AssetsService {
     assetId: string,
     toProjectId: string,
     requestedByUserId: string,
-    effectiveDateInput?: string,
+    _effectiveDateInput?: string,
     transferBatchId?: string | null,
   ) {
     /*
@@ -1094,8 +1084,6 @@ export class AssetsService {
     }
 
     const now = new Date();
-    const requestedEffectiveDate =
-      this.parseOptionalEffectiveDate(effectiveDateInput);
 
     const approvers = [
       {
@@ -1157,9 +1145,7 @@ export class AssetsService {
         toProjectId,
         requestedByUserId,
         transferBatchId: transferBatchId || null,
-        effectiveDate: fullyApproved
-          ? requestedEffectiveDate || now
-          : requestedEffectiveDate,
+        effectiveDate: null,
         status: fullyApproved
           ? 'APPROVED'
           : partiallyApproved
@@ -1215,7 +1201,7 @@ export class AssetsService {
         transferRequestId: transferRequest.id,
         assignmentType: 'TRANSFER' as any,
         reason: 'Asset transfer auto-approved and applied',
-        assignedAt: requestedEffectiveDate || now,
+        assignedAt: now,
         assignedByUserId: requestedByUserId,
       },
     });
@@ -1253,7 +1239,7 @@ export class AssetsService {
       assetId,
       toProjectId,
       requestedByUserId,
-      effectiveDateInput,
+      undefined,
       null,
     );
   }
@@ -1305,7 +1291,7 @@ export class AssetsService {
           assetId,
           toProjectId,
           requestedByUserId,
-          effectiveDateInput,
+          undefined,
           transferBatchId,
         ),
       );
@@ -1437,8 +1423,6 @@ export class AssetsService {
     }
 
     const now = new Date();
-    const effectiveDate = request.effectiveDate || now;
-
     const pendingApproval = request.approvals.find(
       (approval) =>
         approval.approverUserId === managerUserId &&
@@ -1549,7 +1533,7 @@ export class AssetsService {
           transferRequestId: request.id,
           assignmentType: 'TRANSFER' as any,
           reason: 'Asset transfer approved and applied',
-          assignedAt: effectiveDate,
+          assignedAt: now,
           assignedByUserId: managerUserId,
         },
       });
@@ -1560,7 +1544,6 @@ export class AssetsService {
           status: 'APPROVED',
           approvedAt: now,
           appliedAt: now,
-          effectiveDate,
           reason: request.reason
             ? `${request.reason}; Final approval by manager ${managerUserId}`
             : `Approved by manager ${managerUserId}`,
