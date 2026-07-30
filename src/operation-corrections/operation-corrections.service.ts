@@ -186,6 +186,373 @@ export class OperationCorrectionsService {
     };
   }
 
+  async getCorrectionContext(operationId: string, request?: RequestLike) {
+    const currentUser = await this.resolveCurrentUser(request);
+    this.validateRequesterCanCreateCorrection(currentUser);
+
+    const operation = await this.loadOperation(
+      operationId,
+      currentUser.companyId,
+    );
+
+    if (operation.status !== 'COMPLETED') {
+      throw new BadRequestException(
+        'Only completed operations can be corrected.',
+      );
+    }
+
+    this.assertCanAccessCorrectionContext(currentUser, operation);
+
+    const operationTime = this.getOperationEffectiveTime(operation);
+    const assetProjectId = operation.projectIdAtOperation || null;
+    const sourceProjectId =
+      operation.sourceProjectIdAtOperation ||
+      operation.projectIdAtOperation ||
+      null;
+    const destinationProjectId =
+      operation.destinationProjectIdAtOperation ||
+      operation.projectIdAtOperation ||
+      null;
+
+    const stationProjectIds = Array.from(
+      new Set(
+        [sourceProjectId, destinationProjectId].filter(Boolean) as string[],
+      ),
+    );
+
+    const operationProjectIds = Array.from(
+      new Set(
+        [assetProjectId, ...stationProjectIds].filter(Boolean) as string[],
+      ),
+    );
+
+    /*
+      Phase 1: collect only candidate entity IDs.
+
+      An entity can belong to the historical project either because:
+      1) its current project still matches, or
+      2) it has an assignment into that project on/before the operation date.
+
+      This avoids loading every assignment-history row in the company.
+    */
+    const [
+      currentProjectAssets,
+      assetAssignmentsToProject,
+      currentProjectStations,
+      stationAssignmentsToProjects,
+      fuelers,
+    ] = await Promise.all([
+      assetProjectId
+        ? (this.prisma as any).asset.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              projectId: assetProjectId,
+              createdAt: { lte: operationTime },
+              OR: [
+                { deletedAt: null },
+                { deletedAt: { gt: operationTime } },
+              ],
+            },
+            select: { id: true },
+          })
+        : Promise.resolve([]),
+      assetProjectId
+        ? (this.prisma as any).assetAssignmentHistory.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              toProjectId: assetProjectId,
+              assignedAt: { lte: operationTime },
+            },
+            select: { assetId: true },
+            distinct: ['assetId'],
+          })
+        : Promise.resolve([]),
+      stationProjectIds.length
+        ? (this.prisma as any).station.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              projectId: { in: stationProjectIds },
+              createdAt: { lte: operationTime },
+              OR: [
+                { deletedAt: null },
+                { deletedAt: { gt: operationTime } },
+              ],
+            },
+            select: { id: true },
+          })
+        : Promise.resolve([]),
+      stationProjectIds.length
+        ? (this.prisma as any).stationAssignmentHistory.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              toProjectId: { in: stationProjectIds },
+              assignedAt: { lte: operationTime },
+            },
+            select: { stationId: true },
+            distinct: ['stationId'],
+          })
+        : Promise.resolve([]),
+      (this.prisma as any).employee.findMany({
+        where: {
+          companyId: currentUser.companyId,
+          deletedAt: null,
+          linkedUserId: { not: null },
+          linkedUser: {
+            companyId: currentUser.companyId,
+            isActive: true,
+          },
+          // EmployeeStatus enum contains ON_DUTY, VACATION and
+          // RETIRED_RESIGNED. User activation is checked on linkedUser.
+          status: 'ON_DUTY',
+          ...(operationProjectIds.length
+            ? {
+                OR: [
+                  { projectId: { in: operationProjectIds } },
+                  { projectId: null },
+                ],
+              }
+            : {}),
+        },
+        select: {
+          id: true,
+          employeeId: true,
+          name: true,
+          jobTitle: true,
+          status: true,
+          projectId: true,
+          linkedUserId: true,
+        },
+        orderBy: [{ name: 'asc' }, { employeeId: 'asc' }],
+      }),
+    ]);
+
+    const assetCandidateIds = Array.from(
+      new Set(
+        [
+          ...currentProjectAssets.map((item: any) => item.id),
+          ...assetAssignmentsToProject.map((item: any) => item.assetId),
+          operation.assetId,
+        ].filter(Boolean) as string[],
+      ),
+    );
+
+    const stationCandidateIds = Array.from(
+      new Set(
+        [
+          ...currentProjectStations.map((item: any) => item.id),
+          ...stationAssignmentsToProjects.map(
+            (item: any) => item.stationId,
+          ),
+          operation.sourceStationId,
+          operation.destinationStationId,
+        ].filter(Boolean) as string[],
+      ),
+    );
+
+    /*
+      Phase 2: hydrate only candidate entities and fetch their history in
+      two batch queries. No findFirst-inside-loop / N+1 queries.
+    */
+    const [assets, assetAssignments, stations, stationAssignments] =
+      await Promise.all([
+        assetCandidateIds.length
+          ? (this.prisma as any).asset.findMany({
+              where: {
+                id: { in: assetCandidateIds },
+                companyId: currentUser.companyId,
+                createdAt: { lte: operationTime },
+                OR: [
+                  { deletedAt: null },
+                  { deletedAt: { gt: operationTime } },
+                ],
+              },
+              select: {
+                id: true,
+                assetId: true,
+                type: true,
+                category: true,
+                status: true,
+                projectId: true,
+                createdAt: true,
+              },
+              orderBy: [{ assetId: 'asc' }, { createdAt: 'asc' }],
+            })
+          : Promise.resolve([]),
+        assetCandidateIds.length
+          ? (this.prisma as any).assetAssignmentHistory.findMany({
+              where: {
+                companyId: currentUser.companyId,
+                assetId: { in: assetCandidateIds },
+                assignedAt: { lte: operationTime },
+              },
+              select: {
+                assetId: true,
+                toProjectId: true,
+                assignedAt: true,
+                createdAt: true,
+                id: true,
+              },
+              orderBy: [
+                { assignedAt: 'desc' },
+                { createdAt: 'desc' },
+                { id: 'desc' },
+              ],
+            })
+          : Promise.resolve([]),
+        stationCandidateIds.length
+          ? (this.prisma as any).station.findMany({
+              where: {
+                id: { in: stationCandidateIds },
+                companyId: currentUser.companyId,
+                createdAt: { lte: operationTime },
+                OR: [
+                  { deletedAt: null },
+                  { deletedAt: { gt: operationTime } },
+                ],
+              },
+              select: {
+                id: true,
+                stationId: true,
+                name: true,
+                status: true,
+                projectId: true,
+                createdAt: true,
+              },
+              orderBy: [{ stationId: 'asc' }, { createdAt: 'asc' }],
+            })
+          : Promise.resolve([]),
+        stationCandidateIds.length
+          ? (this.prisma as any).stationAssignmentHistory.findMany({
+              where: {
+                companyId: currentUser.companyId,
+                stationId: { in: stationCandidateIds },
+                assignedAt: { lte: operationTime },
+              },
+              select: {
+                stationId: true,
+                toProjectId: true,
+                assignedAt: true,
+                createdAt: true,
+                id: true,
+              },
+              orderBy: [
+                { assignedAt: 'desc' },
+                { createdAt: 'desc' },
+                { id: 'desc' },
+              ],
+            })
+          : Promise.resolve([]),
+      ]);
+
+    const latestAssetProject = new Map<string, string | null>();
+    for (const assignment of assetAssignments) {
+      if (!latestAssetProject.has(assignment.assetId)) {
+        latestAssetProject.set(
+          assignment.assetId,
+          assignment.toProjectId || null,
+        );
+      }
+    }
+
+    const latestStationProject = new Map<string, string | null>();
+    for (const assignment of stationAssignments) {
+      if (!latestStationProject.has(assignment.stationId)) {
+        latestStationProject.set(
+          assignment.stationId,
+          assignment.toProjectId || null,
+        );
+      }
+    }
+
+    const allowedAssets = assetProjectId
+      ? assets
+          .filter((asset: any) => {
+            const status = String(asset.status || '')
+              .trim()
+              .toLowerCase();
+            const historicalProjectId =
+              latestAssetProject.get(asset.id) ??
+              asset.projectId ??
+              null;
+
+            return (
+              status !== 'retired' &&
+              historicalProjectId === assetProjectId
+            );
+          })
+          .map((asset: any) => ({
+            ...asset,
+            backendId: asset.id,
+            projectIdAtOperation: assetProjectId,
+          }))
+      : [];
+
+    const mapAllowedStations = (requiredProjectId: string | null) => {
+      if (!requiredProjectId) return [];
+
+      return stations
+        .filter((station: any) => {
+          const identifiers = [
+            station.id,
+            station.stationId,
+            station.name,
+          ].map((value) =>
+            String(value || '')
+              .trim()
+              .toLowerCase()
+              .replace(/[\s_-]+/g, ''),
+          );
+          const historicalProjectId =
+            latestStationProject.get(station.id) ??
+            station.projectId ??
+            null;
+
+          return (
+            !identifiers.includes('externalsupply') &&
+            historicalProjectId === requiredProjectId
+          );
+        })
+        .map((station: any) => ({
+          ...station,
+          backendId: station.id,
+          projectIdAtOperation: requiredProjectId,
+        }));
+    };
+
+    const allowedFuelers = fuelers.map((fueler: any) => ({
+      ...fueler,
+      fullName: fueler.name || fueler.employeeId || '-',
+      role: fueler.jobTitle || 'Operator',
+      backendId: fueler.id,
+      employeeBackendId: fueler.id,
+    }));
+
+    return {
+      ok: true,
+      operationContext: {
+        operationId: operation.id,
+        operationNo: operation.operationNo || null,
+        operationType: operation.type,
+        operationDate: operationTime,
+        projectIdAtOperation: assetProjectId,
+        projectNameAtOperation:
+          operation.projectNameAtOperation || null,
+        sourceProjectIdAtOperation: sourceProjectId,
+        sourceProjectNameAtOperation:
+          operation.sourceProjectNameAtOperation || null,
+        destinationProjectIdAtOperation: destinationProjectId,
+        destinationProjectNameAtOperation:
+          operation.destinationProjectNameAtOperation || null,
+      },
+      allowedAssets,
+      allowedSourceStations: mapAllowedStations(sourceProjectId),
+      allowedDestinationStations: mapAllowedStations(
+        destinationProjectId,
+      ),
+      allowedFuelers,
+    };
+  }
+
   async getOdometerCorrectionHistoryReport(filters: {
     companyId?: string;
     projectId?: string;
@@ -245,9 +612,7 @@ export class OperationCorrectionsService {
           ...(filters.assetId ? { assetId: filters.assetId } : {}),
           ...(filters.projectId
             ? {
-                asset: {
-                  projectId: filters.projectId,
-                },
+                projectIdAtOperation: filters.projectId,
               }
             : {}),
         },
@@ -290,6 +655,12 @@ export class OperationCorrectionsService {
             lifetimeOdometer: true,
             assetMeterCycleNumber: true,
             assetId: true,
+            projectIdAtOperation: true,
+            projectNameAtOperation: true,
+            sourceProjectIdAtOperation: true,
+            sourceProjectNameAtOperation: true,
+            destinationProjectIdAtOperation: true,
+            destinationProjectNameAtOperation: true,
             asset: {
               select: {
                 id: true,
@@ -337,9 +708,9 @@ export class OperationCorrectionsService {
         assetId: asset?.assetId || operation?.assetId || '-',
         assetType: asset?.type || null,
         category: asset?.category || null,
-        projectId: asset?.projectId || null,
-        projectCode: asset?.project?.code || null,
-        projectName: asset?.project?.name || null,
+        projectId: operation?.projectIdAtOperation || null,
+        projectCode: null,
+        projectName: operation?.projectNameAtOperation || null,
         previousReading: Number(this.fromJsonValue(correction.oldValue)),
         currentReading: Number(this.fromJsonValue(correction.newValue)),
         lifetimeReading:
@@ -375,9 +746,9 @@ export class OperationCorrectionsService {
           ? {
               operation: {
                 OR: [
-                  { sourceStation: { projectId: { in: currentUser.managedProjectIds } } },
-                  { destinationStation: { projectId: { in: currentUser.managedProjectIds } } },
-                  { asset: { projectId: { in: currentUser.managedProjectIds } } },
+                  { projectIdAtOperation: { in: currentUser.managedProjectIds } },
+                  { sourceProjectIdAtOperation: { in: currentUser.managedProjectIds } },
+                  { destinationProjectIdAtOperation: { in: currentUser.managedProjectIds } },
                 ],
               },
             }
@@ -591,10 +962,24 @@ export class OperationCorrectionsService {
     });
 
     if (!newAsset) throw new NotFoundException('New asset was not found.');
+
+    const targetProjectId = this.getHistoricalProjectForCorrection(operation, 'ASSET_ID');
+    const newAssetProjectId = await this.getAssetProjectAtOperationTime(
+      tx,
+      newAsset,
+      this.getOperationEffectiveTime(operation),
+    );
+
+    this.assertEntityMatchesHistoricalProject(
+      'Asset',
+      newAssetProjectId,
+      targetProjectId,
+    );
+
     await this.validateCorrectedProjectRules(tx, operation, {
-      sourceProjectId: operation.sourceStation?.projectId,
-      destinationProjectId: operation.destinationStation?.projectId,
-      assetProjectId: newAsset.projectId,
+      sourceProjectId: operation.sourceProjectIdAtOperation || operation.projectIdAtOperation,
+      destinationProjectId: operation.destinationProjectIdAtOperation || operation.projectIdAtOperation,
+      assetProjectId: targetProjectId,
     });
 
     /*
@@ -627,10 +1012,24 @@ export class OperationCorrectionsService {
     const newStation = await tx.station.findFirst({ where: { id: newStationId, companyId: operation.companyId, deletedAt: null } });
 
     if (!newStation) throw new NotFoundException('New source station was not found.');
+
+    const targetProjectId = this.getHistoricalProjectForCorrection(operation, 'SOURCE_STATION_ID');
+    const newStationProjectId = await this.getStationProjectAtOperationTime(
+      tx,
+      newStation,
+      this.getOperationEffectiveTime(operation),
+    );
+
+    this.assertEntityMatchesHistoricalProject(
+      'Source station',
+      newStationProjectId,
+      targetProjectId,
+    );
+
     await this.validateCorrectedProjectRules(tx, operation, {
-      sourceProjectId: newStation.projectId,
-      destinationProjectId: operation.destinationStation?.projectId,
-      assetProjectId: operation.asset?.projectId,
+      sourceProjectId: targetProjectId,
+      destinationProjectId: operation.destinationProjectIdAtOperation || operation.projectIdAtOperation,
+      assetProjectId: operation.projectIdAtOperation,
     });
 
     const quantity = Math.abs(Number(operation.quantity || 0));
@@ -679,10 +1078,24 @@ export class OperationCorrectionsService {
     const newStation = await tx.station.findFirst({ where: { id: newStationId, companyId: operation.companyId, deletedAt: null } });
 
     if (!newStation) throw new NotFoundException('New destination station was not found.');
+
+    const targetProjectId = this.getHistoricalProjectForCorrection(operation, 'DESTINATION_STATION_ID');
+    const newStationProjectId = await this.getStationProjectAtOperationTime(
+      tx,
+      newStation,
+      this.getOperationEffectiveTime(operation),
+    );
+
+    this.assertEntityMatchesHistoricalProject(
+      'Destination station',
+      newStationProjectId,
+      targetProjectId,
+    );
+
     await this.validateCorrectedProjectRules(tx, operation, {
-      sourceProjectId: operation.sourceStation?.projectId,
-      destinationProjectId: newStation.projectId,
-      assetProjectId: operation.asset?.projectId,
+      sourceProjectId: operation.sourceProjectIdAtOperation || operation.projectIdAtOperation,
+      destinationProjectId: targetProjectId,
+      assetProjectId: operation.projectIdAtOperation,
     });
 
     const quantity = Math.abs(Number(operation.quantity || 0));
@@ -1364,6 +1777,102 @@ export class OperationCorrectionsService {
     });
   }
 
+  private getOperationEffectiveTime(operation: any): Date {
+    const value = operation.completedAt || operation.approvedAt || operation.createdAt;
+    const parsed = value ? new Date(value) : new Date();
+
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException('Operation historical date is invalid.');
+    }
+
+    return parsed;
+  }
+
+  private getHistoricalProjectForCorrection(
+    operation: any,
+    fieldName: CorrectionField,
+  ): string {
+    let projectId: string | null = operation.projectIdAtOperation || null;
+
+    if (fieldName === 'SOURCE_STATION_ID') {
+      projectId =
+        operation.sourceProjectIdAtOperation ||
+        operation.projectIdAtOperation ||
+        null;
+    }
+
+    if (fieldName === 'DESTINATION_STATION_ID') {
+      projectId =
+        operation.destinationProjectIdAtOperation ||
+        operation.projectIdAtOperation ||
+        null;
+    }
+
+    if (!projectId) {
+      throw new BadRequestException(
+        'Operation historical project snapshot is missing. Rebuild the operation snapshot before correction.',
+      );
+    }
+
+    return projectId;
+  }
+
+  private assertEntityMatchesHistoricalProject(
+    entityLabel: string,
+    entityProjectId: string | null,
+    requiredProjectId: string,
+  ) {
+    if (!entityProjectId || entityProjectId !== requiredProjectId) {
+      throw new BadRequestException(
+        `${entityLabel} must belong to the operation historical project at the operation date.`,
+      );
+    }
+  }
+
+  private async getAssetProjectAtOperationTime(
+    db: any,
+    asset: any,
+    operationTime: Date,
+  ): Promise<string | null> {
+    if (asset.createdAt && new Date(asset.createdAt).getTime() > operationTime.getTime()) {
+      return null;
+    }
+
+    const latestAssignment = await db.assetAssignmentHistory.findFirst({
+      where: {
+        assetId: asset.id,
+        companyId: asset.companyId,
+        assignedAt: { lte: operationTime },
+      },
+      select: { toProjectId: true },
+      orderBy: [{ assignedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+    });
+
+    return latestAssignment?.toProjectId || asset.projectId || null;
+  }
+
+  private async getStationProjectAtOperationTime(
+    db: any,
+    station: any,
+    operationTime: Date,
+  ): Promise<string | null> {
+    if (station.createdAt && new Date(station.createdAt).getTime() > operationTime.getTime()) {
+      return null;
+    }
+
+    const latestAssignment = await db.stationAssignmentHistory.findFirst({
+      where: {
+        stationId: station.id,
+        companyId: station.companyId,
+        assignedAt: { lte: operationTime },
+      },
+      select: { toProjectId: true },
+      orderBy: [{ assignedAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+    });
+
+    return latestAssignment?.toProjectId || station.projectId || null;
+  }
+
   private async validateCorrectedProjectRules(
     _tx: any,
     operation: any,
@@ -1393,12 +1902,35 @@ export class OperationCorrectionsService {
   private assertCanReviewOperation(user: CurrentUserContext, operation: any) {
     if (user.role !== 'Manager') return;
     const projectIds = [
-      operation.sourceStation?.projectId,
-      operation.destinationStation?.projectId,
-      operation.asset?.projectId,
+      operation.projectIdAtOperation,
+      operation.sourceProjectIdAtOperation,
+      operation.destinationProjectIdAtOperation,
     ].filter(Boolean);
     if (!projectIds.some((id: string) => user.managedProjectIds.includes(id))) {
       throw new ForbiddenException('Manager can review corrections for managed projects only.');
+    }
+  }
+
+  private assertCanAccessCorrectionContext(
+    user: CurrentUserContext,
+    operation: any,
+  ) {
+    if (user.role !== 'Manager') return;
+
+    const projectIds = [
+      operation.projectIdAtOperation,
+      operation.sourceProjectIdAtOperation,
+      operation.destinationProjectIdAtOperation,
+    ].filter(Boolean);
+
+    if (
+      !projectIds.some((projectId: string) =>
+        user.managedProjectIds.includes(projectId),
+      )
+    ) {
+      throw new ForbiddenException(
+        'Manager can correct operations for managed projects only.',
+      );
     }
   }
 
@@ -1452,6 +1984,15 @@ export class OperationCorrectionsService {
         where: { id: String(value), companyId, deletedAt: null },
       });
       if (!asset) throw new NotFoundException('New asset was not found.');
+
+      const targetProjectId = this.getHistoricalProjectForCorrection(operation, 'ASSET_ID');
+      const assetProjectId = await this.getAssetProjectAtOperationTime(
+        this.prisma as any,
+        asset,
+        this.getOperationEffectiveTime(operation),
+      );
+      this.assertEntityMatchesHistoricalProject('Asset', assetProjectId, targetProjectId);
+
       return asset.id;
     }
 
@@ -1460,6 +2001,19 @@ export class OperationCorrectionsService {
         where: { id: String(value), companyId, deletedAt: null },
       });
       if (!station) throw new NotFoundException('New station was not found.');
+
+      const targetProjectId = this.getHistoricalProjectForCorrection(operation, fieldName);
+      const stationProjectId = await this.getStationProjectAtOperationTime(
+        this.prisma as any,
+        station,
+        this.getOperationEffectiveTime(operation),
+      );
+      this.assertEntityMatchesHistoricalProject(
+        fieldName === 'SOURCE_STATION_ID' ? 'Source station' : 'Destination station',
+        stationProjectId,
+        targetProjectId,
+      );
+
       return station.id;
     }
 
@@ -1519,9 +2073,9 @@ export class OperationCorrectionsService {
       }
 
       const operationProjectIds = [
-        operation.sourceStation?.projectId,
-        operation.destinationStation?.projectId,
-        operation.asset?.projectId,
+        operation.projectIdAtOperation,
+        operation.sourceProjectIdAtOperation,
+        operation.destinationProjectIdAtOperation,
       ].filter(Boolean);
 
       if (

@@ -34,6 +34,14 @@ export class OperationCorrectionsController {
     return this.service.findPending(req);
   }
 
+  @Get(':operationId/correction-context')
+  getCorrectionContext(
+    @Param('operationId') operationId: string,
+    @Req() req: any,
+  ) {
+    return this.service.getCorrectionContext(operationId, req);
+  }
+
   @Get('operation/:operationId')
   findByOperation(@Param('operationId') operationId: string, @Req() req: any) {
     return this.service.findByOperation(operationId, req);

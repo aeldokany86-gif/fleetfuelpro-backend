@@ -9,4 +9,9 @@ export class AppController {
   getHello(): string {
     return this.appService.getHello();
   }
+
+  @Get('db-benchmark')
+  async dbBenchmark() {
+    return this.appService.dbBenchmark();
+  }
 }
