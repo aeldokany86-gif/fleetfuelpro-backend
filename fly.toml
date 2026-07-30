@@ -12,6 +12,9 @@ primary_region = 'nrt'
   release_command = 'npx prisma migrate deploy'
   seed_command = 'node seed.js'
 
+[processes]
+  app = 'npm run start:prod'
+
 [http_service]
   internal_port = 4000
   force_https = true
@@ -24,4 +27,3 @@ primary_region = 'nrt'
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
-  memory_mb = 256
