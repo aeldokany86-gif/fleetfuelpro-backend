@@ -46,6 +46,6 @@ RUN apt-get update -qq && \
 # Copy built application
 COPY --from=build /app /app
 
-# Start the server by default, this can be overwritten at runtime
-EXPOSE 3000
-CMD [ "npm", "run", "start" ]
+# Start the production server
+EXPOSE 4000
+CMD ["npm", "run", "start:prod"]
