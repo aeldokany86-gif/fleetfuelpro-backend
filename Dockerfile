@@ -52,4 +52,4 @@ COPY --from=build /app/prisma ./prisma
 EXPOSE 4000
 
 # Start the compiled NestJS application
-CMD ["node", "dist/main.js"]
+CMD ["node", "dist/src/main.js"]
