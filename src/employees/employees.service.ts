@@ -243,6 +243,13 @@ export class EmployeesService {
     const existing =
       await this.findOne(id);
 
+    const isRetiring =
+      updateEmployeeDto.status ===
+      'RETIRED_RESIGNED';
+    const retiredAt = isRetiring
+      ? new Date()
+      : null;
+
     if (
       updateEmployeeDto.projectId !== undefined &&
       updateEmployeeDto.projectId !==
@@ -253,12 +260,19 @@ export class EmployeesService {
       );
     }
 
-    return this.prisma.employee.update({
+    const employeeUpdate =
+      this.prisma.employee.update({
       where: {
         id: existing.id,
       },
 
       data: {
+        ...(isRetiring
+          ? {
+              deletedAt: retiredAt,
+            }
+          : {}),
+
         ...(updateEmployeeDto.name !==
         undefined
           ? {
@@ -325,25 +339,72 @@ export class EmployeesService {
         },
       },
     });
+
+    if (
+      !isRetiring ||
+      !existing.linkedUserId
+    ) {
+      return employeeUpdate;
+    }
+
+    const [updatedEmployee] =
+      await this.prisma.$transaction([
+        employeeUpdate,
+        this.prisma.user.updateMany({
+          where: {
+            id: existing.linkedUserId,
+            deletedAt: null,
+          },
+          data: {
+            isActive: false,
+            deletedAt: retiredAt,
+          },
+        }),
+      ]);
+
+    return updatedEmployee;
   }
 
   async remove(
     id: string,
   ) {
-    await this.findOne(id);
+    const existing =
+      await this.findOne(id);
+    const retiredAt = new Date();
 
-    return this.prisma.employee.update({
+    const employeeUpdate =
+      this.prisma.employee.update({
       where: {
         id,
       },
 
       data: {
-        deletedAt:
-          new Date(),
+        deletedAt: retiredAt,
 
         status:
           'RETIRED_RESIGNED',
       },
     });
+
+    if (!existing.linkedUserId) {
+      return employeeUpdate;
+    }
+
+    const [retiredEmployee] =
+      await this.prisma.$transaction([
+        employeeUpdate,
+        this.prisma.user.updateMany({
+          where: {
+            id: existing.linkedUserId,
+            deletedAt: null,
+          },
+          data: {
+            isActive: false,
+            deletedAt: retiredAt,
+          },
+        }),
+      ]);
+
+    return retiredEmployee;
   }
 }
