@@ -33,6 +33,22 @@ export class EmployeeTransfersController {
     );
   }
 
+  @Post('bulk')
+  createBulk(
+    @Body()
+    body: {
+      employeeIds: string[];
+      toProjectId: string;
+      requestedByUserId: string;
+    },
+  ) {
+    return this.service.createBulkTransferRequests(
+      body.employeeIds,
+      body.toProjectId,
+      body.requestedByUserId,
+    );
+  }
+
   @Get('pending')
   pending() {
     return this.service.getPendingRequests();

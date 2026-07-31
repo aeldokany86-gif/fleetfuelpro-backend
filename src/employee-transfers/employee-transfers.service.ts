@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class EmployeeTransfersService {
@@ -215,6 +216,7 @@ export class EmployeeTransfersService {
     toProjectId: string,
     requestedByUserId: string,
     effectiveDate?: string | Date | null,
+    transferBatchId?: string | null,
   ) {
     const employee =
       await this.prisma.employee.findFirst({
@@ -336,6 +338,7 @@ export class EmployeeTransfersService {
           fromProjectId: employee.projectId!,
           toProjectId,
           requestedByUserId,
+          transferBatchId: transferBatchId || null,
           status: 'PENDING',
           effectiveDate: requestedEffectiveDate,
           reason: 'ADMIN_APPROVAL_EMPLOYEE_TRANSFER',
@@ -424,6 +427,7 @@ export class EmployeeTransfersService {
             fromProjectId: employee.projectId!,
             toProjectId,
             requestedByUserId,
+            transferBatchId: transferBatchId || null,
             status: fullyApproved
               ? 'APPROVED'
               : partiallyApproved
@@ -483,6 +487,63 @@ export class EmployeeTransfersService {
         include: this.buildInclude(),
       });
     }, { timeout: 20000 });
+  }
+
+  async createBulkTransferRequests(
+    employeeIds: string[],
+    toProjectId: string,
+    requestedByUserId: string,
+  ) {
+    const uniqueEmployeeIds = Array.from(
+      new Set(
+        (Array.isArray(employeeIds) ? employeeIds : [])
+          .map((id) => String(id || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (!uniqueEmployeeIds.length) {
+      throw new BadRequestException('At least one employee is required');
+    }
+
+    if (!toProjectId) {
+      throw new BadRequestException('Target project is required');
+    }
+
+    if (!requestedByUserId) {
+      throw new BadRequestException('Requester user ID is required');
+    }
+
+    const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const transferBatchId = `ETB-${datePart}-${randomUUID()
+      .slice(0, 8)
+      .toUpperCase()}`;
+    const transfers: Array<
+  Awaited<
+    ReturnType<EmployeeTransfersService["createTransferRequest"]>
+  >
+> = [];
+
+    // Sequential creation keeps the same validation and snapshot-safe transfer
+    // behavior as the existing single-request path for every employee.
+    for (const employeeId of uniqueEmployeeIds) {
+      transfers.push(
+        await this.createTransferRequest(
+          employeeId,
+          toProjectId,
+          requestedByUserId,
+          null,
+          transferBatchId,
+        ),
+      );
+    }
+
+    return {
+      transferBatchId,
+      requestedCount: uniqueEmployeeIds.length,
+      createdCount: transfers.length,
+      transfers,
+    };
   }
 
   async getPendingRequests() {

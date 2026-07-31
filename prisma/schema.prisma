@@ -204,6 +204,7 @@ model EmployeeTransferRequest {
   fromProjectId     String
   toProjectId       String
   requestedByUserId String
+  transferBatchId   String?
   status            EmployeeTransferStatus     @default(PENDING)
   reason            String?
   rejectionReason   String?
@@ -226,6 +227,7 @@ model EmployeeTransferRequest {
   @@index([fromProjectId])
   @@index([toProjectId])
   @@index([requestedByUserId])
+  @@index([transferBatchId])
   @@index([status])
 }
 
