@@ -18,34 +18,38 @@ FROM base AS build
 
 # Install packages needed to build node modules
 RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential node-gyp openssl pkg-config python-is-python3
+    apt-get install --no-install-recommends -y build-essential node-gyp openssl pkg-config python-is-python3 && \
+    rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
 # Install node modules
 COPY package-lock.json package.json ./
 RUN npm ci --include=dev
 
-# Generate Prisma Client
-COPY prisma .
+# Copy Prisma schema and generate Prisma Client
+COPY prisma ./prisma
 RUN npx prisma generate
 
-# Copy application code
+# Copy application code and build NestJS
 COPY . .
-
-# Build application
 RUN npm run build
 
 
-# Final stage for app image
-FROM base
+# Final production image
+FROM base AS runtime
 
-# Install packages needed for deployment
+# Install runtime system dependency required by Prisma
 RUN apt-get update -qq && \
     apt-get install --no-install-recommends -y openssl && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
-# Copy built application
-COPY --from=build /app /app
+# Copy only the files required at runtime
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/package-lock.json ./package-lock.json
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/prisma ./prisma
 
-# Start the production server
 EXPOSE 4000
-CMD ["npm", "run", "start:prod"]
+
+# Start the compiled NestJS application
+CMD ["node", "dist/main.js"]
