@@ -43,6 +43,8 @@ type CurrentUserContext = {
   existsInDatabase: boolean;
   assignedProjectId?: string | null;
   managedProjectIds: string[];
+  fuelerEmployeeId: string | null;
+  fuelerName: string;
 };
 
 type LoadedOperationEntities = {
@@ -88,6 +90,10 @@ export class OperationsService {
         select: {
           id: true,
           fullName: true,
+          employeeId: true,
+          linkedEmployee: {
+            select: { employeeId: true, name: true },
+          },
         },
       },
 
@@ -429,6 +435,139 @@ async findPendingApprovals(request?: RequestLike) {
   return operations;
 }
 
+async getSummaryReport(request: RequestLike | undefined, filters: {
+  projectId?: string;
+  assetId?: string;
+  type?: string;
+  status?: string;
+  fuelerEmployeeId?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}) {
+  const currentUser = await this.resolveCurrentUser(
+    { type: 'DIRECT_REFUEL' as any, quantity: 1 } as CreateOperationDto,
+    request,
+  );
+
+  if (!currentUser.existsInDatabase || !currentUser.companyId) {
+    throw new UnauthorizedException('Real database user is required.');
+  }
+
+  const createdAt: Record<string, Date> = {};
+  if (filters.dateFrom) {
+    const from = new Date(filters.dateFrom);
+    if (Number.isNaN(from.getTime())) {
+      throw new BadRequestException('dateFrom is invalid');
+    }
+    createdAt.gte = from;
+  }
+  if (filters.dateTo) {
+    const to = new Date(filters.dateTo);
+    if (Number.isNaN(to.getTime())) {
+      throw new BadRequestException('dateTo is invalid');
+    }
+    to.setHours(23, 59, 59, 999);
+    createdAt.lte = to;
+  }
+
+  const accessibleProjectIds =
+    currentUser.role === 'Manager'
+      ? currentUser.managedProjectIds
+      : ['Operator', 'Supervisor'].includes(currentUser.role) &&
+          currentUser.assignedProjectId
+        ? [currentUser.assignedProjectId]
+        : [];
+  const scopedProjectIds = filters.projectId
+    ? [filters.projectId]
+    : accessibleProjectIds;
+  const needsProjectScope = ['Manager', 'Operator', 'Supervisor'].includes(
+    currentUser.role,
+  );
+
+  if (
+    filters.projectId &&
+    needsProjectScope &&
+    !accessibleProjectIds.includes(filters.projectId)
+  ) {
+    throw new ForbiddenException('You cannot view this project report.');
+  }
+
+  const fuelerCode = String(filters.fuelerEmployeeId || '').trim();
+  const operations = await (this.prisma as any).operation.findMany({
+    where: {
+      companyId: currentUser.companyId,
+      ...(filters.assetId ? { assetId: filters.assetId } : {}),
+      ...(filters.type ? { type: filters.type } : {}),
+      ...(filters.status ? { status: filters.status } : {}),
+      ...(Object.keys(createdAt).length ? { createdAt } : {}),
+      ...(scopedProjectIds.length
+        ? {
+            OR: [
+              { projectIdAtOperation: { in: scopedProjectIds } },
+              { sourceProjectIdAtOperation: { in: scopedProjectIds } },
+              { destinationProjectIdAtOperation: { in: scopedProjectIds } },
+            ],
+          }
+        : {}),
+      ...(fuelerCode
+        ? {
+            AND: [
+              {
+                OR: [
+                  { fuelerEmployeeIdAtOperation: fuelerCode },
+                  {
+                    fuelerEmployeeIdAtOperation: null,
+                    requestedBy: {
+                      is: {
+                        OR: [
+                          { employeeId: fuelerCode },
+                          { linkedEmployee: { is: { employeeId: fuelerCode } } },
+                        ],
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          }
+        : {}),
+    },
+    include: this.buildOperationListInclude(),
+    orderBy: { createdAt: 'desc' },
+    take: 5000,
+  });
+
+  const rows = operations.map((operation: any) => ({
+    ...operation,
+    fuelerEmployeeId:
+      operation.fuelerEmployeeIdAtOperation ||
+      operation.requestedBy?.linkedEmployee?.employeeId ||
+      operation.requestedBy?.employeeId ||
+      null,
+    fuelerName:
+      operation.fuelerNameAtOperation ||
+      operation.requestedBy?.linkedEmployee?.name ||
+      operation.requestedBy?.fullName ||
+      null,
+  }));
+
+  return {
+    summary: {
+      records: rows.length,
+      totalQuantity: rows.reduce(
+        (sum: number, row: any) => sum + Number(row.quantity || 0),
+        0,
+      ),
+      totalCost: rows.reduce(
+        (sum: number, row: any) =>
+          sum + Number(row.totalCostAtOperation || 0),
+        0,
+      ),
+    },
+    rows,
+  };
+}
+
   private async createPersistedOperation(
     dto: CreateOperationDto,
     currentUser: CurrentUserContext,
@@ -524,6 +663,8 @@ async findPendingApprovals(request?: RequestLike) {
               destinationProjectNameAtOperation:
                 projectSnapshot.destinationProjectNameAtOperation,
               requestedByUserId: currentUser.id,
+              fuelerEmployeeIdAtOperation: currentUser.fuelerEmployeeId,
+              fuelerNameAtOperation: currentUser.fuelerName,
               completedAt,
               approvedAt:
                 status === 'COMPLETED' || status === 'PARTIALLY_APPROVED'
@@ -650,7 +791,9 @@ async findPendingApprovals(request?: RequestLike) {
       where: { id: userId },
       include: {
         role: true,
-        linkedEmployee: { select: { projectId: true } },
+        linkedEmployee: {
+          select: { projectId: true, employeeId: true, name: true },
+        },
         managedProjects: { where: { deletedAt: null, isActive: true }, select: { id: true } },
       },
     }).catch(() => null);
@@ -664,6 +807,10 @@ async findPendingApprovals(request?: RequestLike) {
         existsInDatabase: true,
         assignedProjectId: dbUser.linkedEmployee?.projectId || null,
         managedProjectIds: dbUser.managedProjects.map((project: any) => project.id),
+        fuelerEmployeeId:
+          dbUser.linkedEmployee?.employeeId || dbUser.employeeId || null,
+        fuelerName:
+          dbUser.linkedEmployee?.name || dbUser.fullName || 'User',
       };
     }
 
@@ -675,6 +822,8 @@ async findPendingApprovals(request?: RequestLike) {
       existsInDatabase: false,
       assignedProjectId: null,
       managedProjectIds: [],
+      fuelerEmployeeId: null,
+      fuelerName: fallbackName || 'Testing User',
     };
   }
 

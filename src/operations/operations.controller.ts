@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
 import { CreateOperationDto } from './dto/create-operation.dto';
 import { ReviewOperationDto } from './dto/review-operation.dto';
 import { OperationsService } from './operations.service';
@@ -20,6 +20,28 @@ findAll(@Req() req: any) {
 @Get('pending-approvals')
 findPendingApprovals(@Req() req: any) {
   return this.operationsService.findPendingApprovals(req);
+}
+
+@Get('report/summary')
+summaryReport(
+  @Req() req: any,
+  @Query('projectId') projectId?: string,
+  @Query('assetId') assetId?: string,
+  @Query('type') type?: string,
+  @Query('status') status?: string,
+  @Query('fuelerEmployeeId') fuelerEmployeeId?: string,
+  @Query('dateFrom') dateFrom?: string,
+  @Query('dateTo') dateTo?: string,
+) {
+  return this.operationsService.getSummaryReport(req, {
+    projectId,
+    assetId,
+    type,
+    status,
+    fuelerEmployeeId,
+    dateFrom,
+    dateTo,
+  });
 }
 
   @Patch(':id/review')

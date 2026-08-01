@@ -5,6 +5,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 
 import { EmployeeTransfersService } from './employee-transfers.service';
@@ -52,6 +53,27 @@ export class EmployeeTransfersController {
   @Get('pending')
   pending() {
     return this.service.getPendingRequests();
+  }
+
+  @Get('report')
+  report(
+    @Query('companyId') companyId: string,
+    @Query('employeeId') employeeId?: string,
+    @Query('fromProjectId') fromProjectId?: string,
+    @Query('toProjectId') toProjectId?: string,
+    @Query('status') status?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    return this.service.getTransferReport({
+      companyId,
+      employeeId,
+      fromProjectId,
+      toProjectId,
+      status,
+      dateFrom,
+      dateTo,
+    });
   }
 
   @Patch(':id/review')

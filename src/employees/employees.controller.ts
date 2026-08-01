@@ -51,6 +51,25 @@ export class EmployeesController {
     );
   }
 
+  @Get('report/master')
+  masterReport(
+    @Query('companyId') companyId: string,
+    @Query('projectId') projectId?: string,
+    @Query('status') status?: string,
+    @Query('jobTitle') jobTitle?: string,
+    @Query('employeeCode') employeeCode?: string,
+    @Query('linkedStatus') linkedStatus?: string,
+  ) {
+    return this.employeesService.getMasterReport({
+      companyId,
+      projectId,
+      status,
+      jobTitle,
+      employeeCode,
+      linkedStatus,
+    });
+  }
+
   @Get(':id')
   findOne(
     @Param('id') id: string,

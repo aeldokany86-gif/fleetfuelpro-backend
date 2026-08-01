@@ -203,6 +203,95 @@ export class EmployeesService {
     });
   }
 
+  async getMasterReport(filters: {
+    companyId: string;
+    projectId?: string;
+    status?: string;
+    jobTitle?: string;
+    employeeCode?: string;
+    linkedStatus?: string;
+  }) {
+    if (!filters.companyId) {
+      throw new BadRequestException('Company ID is required');
+    }
+
+    const linkedStatus = String(filters.linkedStatus || '').toUpperCase();
+    const employees = await this.prisma.employee.findMany({
+      where: {
+        companyId: filters.companyId,
+        ...(filters.projectId ? { projectId: filters.projectId } : {}),
+        ...(filters.status ? { status: filters.status as any } : {}),
+        ...(filters.jobTitle
+          ? { jobTitle: { equals: filters.jobTitle, mode: 'insensitive' } }
+          : {}),
+        ...(filters.employeeCode
+          ? {
+              employeeId: {
+                contains: filters.employeeCode.trim(),
+                mode: 'insensitive',
+              },
+            }
+          : {}),
+        ...(linkedStatus === 'LINKED' ? { linkedUserId: { not: null } } : {}),
+        ...(linkedStatus === 'NOT_LINKED' ? { linkedUserId: null } : {}),
+      },
+      include: {
+        company: { select: { id: true, name: true } },
+        project: { select: { id: true, name: true, code: true } },
+        linkedUser: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            isActive: true,
+            deletedAt: true,
+            role: { select: { id: true, name: true } },
+          },
+        },
+      },
+      orderBy: [{ employeeId: 'asc' }],
+    });
+
+    const rows = employees.map((employee) => ({
+      id: employee.id,
+      companyId: employee.companyId,
+      companyName: employee.company.name,
+      employeeCode: employee.employeeId,
+      employeeName: employee.name,
+      phone: employee.phone,
+      email: employee.email,
+      jobTitle: employee.jobTitle,
+      status: employee.status,
+      projectId: employee.projectId,
+      projectName:
+        employee.project?.name || employee.project?.code || null,
+      isDeleted: Boolean(employee.deletedAt),
+      deletedAt: employee.deletedAt,
+      linkedUserId: employee.linkedUserId,
+      userLinked: Boolean(employee.linkedUserId),
+      linkedUserName: employee.linkedUser?.fullName || null,
+      linkedUserRole: employee.linkedUser?.role?.name || null,
+      linkedUserActive: employee.linkedUser
+        ? employee.linkedUser.isActive && !employee.linkedUser.deletedAt
+        : false,
+      createdAt: employee.createdAt,
+      updatedAt: employee.updatedAt,
+    }));
+
+    return {
+      summary: {
+        total: rows.length,
+        onDuty: rows.filter((row) => row.status === 'ON_DUTY').length,
+        onVacation: rows.filter((row) => row.status === 'VACATION').length,
+        retiredResigned: rows.filter(
+          (row) => row.status === 'RETIRED_RESIGNED',
+        ).length,
+        linkedUsers: rows.filter((row) => row.userLinked).length,
+      },
+      rows,
+    };
+  }
+
   async findOne(
     id: string,
   ) {

@@ -198,29 +198,31 @@ model Employee {
 }
 
 model EmployeeTransferRequest {
-  id                String                     @id @default(cuid())
-  companyId         String
-  employeeId        String
-  fromProjectId     String
-  toProjectId       String
-  requestedByUserId String
-  transferBatchId   String?
-  status            EmployeeTransferStatus     @default(PENDING)
-  reason            String?
-  rejectionReason   String?
-  approvedAt        DateTime?
-  rejectedAt        DateTime?
-  cancelledAt       DateTime?
-  appliedAt         DateTime?
-  createdAt         DateTime                   @default(now())
-  updatedAt         DateTime                   @updatedAt
-  effectiveDate     DateTime?
-  approvals         EmployeeTransferApproval[]
-  company           Company                    @relation(fields: [companyId], references: [id])
-  employee          Employee                   @relation(fields: [employeeId], references: [id])
-  fromProject       Project                    @relation("EmployeeTransferFromProject", fields: [fromProjectId], references: [id])
-  requestedBy       User                       @relation("EmployeeTransferRequestedBy", fields: [requestedByUserId], references: [id])
-  toProject         Project                    @relation("EmployeeTransferToProject", fields: [toProjectId], references: [id])
+  id                     String                     @id @default(cuid())
+  companyId              String
+  employeeId             String
+  fromProjectId          String
+  toProjectId            String
+  requestedByUserId      String
+  transferBatchId        String?
+  employeeCodeAtTransfer String?
+  employeeNameAtTransfer String?
+  status                 EmployeeTransferStatus     @default(PENDING)
+  reason                 String?
+  rejectionReason        String?
+  approvedAt             DateTime?
+  rejectedAt             DateTime?
+  cancelledAt            DateTime?
+  appliedAt              DateTime?
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  effectiveDate          DateTime?
+  approvals              EmployeeTransferApproval[]
+  company                Company                    @relation(fields: [companyId], references: [id])
+  employee               Employee                   @relation(fields: [employeeId], references: [id])
+  fromProject            Project                    @relation("EmployeeTransferFromProject", fields: [fromProjectId], references: [id])
+  requestedBy            User                       @relation("EmployeeTransferRequestedBy", fields: [requestedByUserId], references: [id])
+  toProject              Project                    @relation("EmployeeTransferToProject", fields: [toProjectId], references: [id])
 
   @@index([companyId])
   @@index([employeeId])
@@ -228,6 +230,7 @@ model EmployeeTransferRequest {
   @@index([toProjectId])
   @@index([requestedByUserId])
   @@index([transferBatchId])
+  @@index([employeeCodeAtTransfer])
   @@index([status])
 }
 
@@ -486,6 +489,8 @@ model Operation {
   notes                             String?
   attachments                       Json?
   requestedByUserId                 String
+  fuelerEmployeeIdAtOperation       String?
+  fuelerNameAtOperation             String?
   completedAt                       DateTime?
   approvedAt                        DateTime?
   rejectedAt                        DateTime?
@@ -522,6 +527,7 @@ model Operation {
   @@index([destinationStationId])
   @@index([assetId])
   @@index([requestedByUserId])
+  @@index([fuelerEmployeeIdAtOperation])
   @@index([fuelPriceHistoryId])
   @@index([projectIdAtOperation])
   @@index([sourceProjectIdAtOperation])

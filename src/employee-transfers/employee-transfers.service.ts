@@ -339,6 +339,8 @@ export class EmployeeTransfersService {
           toProjectId,
           requestedByUserId,
           transferBatchId: transferBatchId || null,
+          employeeCodeAtTransfer: employee.employeeId,
+          employeeNameAtTransfer: employee.name,
           status: 'PENDING',
           effectiveDate: requestedEffectiveDate,
           reason: 'ADMIN_APPROVAL_EMPLOYEE_TRANSFER',
@@ -428,6 +430,8 @@ export class EmployeeTransfersService {
             toProjectId,
             requestedByUserId,
             transferBatchId: transferBatchId || null,
+            employeeCodeAtTransfer: employee.employeeId,
+            employeeNameAtTransfer: employee.name,
             status: fullyApproved
               ? 'APPROVED'
               : partiallyApproved
@@ -563,6 +567,113 @@ export class EmployeeTransfersService {
         createdAt: 'desc',
       },
     });
+  }
+
+  async getTransferReport(filters: {
+    companyId: string;
+    employeeId?: string;
+    fromProjectId?: string;
+    toProjectId?: string;
+    status?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) {
+    if (!filters.companyId) {
+      throw new BadRequestException('Company ID is required');
+    }
+
+    const createdAt: Record<string, Date> = {};
+    if (filters.dateFrom) {
+      const from = new Date(filters.dateFrom);
+      if (Number.isNaN(from.getTime())) {
+        throw new BadRequestException('dateFrom is invalid');
+      }
+      createdAt.gte = from;
+    }
+    if (filters.dateTo) {
+      const to = new Date(filters.dateTo);
+      if (Number.isNaN(to.getTime())) {
+        throw new BadRequestException('dateTo is invalid');
+      }
+      to.setHours(23, 59, 59, 999);
+      createdAt.lte = to;
+    }
+
+    const requests = await this.prisma.employeeTransferRequest.findMany({
+      where: {
+        companyId: filters.companyId,
+        ...(filters.employeeId ? { employeeId: filters.employeeId } : {}),
+        ...(filters.fromProjectId ? { fromProjectId: filters.fromProjectId } : {}),
+        ...(filters.toProjectId ? { toProjectId: filters.toProjectId } : {}),
+        ...(filters.status ? { status: filters.status as any } : {}),
+        ...(Object.keys(createdAt).length ? { createdAt } : {}),
+      },
+      include: {
+        employee: true,
+        fromProject: true,
+        toProject: true,
+        requestedBy: {
+          select: { id: true, fullName: true, email: true },
+        },
+        approvals: {
+          include: {
+            approver: {
+              select: { id: true, fullName: true, email: true },
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const rows = requests.map((request) => ({
+      id: request.id,
+      transferBatchId: request.transferBatchId,
+      employeeBackendId: request.employeeId,
+      employeeCode:
+        request.employeeCodeAtTransfer || request.employee.employeeId,
+      employeeName:
+        request.employeeNameAtTransfer || request.employee.name,
+      fromProjectId: request.fromProjectId,
+      fromProjectName: request.fromProject.name || request.fromProject.code,
+      toProjectId: request.toProjectId,
+      toProjectName: request.toProject.name || request.toProject.code,
+      requestedByUserId: request.requestedByUserId,
+      requestedByName:
+        request.requestedBy.fullName || request.requestedBy.email,
+      status: request.status,
+      reason: request.reason,
+      rejectionReason: request.rejectionReason,
+      requestedAt: request.createdAt,
+      approvedAt: request.approvedAt,
+      rejectedAt: request.rejectedAt,
+      appliedAt: request.appliedAt,
+      approvals: request.approvals.map((approval) => ({
+        id: approval.id,
+        approvalStage: approval.approvalStage,
+        projectId: approval.projectId,
+        approverUserId: approval.approverUserId,
+        approverName:
+          approval.approver.fullName || approval.approver.email,
+        status: approval.status,
+        note: approval.note,
+        reviewedAt: approval.reviewedAt,
+      })),
+    }));
+
+    return {
+      summary: {
+        total: rows.length,
+        pending: rows.filter((row) => row.status === 'PENDING').length,
+        partiallyApproved: rows.filter(
+          (row) => row.status === 'PARTIALLY_APPROVED',
+        ).length,
+        approved: rows.filter((row) => row.status === 'APPROVED').length,
+        rejected: rows.filter((row) => row.status === 'REJECTED').length,
+      },
+      rows,
+    };
   }
 
   async reviewTransfer(
