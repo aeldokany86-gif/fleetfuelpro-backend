@@ -7,66 +7,83 @@ import {
   Patch,
   Post,
   Query,
-} from '@nestjs/common';
+} from "@nestjs/common";
 
-import { ProjectsService } from './projects.service';
+import { ProjectsService } from "./projects.service";
 
-import { CreateProjectDto } from './dto/create-project.dto';
-import { UpdateProjectDto } from './dto/update-project.dto';
+import { CreateProjectDto } from "./dto/create-project.dto";
+import { UpdateProjectDto } from "./dto/update-project.dto";
 
-@Controller('projects')
+@Controller("projects")
 export class ProjectsController {
-  constructor(
-    private readonly projectsService: ProjectsService,
-  ) {}
+  constructor(private readonly projectsService: ProjectsService) {}
 
   @Post()
   create(
     @Body()
     createProjectDto: CreateProjectDto,
   ) {
-    return this.projectsService.create(
-      createProjectDto,
-    );
+    return this.projectsService.create(createProjectDto);
   }
 
   @Get()
   findAll(
-    @Query('companyId')
+    @Query("companyId")
     companyId?: string,
   ) {
-    return this.projectsService.findAll(
-      companyId,
-    );
+    return this.projectsService.findAll(companyId);
   }
 
-  @Get(':id')
+  @Get("report/master")
+  getProjectsMasterReport(
+    @Query("companyId") companyId?: string,
+    @Query("projectId") projectId?: string,
+    @Query("status") status?: string,
+  ) {
+    return this.projectsService.getProjectsMasterReport({
+      companyId,
+      projectId,
+      status,
+    });
+  }
+
+  @Get("report/fuel-price-history")
+  getProjectsFuelPriceHistoryReport(
+    @Query("companyId") companyId?: string,
+    @Query("projectId") projectId?: string,
+    @Query("dateFrom") dateFrom?: string,
+    @Query("dateTo") dateTo?: string,
+  ) {
+    return this.projectsService.getProjectsFuelPriceHistoryReport({
+      companyId,
+      projectId,
+      dateFrom,
+      dateTo,
+    });
+  }
+
+  @Get(":id")
   findOne(
-    @Param('id')
+    @Param("id")
     id: string,
   ) {
-    return this.projectsService.findOne(
-      id,
-    );
+    return this.projectsService.findOne(id);
   }
 
-  @Patch(':id')
+  @Patch(":id")
   update(
-    @Param('id')
+    @Param("id")
     id: string,
 
     @Body()
     updateProjectDto: UpdateProjectDto,
   ) {
-    return this.projectsService.update(
-      id,
-      updateProjectDto,
-    );
+    return this.projectsService.update(id, updateProjectDto);
   }
 
-  @Patch(':id/manager')
+  @Patch(":id/manager")
   assignManager(
-    @Param('id')
+    @Param("id")
     id: string,
 
     @Body()
@@ -74,15 +91,12 @@ export class ProjectsController {
       managerUserId: string;
     },
   ) {
-    return this.projectsService.assignProjectManager(
-      id,
-      body.managerUserId,
-    );
+    return this.projectsService.assignProjectManager(id, body.managerUserId);
   }
 
-  @Post(':id/update-fuel-price')
+  @Post(":id/update-fuel-price")
   updateFuelPrice(
-    @Param('id')
+    @Param("id")
     id: string,
 
     @Body()
@@ -96,43 +110,33 @@ export class ProjectsController {
       createdByUserId?: string;
     },
   ) {
-    return this.projectsService.updateFuelPrice(
-      id,
-      body,
-    );
+    return this.projectsService.updateFuelPrice(id, body);
   }
 
-  @Get(':id/fuel-price-history')
+  @Get(":id/fuel-price-history")
   getFuelPriceHistory(
-    @Param('id')
+    @Param("id")
     id: string,
   ) {
-    return this.projectsService.getFuelPriceHistory(
-      id,
-    );
+    return this.projectsService.getFuelPriceHistory(id);
   }
 
-  @Get(':id/effective-fuel-price')
+  @Get(":id/effective-fuel-price")
   getEffectiveFuelPrice(
-    @Param('id')
+    @Param("id")
     id: string,
 
-    @Query('operationDate')
+    @Query("operationDate")
     operationDate?: string,
   ) {
-    return this.projectsService.getEffectiveFuelPrice(
-      id,
-      operationDate,
-    );
+    return this.projectsService.getEffectiveFuelPrice(id, operationDate);
   }
 
-  @Delete(':id')
+  @Delete(":id")
   remove(
-    @Param('id')
+    @Param("id")
     id: string,
   ) {
-    return this.projectsService.remove(
-      id,
-    );
+    return this.projectsService.remove(id);
   }
 }

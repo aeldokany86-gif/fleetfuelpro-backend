@@ -2,34 +2,36 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
-} from '@nestjs/common';
+} from "@nestjs/common";
 
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService } from "../prisma/prisma.service";
 
-import { CreateProjectDto } from './dto/create-project.dto';
-import { UpdateProjectDto } from './dto/update-project.dto';
+import { CreateProjectDto } from "./dto/create-project.dto";
+import { UpdateProjectDto } from "./dto/update-project.dto";
 
 @Injectable()
 export class ProjectsService {
   constructor(private prisma: PrismaService) {}
 
   private normalizeCode(code: string) {
-    return String(code || '').trim().toUpperCase();
+    return String(code || "")
+      .trim()
+      .toUpperCase();
   }
 
   private normalizeRoleName(roleName: string) {
-    return String(roleName || '')
+    return String(roleName || "")
       .trim()
       .toUpperCase()
-      .replace(/[\s_-]+/g, '');
+      .replace(/[\s_-]+/g, "");
   }
 
   private isAdminRole(roleName: string) {
     const normalized = this.normalizeRoleName(roleName);
     return (
-      normalized === 'ADMIN' ||
-      normalized === 'PLATFORMADMIN' ||
-      normalized === 'PLATFORMUSER'
+      normalized === "ADMIN" ||
+      normalized === "PLATFORMADMIN" ||
+      normalized === "PLATFORMUSER"
     );
   }
 
@@ -50,7 +52,7 @@ export class ProjectsService {
 
       if (!Number.isFinite(legacyPrice) || legacyPrice <= 0) {
         throw new BadRequestException(
-          'Price per liter must be greater than zero',
+          "Price per liter must be greater than zero",
         );
       }
 
@@ -71,20 +73,18 @@ export class ProjectsService {
 
     if (!Number.isFinite(basePricePerLiter) || basePricePerLiter <= 0) {
       throw new BadRequestException(
-        'Base fuel price per liter must be greater than zero',
+        "Base fuel price per liter must be greater than zero",
       );
     }
 
     if (!Number.isFinite(transportCostPerLiter) || transportCostPerLiter < 0) {
       throw new BadRequestException(
-        'Transport cost per liter cannot be negative',
+        "Transport cost per liter cannot be negative",
       );
     }
 
     if (!Number.isFinite(vatRate) || vatRate < 0 || vatRate > 100) {
-      throw new BadRequestException(
-        'VAT rate must be between 0 and 100',
-      );
+      throw new BadRequestException("VAT rate must be between 0 and 100");
     }
 
     const netPricePerLiter = this.roundPrice(
@@ -101,9 +101,7 @@ export class ProjectsService {
       vatRate: this.roundPrice(vatRate),
       vatAmountPerLiter,
       netPricePerLiter,
-      grossPricePerLiter: this.roundPrice(
-        netPricePerLiter + vatAmountPerLiter,
-      ),
+      grossPricePerLiter: this.roundPrice(netPricePerLiter + vatAmountPerLiter),
     };
   }
 
@@ -134,7 +132,7 @@ export class ProjectsService {
     });
 
     if (!company) {
-      throw new BadRequestException('Company not found');
+      throw new BadRequestException("Company not found");
     }
 
     const projectCode = this.normalizeCode(createProjectDto.code);
@@ -149,12 +147,12 @@ export class ProjectsService {
     if (existingProject) {
       if (existingProject.deletedAt) {
         throw new BadRequestException(
-          'This Project ID was previously used and cannot be reused',
+          "This Project ID was previously used and cannot be reused",
         );
       }
 
       throw new BadRequestException(
-        'Project code already exists in this company',
+        "Project code already exists in this company",
       );
     }
 
@@ -178,11 +176,10 @@ export class ProjectsService {
           isActive: createProjectDto.isActive ?? true,
           currentFuelPrice: initialPricing.netPricePerLiter,
           currentBaseFuelPrice: initialPricing.basePricePerLiter,
-          currentTransportCostPerLiter:
-            initialPricing.transportCostPerLiter,
+          currentTransportCostPerLiter: initialPricing.transportCostPerLiter,
           currentVatRate: initialPricing.vatRate,
           currentGrossFuelPrice: initialPricing.grossPricePerLiter,
-          fuelPriceCurrency: company.currency || 'SAR',
+          fuelPriceCurrency: company.currency || "SAR",
           fuelPriceEffectiveFrom: effectiveFrom,
         },
         include: {
@@ -208,8 +205,8 @@ export class ProjectsService {
         data: {
           projectId: project.id,
           companyId: project.companyId,
-          country: company.country || 'Unknown',
-          currency: company.currency || 'SAR',
+          country: company.country || "Unknown",
+          currency: company.currency || "SAR",
           basePricePerLiter: initialPricing.basePricePerLiter,
           transportCost: initialPricing.transportCostPerLiter,
           pricePerLiter: initialPricing.netPricePerLiter,
@@ -218,8 +215,8 @@ export class ProjectsService {
           grossPricePerLiter: initialPricing.grossPricePerLiter,
           effectiveFrom,
           reason: initialPricing.isLegacy
-            ? 'Initial project fuel price (legacy combined price)'
-            : 'Initial project fuel price',
+            ? "Initial project fuel price (legacy combined price)"
+            : "Initial project fuel price",
           createdByUserId: null,
         },
       });
@@ -257,21 +254,213 @@ export class ProjectsService {
           where: {
             effectiveFrom: { lte: now },
           },
-          orderBy: [
-            { effectiveFrom: 'desc' },
-            { createdAt: 'desc' },
-          ],
+          orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
           take: 1,
         },
       },
       orderBy: {
-        createdAt: 'desc',
+        createdAt: "desc",
       },
     });
 
-    return projects.map((project) =>
-      this.applyEffectiveCurrentPrice(project),
+    return projects.map((project) => this.applyEffectiveCurrentPrice(project));
+  }
+
+  async getProjectsMasterReport(filters: {
+    companyId?: string;
+    projectId?: string;
+    status?: string;
+  }) {
+    const companyId = String(filters.companyId || "").trim();
+    if (!companyId) {
+      throw new BadRequestException("Company ID is required");
+    }
+
+    const status = String(filters.status || "")
+      .trim()
+      .toUpperCase();
+    if (status && !["ACTIVE", "INACTIVE"].includes(status)) {
+      throw new BadRequestException(
+        "Project status must be ACTIVE or INACTIVE",
+      );
+    }
+
+    const projectWhere = {
+      companyId,
+      deletedAt: null,
+      ...(filters.projectId ? { id: filters.projectId } : {}),
+      ...(status ? { isActive: status === "ACTIVE" } : {}),
+    };
+
+    const now = new Date();
+    const projects = await this.prisma.project.findMany({
+      where: projectWhere,
+      include: {
+        company: { select: { id: true, name: true, code: true } },
+        projectManager: {
+          select: { id: true, fullName: true, email: true, isActive: true },
+        },
+        fuelPriceHistory: {
+          where: { effectiveFrom: { lte: now } },
+          orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
+          take: 1,
+        },
+        _count: {
+          select: {
+            assets: { where: { deletedAt: null } },
+            stations: { where: { deletedAt: null } },
+            employees: { where: { deletedAt: null } },
+          },
+        },
+      },
+      orderBy: [{ isActive: "desc" }, { name: "asc" }],
+    });
+
+    const projectIds = projects.map((project) => project.id);
+    const operationGroups = projectIds.length
+      ? await this.prisma.operation.groupBy({
+          by: ["projectIdAtOperation"],
+          where: {
+            companyId,
+            projectIdAtOperation: { in: projectIds },
+            status: "COMPLETED",
+            type: { in: ["DIRECT_REFUEL", "EXTERNAL_DIRECT_REFUEL"] },
+          },
+          _count: { _all: true },
+          _sum: {
+            quantity: true,
+            totalCostAtOperation: true,
+          },
+        })
+      : [];
+
+    const operationByProject = new Map(
+      operationGroups.map((row) => [row.projectIdAtOperation, row]),
     );
+
+    const rows = projects.map((rawProject) => {
+      const project = this.applyEffectiveCurrentPrice(rawProject);
+      const operations = operationByProject.get(project.id);
+      return {
+        projectId: project.id,
+        projectCode: project.code,
+        projectName: project.name,
+        location: project.location,
+        description: project.description,
+        status: project.isActive ? "ACTIVE" : "INACTIVE",
+        managerId: project.projectManager?.id || null,
+        managerName: project.projectManager?.fullName || null,
+        managerEmail: project.projectManager?.email || null,
+        basePricePerLiter: project.currentBaseFuelPrice,
+        transportCostPerLiter: project.currentTransportCostPerLiter,
+        operationalPricePerLiter: project.currentFuelPrice,
+        vatRate: project.currentVatRate,
+        grossPricePerLiter: project.currentGrossFuelPrice,
+        currency: project.fuelPriceCurrency,
+        priceEffectiveFrom: project.fuelPriceEffectiveFrom,
+        assetsCount: project._count.assets,
+        stationsCount: project._count.stations,
+        employeesCount: project._count.employees,
+        refuelOperationsCount: operations?._count?._all || 0,
+        consumedQuantity: operations?._sum?.quantity || 0,
+        totalCost: operations?._sum?.totalCostAtOperation || 0,
+        createdAt: project.createdAt,
+      };
+    });
+
+    return {
+      generatedAt: new Date(),
+      summary: {
+        totalProjects: rows.length,
+        activeProjects: rows.filter((row) => row.status === "ACTIVE").length,
+        inactiveProjects: rows.filter((row) => row.status === "INACTIVE")
+          .length,
+        totalAssets: rows.reduce((sum, row) => sum + row.assetsCount, 0),
+        totalStations: rows.reduce((sum, row) => sum + row.stationsCount, 0),
+        totalEmployees: rows.reduce((sum, row) => sum + row.employeesCount, 0),
+        consumedQuantity: rows.reduce(
+          (sum, row) => sum + row.consumedQuantity,
+          0,
+        ),
+        totalCost: rows.reduce((sum, row) => sum + row.totalCost, 0),
+      },
+      rows,
+    };
+  }
+
+  async getProjectsFuelPriceHistoryReport(filters: {
+    companyId?: string;
+    projectId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }) {
+    const companyId = String(filters.companyId || "").trim();
+    if (!companyId) {
+      throw new BadRequestException("Company ID is required");
+    }
+
+    const effectiveFrom: { gte?: Date; lte?: Date } = {};
+    if (filters.dateFrom) {
+      const value = new Date(`${filters.dateFrom}T00:00:00`);
+      if (Number.isNaN(value.getTime()))
+        throw new BadRequestException("Date from is invalid");
+      effectiveFrom.gte = value;
+    }
+    if (filters.dateTo) {
+      const value = new Date(`${filters.dateTo}T23:59:59.999`);
+      if (Number.isNaN(value.getTime()))
+        throw new BadRequestException("Date to is invalid");
+      effectiveFrom.lte = value;
+    }
+
+    const history = await this.prisma.projectFuelPriceHistory.findMany({
+      where: {
+        companyId,
+        project: { deletedAt: null },
+        ...(filters.projectId ? { projectId: filters.projectId } : {}),
+        ...(Object.keys(effectiveFrom).length ? { effectiveFrom } : {}),
+      },
+      include: {
+        project: { select: { id: true, code: true, name: true } },
+        createdBy: { select: { id: true, fullName: true, email: true } },
+        _count: { select: { operations: true } },
+      },
+      orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
+    });
+
+    const rows = history.map((row) => ({
+      priceHistoryId: row.id,
+      projectId: row.projectId,
+      projectCode: row.project.code,
+      projectName: row.project.name,
+      effectiveFrom: row.effectiveFrom,
+      basePricePerLiter: row.basePricePerLiter,
+      transportCostPerLiter: row.transportCost,
+      operationalPricePerLiter: row.pricePerLiter,
+      vatRate: row.vatRate,
+      vatAmountPerLiter: row.vatAmountPerLiter,
+      grossPricePerLiter: row.grossPricePerLiter,
+      currency: row.currency,
+      reason: row.reason,
+      changedById: row.createdBy?.id || null,
+      changedByName: row.createdBy?.fullName || null,
+      changedByEmail: row.createdBy?.email || null,
+      pricedOperationsCount: row._count.operations,
+      createdAt: row.createdAt,
+    }));
+
+    return {
+      generatedAt: new Date(),
+      summary: {
+        priceChanges: rows.length,
+        affectedProjects: new Set(rows.map((row) => row.projectId)).size,
+        pricedOperations: rows.reduce(
+          (sum, row) => sum + row.pricedOperationsCount,
+          0,
+        ),
+      },
+      rows,
+    };
   }
 
   async findOne(id: string) {
@@ -301,17 +490,14 @@ export class ProjectsService {
           where: {
             effectiveFrom: { lte: now },
           },
-          orderBy: [
-            { effectiveFrom: 'desc' },
-            { createdAt: 'desc' },
-          ],
+          orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
           take: 1,
         },
       },
     });
 
     if (!project) {
-      throw new NotFoundException('Project not found');
+      throw new NotFoundException("Project not found");
     }
 
     return this.applyEffectiveCurrentPrice(project);
@@ -326,48 +512,39 @@ export class ProjectsService {
     });
 
     if (!existingProject) {
-      throw new NotFoundException('Project not found');
+      throw new NotFoundException("Project not found");
     }
 
     const nextCompanyId =
-      updateProjectDto.companyId ||
-      existingProject.companyId;
+      updateProjectDto.companyId || existingProject.companyId;
 
-    const nextCode =
-      updateProjectDto.code
-        ? this.normalizeCode(
-            updateProjectDto.code,
-          )
-        : existingProject.code;
+    const nextCode = updateProjectDto.code
+      ? this.normalizeCode(updateProjectDto.code)
+      : existingProject.code;
 
     if (
-      nextCompanyId !==
-        existingProject.companyId ||
+      nextCompanyId !== existingProject.companyId ||
       nextCode !== existingProject.code
     ) {
-      const duplicateProject =
-        await this.prisma.project.findFirst({
-          where: {
-            companyId:
-              nextCompanyId,
-            code: nextCode,
-            NOT: {
-              id,
-            },
+      const duplicateProject = await this.prisma.project.findFirst({
+        where: {
+          companyId: nextCompanyId,
+          code: nextCode,
+          NOT: {
+            id,
           },
-        });
+        },
+      });
 
       if (duplicateProject) {
-        if (
-          duplicateProject.deletedAt
-        ) {
+        if (duplicateProject.deletedAt) {
           throw new BadRequestException(
-            'This Project ID was previously used and cannot be reused',
+            "This Project ID was previously used and cannot be reused",
           );
         }
 
         throw new BadRequestException(
-          'Project code already exists in this company',
+          "Project code already exists in this company",
         );
       }
     }
@@ -375,52 +552,39 @@ export class ProjectsService {
     return this.prisma.project.update({
       where: { id },
       data: {
-        ...(updateProjectDto.companyId !==
-        undefined
+        ...(updateProjectDto.companyId !== undefined
           ? {
-              companyId:
-                updateProjectDto.companyId,
+              companyId: updateProjectDto.companyId,
             }
           : {}),
 
-        ...(updateProjectDto.code !==
-        undefined
+        ...(updateProjectDto.code !== undefined
           ? {
               code: nextCode,
             }
           : {}),
 
-        ...(updateProjectDto.name !==
-        undefined
+        ...(updateProjectDto.name !== undefined
           ? {
-              name:
-                updateProjectDto.name.trim(),
+              name: updateProjectDto.name.trim(),
             }
           : {}),
 
-        ...(updateProjectDto.location !==
-        undefined
+        ...(updateProjectDto.location !== undefined
           ? {
-              location:
-                updateProjectDto.location?.trim() ||
-                null,
+              location: updateProjectDto.location?.trim() || null,
             }
           : {}),
 
-        ...(updateProjectDto.description !==
-        undefined
+        ...(updateProjectDto.description !== undefined
           ? {
-              description:
-                updateProjectDto.description?.trim() ||
-                null,
+              description: updateProjectDto.description?.trim() || null,
             }
           : {}),
 
-        ...(updateProjectDto.isActive !==
-        undefined
+        ...(updateProjectDto.isActive !== undefined
           ? {
-              isActive:
-                updateProjectDto.isActive,
+              isActive: updateProjectDto.isActive,
             }
           : {}),
       },
@@ -450,23 +614,18 @@ export class ProjectsService {
     requestedByUserId?: string,
   ) {
     if (!managerUserId) {
-      throw new BadRequestException(
-        'Manager user is required',
-      );
+      throw new BadRequestException("Manager user is required");
     }
 
-    const project =
-      await this.prisma.project.findFirst({
-        where: {
-          id: projectId,
-          deletedAt: null,
-        },
-      });
+    const project = await this.prisma.project.findFirst({
+      where: {
+        id: projectId,
+        deletedAt: null,
+      },
+    });
 
     if (!project) {
-      throw new NotFoundException(
-        'Project not found',
-      );
+      throw new NotFoundException("Project not found");
     }
 
     if (requestedByUserId) {
@@ -482,62 +641,49 @@ export class ProjectsService {
         },
       });
 
-      if (!requester || !this.isAdminRole(requester.role?.name || '')) {
+      if (!requester || !this.isAdminRole(requester.role?.name || "")) {
         throw new BadRequestException(
-          'Only Admin can approve Project Manager assignment',
+          "Only Admin can approve Project Manager assignment",
         );
       }
     }
 
-    const manager =
-      await this.prisma.user.findFirst({
-        where: {
-          id: managerUserId,
-          deletedAt: null,
-          isActive: true,
-          companyId:
-            project.companyId,
-        },
-        include: {
-          role: true,
-          linkedEmployee: {
-            select: {
-              id: true,
-              employeeId: true,
-              name: true,
-              status: true,
-              deletedAt: true,
-            },
+    const manager = await this.prisma.user.findFirst({
+      where: {
+        id: managerUserId,
+        deletedAt: null,
+        isActive: true,
+        companyId: project.companyId,
+      },
+      include: {
+        role: true,
+        linkedEmployee: {
+          select: {
+            id: true,
+            employeeId: true,
+            name: true,
+            status: true,
+            deletedAt: true,
           },
         },
-      });
+      },
+    });
 
     if (!manager) {
-      throw new BadRequestException(
-        'Manager user not found',
-      );
+      throw new BadRequestException("Manager user not found");
     }
 
-    if (
-      this.normalizeRoleName(
-        manager.role?.name,
-      ) !== 'MANAGER'
-    ) {
-      throw new BadRequestException(
-        'Assigned user must have Manager role',
-      );
+    if (this.normalizeRoleName(manager.role?.name) !== "MANAGER") {
+      throw new BadRequestException("Assigned user must have Manager role");
     }
 
     if (
       manager.linkedEmployee &&
-      (
-        manager.linkedEmployee.deletedAt ||
-        manager.linkedEmployee.status ===
-          'RETIRED_RESIGNED'
-      )
+      (manager.linkedEmployee.deletedAt ||
+        manager.linkedEmployee.status === "RETIRED_RESIGNED")
     ) {
       throw new BadRequestException(
-        'Assigned manager employee profile is not active',
+        "Assigned manager employee profile is not active",
       );
     }
 
@@ -546,8 +692,7 @@ export class ProjectsService {
         id: projectId,
       },
       data: {
-        projectManagerId:
-          managerUserId,
+        projectManagerId: managerUserId,
       },
       include: {
         company: {
@@ -568,7 +713,7 @@ export class ProjectsService {
       },
     });
   }
-  
+
   async updateFuelPrice(
     projectId: string,
     data: {
@@ -592,7 +737,7 @@ export class ProjectsService {
     });
 
     if (!project) {
-      throw new NotFoundException('Project not found');
+      throw new NotFoundException("Project not found");
     }
 
     const pricing = this.resolveFuelPriceComponents(data);
@@ -602,43 +747,37 @@ export class ProjectsService {
       : new Date();
 
     if (Number.isNaN(effectiveFrom.getTime())) {
-      throw new BadRequestException(
-        'Effective date is invalid',
-      );
+      throw new BadRequestException("Effective date is invalid");
     }
 
     return this.prisma.$transaction(
       async (tx) => {
-        const history =
-          await tx.projectFuelPriceHistory.create({
-            data: {
-              projectId: project.id,
-              companyId: project.companyId,
-              country:
-                project.company?.country || 'Unknown',
-              currency:
-                project.company?.currency || 'SAR',
-              basePricePerLiter: pricing.basePricePerLiter,
-              transportCost: pricing.transportCostPerLiter,
-              pricePerLiter: pricing.netPricePerLiter,
-              vatRate: pricing.vatRate,
-              vatAmountPerLiter: pricing.vatAmountPerLiter,
-              grossPricePerLiter: pricing.grossPricePerLiter,
-              effectiveFrom,
-              reason:
-                data.reason?.trim() ||
-                (pricing.isLegacy
-                  ? 'Project fuel price update (legacy combined price)'
-                  : null),
-              createdByUserId:
-                data.createdByUserId || null,
-            },
-            include: {
-              project: true,
-              company: true,
-              createdBy: true,
-            },
-          });
+        const history = await tx.projectFuelPriceHistory.create({
+          data: {
+            projectId: project.id,
+            companyId: project.companyId,
+            country: project.company?.country || "Unknown",
+            currency: project.company?.currency || "SAR",
+            basePricePerLiter: pricing.basePricePerLiter,
+            transportCost: pricing.transportCostPerLiter,
+            pricePerLiter: pricing.netPricePerLiter,
+            vatRate: pricing.vatRate,
+            vatAmountPerLiter: pricing.vatAmountPerLiter,
+            grossPricePerLiter: pricing.grossPricePerLiter,
+            effectiveFrom,
+            reason:
+              data.reason?.trim() ||
+              (pricing.isLegacy
+                ? "Project fuel price update (legacy combined price)"
+                : null),
+            createdByUserId: data.createdByUserId || null,
+          },
+          include: {
+            project: true,
+            company: true,
+            createdBy: true,
+          },
+        });
 
         const [latestPrice, nextPrice] = await Promise.all([
           tx.projectFuelPriceHistory.findFirst({
@@ -648,10 +787,7 @@ export class ProjectsService {
                 lte: new Date(),
               },
             },
-            orderBy: [
-              { effectiveFrom: 'desc' },
-              { createdAt: 'desc' },
-            ],
+            orderBy: [{ effectiveFrom: "desc" }, { createdAt: "desc" }],
           }),
           tx.projectFuelPriceHistory.findFirst({
             where: {
@@ -660,10 +796,7 @@ export class ProjectsService {
                 gt: effectiveFrom,
               },
             },
-            orderBy: [
-              { effectiveFrom: 'asc' },
-              { createdAt: 'asc' },
-            ],
+            orderBy: [{ effectiveFrom: "asc" }, { createdAt: "asc" }],
           }),
         ]);
 
@@ -672,45 +805,37 @@ export class ProjectsService {
             id: project.id,
           },
           data: {
-            currentFuelPrice:
-              latestPrice?.pricePerLiter || 0,
-            currentBaseFuelPrice:
-              latestPrice?.basePricePerLiter ?? null,
-            currentTransportCostPerLiter:
-              latestPrice?.transportCost ?? null,
-            currentVatRate:
-              latestPrice?.vatRate ?? null,
-            currentGrossFuelPrice:
-              latestPrice?.grossPricePerLiter ?? null,
-            fuelPriceEffectiveFrom:
-              latestPrice?.effectiveFrom || new Date(),
+            currentFuelPrice: latestPrice?.pricePerLiter || 0,
+            currentBaseFuelPrice: latestPrice?.basePricePerLiter ?? null,
+            currentTransportCostPerLiter: latestPrice?.transportCost ?? null,
+            currentVatRate: latestPrice?.vatRate ?? null,
+            currentGrossFuelPrice: latestPrice?.grossPricePerLiter ?? null,
+            fuelPriceEffectiveFrom: latestPrice?.effectiveFrom || new Date(),
           },
         });
 
-        const operationsToReprice =
-          await tx.operation.findMany({
-            where: {
-              companyId: project.companyId,
-              projectIdAtOperation: project.id,
-              status: 'COMPLETED',
-              type: {
-                not: 'EXTERNAL_DIRECT_REFUEL',
-              },
-              completedAt: {
-                gte: effectiveFrom,
-                ...(nextPrice?.effectiveFrom
-                  ? { lt: nextPrice.effectiveFrom }
-                  : {}),
-              },
+        const operationsToReprice = await tx.operation.findMany({
+          where: {
+            companyId: project.companyId,
+            projectIdAtOperation: project.id,
+            status: "COMPLETED",
+            type: {
+              not: "EXTERNAL_DIRECT_REFUEL",
             },
-            select: {
-              id: true,
-              quantity: true,
+            completedAt: {
+              gte: effectiveFrom,
+              ...(nextPrice?.effectiveFrom
+                ? { lt: nextPrice.effectiveFrom }
+                : {}),
             },
-          });
+          },
+          select: {
+            id: true,
+            quantity: true,
+          },
+        });
 
-        const repricedOperations =
-          operationsToReprice.length;
+        const repricedOperations = operationsToReprice.length;
 
         if (repricedOperations > 0) {
           for (const operation of operationsToReprice) {
@@ -720,21 +845,14 @@ export class ProjectsService {
               },
               data: {
                 fuelPriceHistoryId: history.id,
-                pricePerLiterAtOperation:
-                  pricing.netPricePerLiter,
+                pricePerLiterAtOperation: pricing.netPricePerLiter,
                 totalCostAtOperation:
-                  Number(operation.quantity || 0) *
-                  pricing.netPricePerLiter,
-                basePricePerLiterAtOperation:
-                  pricing.basePricePerLiter,
-                transportCostPerLiterAtOperation:
-                  pricing.transportCostPerLiter,
-                vatRateAtOperation:
-                  pricing.vatRate,
-                vatAmountPerLiterAtOperation:
-                  pricing.vatAmountPerLiter,
-                grossPricePerLiterAtOperation:
-                  pricing.grossPricePerLiter,
+                  Number(operation.quantity || 0) * pricing.netPricePerLiter,
+                basePricePerLiterAtOperation: pricing.basePricePerLiter,
+                transportCostPerLiterAtOperation: pricing.transportCostPerLiter,
+                vatRateAtOperation: pricing.vatRate,
+                vatAmountPerLiterAtOperation: pricing.vatAmountPerLiter,
+                grossPricePerLiterAtOperation: pricing.grossPricePerLiter,
                 grossTotalCostAtOperation:
                   pricing.grossPricePerLiter == null
                     ? null
@@ -749,8 +867,7 @@ export class ProjectsService {
           ...history,
           repricedOperations,
           repricedFrom: effectiveFrom,
-          repricedUntil:
-            nextPrice?.effectiveFrom || null,
+          repricedUntil: nextPrice?.effectiveFrom || null,
         };
       },
       {
@@ -769,7 +886,7 @@ export class ProjectsService {
     });
 
     if (!project) {
-      throw new NotFoundException('Project not found');
+      throw new NotFoundException("Project not found");
     }
 
     return this.prisma.projectFuelPriceHistory.findMany({
@@ -782,15 +899,12 @@ export class ProjectsService {
         createdBy: true,
       },
       orderBy: {
-        effectiveFrom: 'desc',
+        effectiveFrom: "desc",
       },
     });
   }
 
-  async getEffectiveFuelPrice(
-    projectId: string,
-    operationDate?: string,
-  ) {
+  async getEffectiveFuelPrice(projectId: string, operationDate?: string) {
     const project = await this.prisma.project.findFirst({
       where: {
         id: projectId,
@@ -799,47 +913,39 @@ export class ProjectsService {
     });
 
     if (!project) {
-      throw new NotFoundException('Project not found');
+      throw new NotFoundException("Project not found");
     }
 
-    const targetDate = operationDate
-      ? new Date(operationDate)
-      : new Date();
+    const targetDate = operationDate ? new Date(operationDate) : new Date();
 
-    const price =
-      await this.prisma.projectFuelPriceHistory.findFirst({
-        where: {
-          projectId,
-          effectiveFrom: {
-            lte: targetDate,
-          },
+    const price = await this.prisma.projectFuelPriceHistory.findFirst({
+      where: {
+        projectId,
+        effectiveFrom: {
+          lte: targetDate,
         },
-        orderBy: {
-          effectiveFrom: 'desc',
-        },
-      });
+      },
+      orderBy: {
+        effectiveFrom: "desc",
+      },
+    });
 
     if (!price) {
-      throw new NotFoundException(
-        'No fuel price found for this date',
-      );
+      throw new NotFoundException("No fuel price found for this date");
     }
 
     return price;
   }
   async remove(id: string) {
-    const existingProject =
-      await this.prisma.project.findFirst({
-        where: {
-          id,
-          deletedAt: null,
-        },
-      });
+    const existingProject = await this.prisma.project.findFirst({
+      where: {
+        id,
+        deletedAt: null,
+      },
+    });
 
     if (!existingProject) {
-      throw new NotFoundException(
-        'Project not found',
-      );
+      throw new NotFoundException("Project not found");
     }
 
     return this.prisma.project.update({
