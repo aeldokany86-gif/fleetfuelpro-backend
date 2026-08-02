@@ -930,6 +930,12 @@ export class OperationCorrectionsService {
           totalCostAtOperation: Number(newValue),
           pricePerLiterAtOperation: null,
           fuelPriceHistoryId: null,
+          basePricePerLiterAtOperation: null,
+          transportCostPerLiterAtOperation: null,
+          vatRateAtOperation: null,
+          vatAmountPerLiterAtOperation: null,
+          grossPricePerLiterAtOperation: null,
+          grossTotalCostAtOperation: null,
         },
       });
       return;
@@ -1278,12 +1284,20 @@ export class OperationCorrectionsService {
 
     const pricePerLiter = Number(operation.pricePerLiterAtOperation || 0);
     const nextTotalCost = pricePerLiter > 0 ? Number(newQuantity) * pricePerLiter : operation.totalCostAtOperation;
+    const grossPricePerLiter = Number(
+      operation.grossPricePerLiterAtOperation || 0,
+    );
+    const nextGrossTotalCost =
+      grossPricePerLiter > 0
+        ? Number(newQuantity) * grossPricePerLiter
+        : operation.grossTotalCostAtOperation;
 
     await tx.operation.update({
       where: { id: operation.id },
       data: {
         quantity: Number(newQuantity),
         totalCostAtOperation: nextTotalCost,
+        grossTotalCostAtOperation: nextGrossTotalCost,
       },
     });
   }

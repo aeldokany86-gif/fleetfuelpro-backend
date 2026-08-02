@@ -33,6 +33,98 @@ export class ProjectsService {
     );
   }
 
+  private roundPrice(value: number) {
+    return Math.round((Number(value) + Number.EPSILON) * 1_000_000) / 1_000_000;
+  }
+
+  private resolveFuelPriceComponents(data: {
+    pricePerLiter?: number;
+    basePricePerLiter?: number;
+    transportCostPerLiter?: number;
+    vatRate?: number;
+  }) {
+    const hasComponentPricing = data.basePricePerLiter !== undefined;
+
+    if (!hasComponentPricing) {
+      const legacyPrice = Number(data.pricePerLiter);
+
+      if (!Number.isFinite(legacyPrice) || legacyPrice <= 0) {
+        throw new BadRequestException(
+          'Price per liter must be greater than zero',
+        );
+      }
+
+      return {
+        isLegacy: true,
+        basePricePerLiter: null,
+        transportCostPerLiter: null,
+        vatRate: null,
+        vatAmountPerLiter: null,
+        netPricePerLiter: this.roundPrice(legacyPrice),
+        grossPricePerLiter: null,
+      };
+    }
+
+    const basePricePerLiter = Number(data.basePricePerLiter);
+    const transportCostPerLiter = Number(data.transportCostPerLiter ?? 0);
+    const vatRate = Number(data.vatRate ?? 0);
+
+    if (!Number.isFinite(basePricePerLiter) || basePricePerLiter <= 0) {
+      throw new BadRequestException(
+        'Base fuel price per liter must be greater than zero',
+      );
+    }
+
+    if (!Number.isFinite(transportCostPerLiter) || transportCostPerLiter < 0) {
+      throw new BadRequestException(
+        'Transport cost per liter cannot be negative',
+      );
+    }
+
+    if (!Number.isFinite(vatRate) || vatRate < 0 || vatRate > 100) {
+      throw new BadRequestException(
+        'VAT rate must be between 0 and 100',
+      );
+    }
+
+    const netPricePerLiter = this.roundPrice(
+      basePricePerLiter + transportCostPerLiter,
+    );
+    const vatAmountPerLiter = this.roundPrice(
+      netPricePerLiter * (vatRate / 100),
+    );
+
+    return {
+      isLegacy: false,
+      basePricePerLiter: this.roundPrice(basePricePerLiter),
+      transportCostPerLiter: this.roundPrice(transportCostPerLiter),
+      vatRate: this.roundPrice(vatRate),
+      vatAmountPerLiter,
+      netPricePerLiter,
+      grossPricePerLiter: this.roundPrice(
+        netPricePerLiter + vatAmountPerLiter,
+      ),
+    };
+  }
+
+  private applyEffectiveCurrentPrice(project: any) {
+    const { fuelPriceHistory = [], ...projectData } = project || {};
+    const effectivePrice = fuelPriceHistory[0];
+
+    if (!effectivePrice) return projectData;
+
+    return {
+      ...projectData,
+      currentFuelPrice: effectivePrice.pricePerLiter,
+      currentBaseFuelPrice: effectivePrice.basePricePerLiter,
+      currentTransportCostPerLiter: effectivePrice.transportCost,
+      currentVatRate: effectivePrice.vatRate,
+      currentGrossFuelPrice: effectivePrice.grossPricePerLiter,
+      fuelPriceCurrency: effectivePrice.currency,
+      fuelPriceEffectiveFrom: effectivePrice.effectiveFrom,
+    };
+  }
+
   async create(createProjectDto: CreateProjectDto) {
     const company = await this.prisma.company.findFirst({
       where: {
@@ -66,16 +158,12 @@ export class ProjectsService {
       );
     }
 
-    const initialFuelPrice = Number(createProjectDto.initialFuelPrice);
-
-    if (
-      Number.isNaN(initialFuelPrice) ||
-      initialFuelPrice <= 0
-    ) {
-      throw new BadRequestException(
-        'Initial fuel price per liter must be greater than zero',
-      );
-    }
+    const initialPricing = this.resolveFuelPriceComponents({
+      pricePerLiter: createProjectDto.initialFuelPrice,
+      basePricePerLiter: createProjectDto.initialBasePricePerLiter,
+      transportCostPerLiter: createProjectDto.initialTransportCostPerLiter,
+      vatRate: createProjectDto.initialVatRate,
+    });
 
     const effectiveFrom = new Date();
 
@@ -88,7 +176,13 @@ export class ProjectsService {
           location: createProjectDto.location?.trim() || null,
           description: createProjectDto.description?.trim() || null,
           isActive: createProjectDto.isActive ?? true,
-          currentFuelPrice: initialFuelPrice,
+          currentFuelPrice: initialPricing.netPricePerLiter,
+          currentBaseFuelPrice: initialPricing.basePricePerLiter,
+          currentTransportCostPerLiter:
+            initialPricing.transportCostPerLiter,
+          currentVatRate: initialPricing.vatRate,
+          currentGrossFuelPrice: initialPricing.grossPricePerLiter,
+          fuelPriceCurrency: company.currency || 'SAR',
           fuelPriceEffectiveFrom: effectiveFrom,
         },
         include: {
@@ -116,9 +210,16 @@ export class ProjectsService {
           companyId: project.companyId,
           country: company.country || 'Unknown',
           currency: company.currency || 'SAR',
-          pricePerLiter: initialFuelPrice,
+          basePricePerLiter: initialPricing.basePricePerLiter,
+          transportCost: initialPricing.transportCostPerLiter,
+          pricePerLiter: initialPricing.netPricePerLiter,
+          vatRate: initialPricing.vatRate,
+          vatAmountPerLiter: initialPricing.vatAmountPerLiter,
+          grossPricePerLiter: initialPricing.grossPricePerLiter,
           effectiveFrom,
-          reason: 'Initial project fuel price',
+          reason: initialPricing.isLegacy
+            ? 'Initial project fuel price (legacy combined price)'
+            : 'Initial project fuel price',
           createdByUserId: null,
         },
       });
@@ -130,7 +231,8 @@ export class ProjectsService {
   }
 
   async findAll(companyId?: string) {
-    return this.prisma.project.findMany({
+    const now = new Date();
+    const projects = await this.prisma.project.findMany({
       where: {
         deletedAt: null,
         ...(companyId ? { companyId } : {}),
@@ -151,14 +253,29 @@ export class ProjectsService {
             isActive: true,
           },
         },
+        fuelPriceHistory: {
+          where: {
+            effectiveFrom: { lte: now },
+          },
+          orderBy: [
+            { effectiveFrom: 'desc' },
+            { createdAt: 'desc' },
+          ],
+          take: 1,
+        },
       },
       orderBy: {
         createdAt: 'desc',
       },
     });
+
+    return projects.map((project) =>
+      this.applyEffectiveCurrentPrice(project),
+    );
   }
 
   async findOne(id: string) {
+    const now = new Date();
     const project = await this.prisma.project.findFirst({
       where: {
         id,
@@ -180,6 +297,16 @@ export class ProjectsService {
             isActive: true,
           },
         },
+        fuelPriceHistory: {
+          where: {
+            effectiveFrom: { lte: now },
+          },
+          orderBy: [
+            { effectiveFrom: 'desc' },
+            { createdAt: 'desc' },
+          ],
+          take: 1,
+        },
       },
     });
 
@@ -187,7 +314,7 @@ export class ProjectsService {
       throw new NotFoundException('Project not found');
     }
 
-    return project;
+    return this.applyEffectiveCurrentPrice(project);
   }
 
   async update(id: string, updateProjectDto: UpdateProjectDto) {
@@ -445,7 +572,10 @@ export class ProjectsService {
   async updateFuelPrice(
     projectId: string,
     data: {
-      pricePerLiter: number;
+      pricePerLiter?: number;
+      basePricePerLiter?: number;
+      transportCostPerLiter?: number;
+      vatRate?: number;
       effectiveFrom?: string;
       reason?: string;
       createdByUserId?: string;
@@ -465,16 +595,7 @@ export class ProjectsService {
       throw new NotFoundException('Project not found');
     }
 
-    const pricePerLiter = Number(data.pricePerLiter);
-
-    if (
-      Number.isNaN(pricePerLiter) ||
-      pricePerLiter <= 0
-    ) {
-      throw new BadRequestException(
-        'Price per liter must be greater than zero',
-      );
-    }
+    const pricing = this.resolveFuelPriceComponents(data);
 
     const effectiveFrom = data.effectiveFrom
       ? new Date(data.effectiveFrom)
@@ -497,9 +618,18 @@ export class ProjectsService {
                 project.company?.country || 'Unknown',
               currency:
                 project.company?.currency || 'SAR',
-              pricePerLiter,
+              basePricePerLiter: pricing.basePricePerLiter,
+              transportCost: pricing.transportCostPerLiter,
+              pricePerLiter: pricing.netPricePerLiter,
+              vatRate: pricing.vatRate,
+              vatAmountPerLiter: pricing.vatAmountPerLiter,
+              grossPricePerLiter: pricing.grossPricePerLiter,
               effectiveFrom,
-              reason: data.reason?.trim() || null,
+              reason:
+                data.reason?.trim() ||
+                (pricing.isLegacy
+                  ? 'Project fuel price update (legacy combined price)'
+                  : null),
               createdByUserId:
                 data.createdByUserId || null,
             },
@@ -514,6 +644,9 @@ export class ProjectsService {
           tx.projectFuelPriceHistory.findFirst({
             where: {
               projectId: project.id,
+              effectiveFrom: {
+                lte: new Date(),
+              },
             },
             orderBy: [
               { effectiveFrom: 'desc' },
@@ -541,6 +674,14 @@ export class ProjectsService {
           data: {
             currentFuelPrice:
               latestPrice?.pricePerLiter || 0,
+            currentBaseFuelPrice:
+              latestPrice?.basePricePerLiter ?? null,
+            currentTransportCostPerLiter:
+              latestPrice?.transportCost ?? null,
+            currentVatRate:
+              latestPrice?.vatRate ?? null,
+            currentGrossFuelPrice:
+              latestPrice?.grossPricePerLiter ?? null,
             fuelPriceEffectiveFrom:
               latestPrice?.effectiveFrom || new Date(),
           },
@@ -580,10 +721,25 @@ export class ProjectsService {
               data: {
                 fuelPriceHistoryId: history.id,
                 pricePerLiterAtOperation:
-                  pricePerLiter,
+                  pricing.netPricePerLiter,
                 totalCostAtOperation:
                   Number(operation.quantity || 0) *
-                  pricePerLiter,
+                  pricing.netPricePerLiter,
+                basePricePerLiterAtOperation:
+                  pricing.basePricePerLiter,
+                transportCostPerLiterAtOperation:
+                  pricing.transportCostPerLiter,
+                vatRateAtOperation:
+                  pricing.vatRate,
+                vatAmountPerLiterAtOperation:
+                  pricing.vatAmountPerLiter,
+                grossPricePerLiterAtOperation:
+                  pricing.grossPricePerLiter,
+                grossTotalCostAtOperation:
+                  pricing.grossPricePerLiter == null
+                    ? null
+                    : Number(operation.quantity || 0) *
+                      pricing.grossPricePerLiter,
               },
             });
           }

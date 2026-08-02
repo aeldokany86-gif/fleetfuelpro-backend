@@ -35,6 +35,22 @@ export class CreateProjectDto {
   isActive?: boolean;
 
   @Type(() => Number)
+  @IsOptional()
   @IsNumber()
-  initialFuelPrice: number;
+  initialFuelPrice?: number;
+
+  @Type(() => Number)
+  @IsOptional()
+  @IsNumber()
+  initialBasePricePerLiter?: number;
+
+  @Type(() => Number)
+  @IsOptional()
+  @IsNumber()
+  initialTransportCostPerLiter?: number;
+
+  @Type(() => Number)
+  @IsOptional()
+  @IsNumber()
+  initialVatRate?: number;
 }

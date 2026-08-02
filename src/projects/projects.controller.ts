@@ -87,7 +87,10 @@ export class ProjectsController {
 
     @Body()
     body: {
-      pricePerLiter: number;
+      pricePerLiter?: number;
+      basePricePerLiter?: number;
+      transportCostPerLiter?: number;
+      vatRate?: number;
       effectiveFrom?: string;
       reason?: string;
       createdByUserId?: string;

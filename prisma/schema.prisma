@@ -54,6 +54,10 @@ model Project {
   deletedAt                    DateTime?
   projectManagerId             String?
   currentFuelPrice             Float                      @default(0)
+  currentBaseFuelPrice         Float?
+  currentTransportCostPerLiter Float?
+  currentVatRate               Float?
+  currentGrossFuelPrice        Float?
   fuelPriceCurrency            String                     @default("SAR")
   fuelPriceEffectiveFrom       DateTime?
   assets                       Asset[]
@@ -500,6 +504,12 @@ model Operation {
   fuelPriceHistoryId                String?
   pricePerLiterAtOperation          Float?
   totalCostAtOperation              Float?
+  basePricePerLiterAtOperation      Float?
+  transportCostPerLiterAtOperation  Float?
+  vatRateAtOperation                Float?
+  vatAmountPerLiterAtOperation      Float?
+  grossPricePerLiterAtOperation     Float?
+  grossTotalCostAtOperation         Float?
   assetMeterCycleNumber             Int?
   lifetimeCounter                   Float?
   lifetimeOdometer                  Float?
@@ -593,22 +603,25 @@ model OperationCorrection {
 }
 
 model ProjectFuelPriceHistory {
-  id                String      @id @default(cuid())
-  projectId         String
-  companyId         String
-  country           String?
-  currency          String
-  basePricePerLiter Float?
-  transportCost     Float?
-  pricePerLiter     Float
-  effectiveFrom     DateTime
-  reason            String?
-  createdByUserId   String?
-  createdAt         DateTime    @default(now())
-  operations        Operation[]
-  company           Company     @relation(fields: [companyId], references: [id])
-  createdBy         User?       @relation(fields: [createdByUserId], references: [id])
-  project           Project     @relation(fields: [projectId], references: [id])
+  id                 String      @id @default(cuid())
+  projectId          String
+  companyId          String
+  country            String?
+  currency           String
+  basePricePerLiter  Float?
+  transportCost      Float?
+  pricePerLiter      Float
+  vatRate            Float?
+  vatAmountPerLiter  Float?
+  grossPricePerLiter Float?
+  effectiveFrom      DateTime
+  reason             String?
+  createdByUserId    String?
+  createdAt          DateTime    @default(now())
+  operations         Operation[]
+  company            Company     @relation(fields: [companyId], references: [id])
+  createdBy          User?       @relation(fields: [createdByUserId], references: [id])
+  project            Project     @relation(fields: [projectId], references: [id])
 
   @@index([projectId])
   @@index([companyId])

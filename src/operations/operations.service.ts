@@ -650,6 +650,17 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
               fuelPriceHistoryId: costSnapshot.fuelPriceHistoryId,
               pricePerLiterAtOperation: costSnapshot.pricePerLiterAtOperation,
               totalCostAtOperation: costSnapshot.totalCostAtOperation,
+              basePricePerLiterAtOperation:
+                costSnapshot.basePricePerLiterAtOperation,
+              transportCostPerLiterAtOperation:
+                costSnapshot.transportCostPerLiterAtOperation,
+              vatRateAtOperation: costSnapshot.vatRateAtOperation,
+              vatAmountPerLiterAtOperation:
+                costSnapshot.vatAmountPerLiterAtOperation,
+              grossPricePerLiterAtOperation:
+                costSnapshot.grossPricePerLiterAtOperation,
+              grossTotalCostAtOperation:
+                costSnapshot.grossTotalCostAtOperation,
               projectIdAtOperation:
                 projectSnapshot.projectIdAtOperation,
               projectNameAtOperation:
@@ -1515,6 +1526,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         pricePerLiterAtOperation: null,
         totalCostAtOperation:
           externalInvoiceAmount > 0 ? externalInvoiceAmount : null,
+        basePricePerLiterAtOperation: null,
+        transportCostPerLiterAtOperation: null,
+        vatRateAtOperation: null,
+        vatAmountPerLiterAtOperation: null,
+        grossPricePerLiterAtOperation: null,
+        grossTotalCostAtOperation: null,
       };
     }
 
@@ -1525,6 +1542,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         fuelPriceHistoryId: null,
         pricePerLiterAtOperation: null,
         totalCostAtOperation: null,
+        basePricePerLiterAtOperation: null,
+        transportCostPerLiterAtOperation: null,
+        vatRateAtOperation: null,
+        vatAmountPerLiterAtOperation: null,
+        grossPricePerLiterAtOperation: null,
+        grossTotalCostAtOperation: null,
       };
     }
 
@@ -1543,11 +1566,40 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     if (effectivePrice) {
       const pricePerLiterAtOperation = Number(effectivePrice.pricePerLiter);
       const totalCostAtOperation = Number(args.quantity || 0) * pricePerLiterAtOperation;
+      const basePricePerLiterAtOperation =
+        effectivePrice.basePricePerLiter == null
+          ? null
+          : Number(effectivePrice.basePricePerLiter);
+      const transportCostPerLiterAtOperation =
+        effectivePrice.transportCost == null
+          ? null
+          : Number(effectivePrice.transportCost);
+      const vatRateAtOperation =
+        effectivePrice.vatRate == null
+          ? null
+          : Number(effectivePrice.vatRate);
+      const vatAmountPerLiterAtOperation =
+        effectivePrice.vatAmountPerLiter == null
+          ? null
+          : Number(effectivePrice.vatAmountPerLiter);
+      const grossPricePerLiterAtOperation =
+        effectivePrice.grossPricePerLiter == null
+          ? null
+          : Number(effectivePrice.grossPricePerLiter);
 
       return {
         fuelPriceHistoryId: effectivePrice.id,
         pricePerLiterAtOperation,
         totalCostAtOperation,
+        basePricePerLiterAtOperation,
+        transportCostPerLiterAtOperation,
+        vatRateAtOperation,
+        vatAmountPerLiterAtOperation,
+        grossPricePerLiterAtOperation,
+        grossTotalCostAtOperation:
+          grossPricePerLiterAtOperation == null
+            ? null
+            : Number(args.quantity || 0) * grossPricePerLiterAtOperation,
       };
     }
 
@@ -1563,6 +1615,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         fuelPriceHistoryId: null,
         pricePerLiterAtOperation: fallbackPrice,
         totalCostAtOperation: Number(args.quantity || 0) * fallbackPrice,
+        basePricePerLiterAtOperation: null,
+        transportCostPerLiterAtOperation: null,
+        vatRateAtOperation: null,
+        vatAmountPerLiterAtOperation: null,
+        grossPricePerLiterAtOperation: null,
+        grossTotalCostAtOperation: null,
       };
     }
 
@@ -1570,6 +1628,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       fuelPriceHistoryId: null,
       pricePerLiterAtOperation: null,
       totalCostAtOperation: null,
+      basePricePerLiterAtOperation: null,
+      transportCostPerLiterAtOperation: null,
+      vatRateAtOperation: null,
+      vatAmountPerLiterAtOperation: null,
+      grossPricePerLiterAtOperation: null,
+      grossTotalCostAtOperation: null,
     };
   }
 
