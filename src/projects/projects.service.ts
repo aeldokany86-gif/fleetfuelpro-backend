@@ -37,6 +37,10 @@ export class ProjectsService {
     );
   }
 
+  private isCompanyAdminRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === "ADMIN";
+  }
+
   private roundPrice(value: number) {
     return Math.round((Number(value) + Number.EPSILON) * 1_000_000) / 1_000_000;
   }
@@ -227,6 +231,212 @@ export class ProjectsService {
     });
 
     return createdProject;
+  }
+
+  async createBootstrapFirstProject(
+    createProjectDto: CreateProjectDto,
+    actorUserId: string,
+    actorCompanyId: string,
+    actorRoleName: string,
+  ) {
+    if (!actorUserId) {
+      throw new BadRequestException("Authenticated user is required");
+    }
+
+    if (!actorCompanyId) {
+      throw new BadRequestException("Authenticated company is required");
+    }
+
+    if (!this.isCompanyAdminRole(actorRoleName)) {
+      throw new BadRequestException(
+        "Only the first company Admin can complete company setup",
+      );
+    }
+
+    if (
+      createProjectDto.companyId &&
+      createProjectDto.companyId !== actorCompanyId
+    ) {
+      throw new BadRequestException(
+        "The first project must belong to the authenticated Admin company",
+      );
+    }
+
+    const projectCode = this.normalizeCode(createProjectDto.code);
+    const effectiveFrom = new Date();
+
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const user = await tx.user.findFirst({
+          where: {
+            id: actorUserId,
+            companyId: actorCompanyId,
+            deletedAt: null,
+            isActive: true,
+          },
+          include: {
+            role: true,
+            linkedEmployee: true,
+            company: true,
+          },
+        });
+
+        if (!user) {
+          throw new BadRequestException("Admin user not found");
+        }
+
+        if (!this.isCompanyAdminRole(user.role?.name || "")) {
+          throw new BadRequestException(
+            "Only a company Admin can create the first project",
+          );
+        }
+
+        if (!user.linkedEmployee) {
+          throw new BadRequestException(
+            "Admin user must be linked to a Team employee",
+          );
+        }
+
+        if (user.linkedEmployee.deletedAt) {
+          throw new BadRequestException(
+            "Linked Admin employee is not active",
+          );
+        }
+
+        if (user.linkedEmployee.projectId) {
+          throw new BadRequestException(
+            "Company setup is already completed for this Admin employee",
+          );
+        }
+
+        const totalProjectRecords = await tx.project.count({
+          where: {
+            companyId: actorCompanyId,
+          },
+        });
+
+        if (totalProjectRecords > 0) {
+          throw new BadRequestException(
+            "Bootstrap project creation is allowed only when the company has no historical project records",
+          );
+        }
+
+        const company = user.company;
+
+        if (!company || company.deletedAt || !company.isActive) {
+          throw new BadRequestException(
+            "Company not found or inactive",
+          );
+        }
+
+        const duplicateProject = await tx.project.findFirst({
+          where: {
+            companyId: actorCompanyId,
+            code: projectCode,
+          },
+        });
+
+        if (duplicateProject) {
+          throw new BadRequestException(
+            duplicateProject.deletedAt
+              ? "This Project ID was previously used and cannot be reused"
+              : "Project code already exists in this company",
+          );
+        }
+
+        const initialPricing = this.resolveFuelPriceComponents({
+          pricePerLiter: createProjectDto.initialFuelPrice,
+          basePricePerLiter: createProjectDto.initialBasePricePerLiter,
+          transportCostPerLiter:
+            createProjectDto.initialTransportCostPerLiter,
+          vatRate: createProjectDto.initialVatRate,
+        });
+
+        const project = await tx.project.create({
+          data: {
+            companyId: actorCompanyId,
+            code: projectCode,
+            name: createProjectDto.name?.trim(),
+            location: createProjectDto.location?.trim() || null,
+            description: createProjectDto.description?.trim() || null,
+            isActive: createProjectDto.isActive ?? true,
+            currentFuelPrice: initialPricing.netPricePerLiter,
+            currentBaseFuelPrice: initialPricing.basePricePerLiter,
+            currentTransportCostPerLiter:
+              initialPricing.transportCostPerLiter,
+            currentVatRate: initialPricing.vatRate,
+            currentGrossFuelPrice: initialPricing.grossPricePerLiter,
+            fuelPriceCurrency: company.currency || "SAR",
+            fuelPriceEffectiveFrom: effectiveFrom,
+          },
+          include: {
+            company: {
+              select: {
+                id: true,
+                name: true,
+                code: true,
+              },
+            },
+            projectManager: {
+              select: {
+                id: true,
+                fullName: true,
+                email: true,
+                isActive: true,
+              },
+            },
+          },
+        });
+
+        await tx.projectFuelPriceHistory.create({
+          data: {
+            projectId: project.id,
+            companyId: actorCompanyId,
+            country: company.country || "Unknown",
+            currency: company.currency || "SAR",
+            basePricePerLiter: initialPricing.basePricePerLiter,
+            transportCost: initialPricing.transportCostPerLiter,
+            pricePerLiter: initialPricing.netPricePerLiter,
+            vatRate: initialPricing.vatRate,
+            vatAmountPerLiter: initialPricing.vatAmountPerLiter,
+            grossPricePerLiter: initialPricing.grossPricePerLiter,
+            effectiveFrom,
+            reason: initialPricing.isLegacy
+              ? "Initial project fuel price (legacy combined price)"
+              : "Initial project fuel price",
+            createdByUserId: actorUserId,
+          },
+        });
+
+        const updatedEmployee = await tx.employee.update({
+          where: {
+            id: user.linkedEmployee.id,
+          },
+          data: {
+            projectId: project.id,
+          },
+          include: {
+            project: true,
+          },
+        });
+
+        return {
+          project,
+          updatedEmployee,
+        };
+      },
+      {
+        maxWait: 10000,
+        timeout: 20000,
+      },
+    );
+
+    return {
+      ...result,
+      bootstrapCompleted: true,
+      requiresFirstProject: false,
+      requiredSetupStep: null,
+    };
   }
 
   async findAll(companyId?: string) {

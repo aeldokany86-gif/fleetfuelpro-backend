@@ -53,6 +53,37 @@ export class AuthService {
     return normalizedRole === 'platformuser' || normalizedRole === 'platformadmin';
   }
 
+  private async getFirstProjectSetupState(user: any) {
+    const normalizedRole = this.normalizeRoleName(user?.role?.name || '');
+
+    if (
+      normalizedRole !== 'admin' ||
+      !user?.companyId ||
+      !user?.linkedEmployee ||
+      user.linkedEmployee.projectId
+    ) {
+      return {
+        requiresFirstProject: false,
+        requiredSetupStep: null,
+      };
+    }
+
+    const totalProjectRecords = await this.prisma.project.count({
+      where: {
+        companyId: user.companyId,
+      },
+    });
+
+    const requiresFirstProject = totalProjectRecords === 0;
+
+    return {
+      requiresFirstProject,
+      requiredSetupStep: requiresFirstProject
+        ? 'CREATE_FIRST_PROJECT'
+        : null,
+    };
+  }
+
   private normalizeIdentifier(identifier?: string) {
     return String(identifier || '')
       .trim()
@@ -425,12 +456,20 @@ export class AuthService {
 
       performance.mark('prisma.user.updateLastLogin');
 
+      const setupState = await this.getFirstProjectSetupState({
+        ...user,
+        role,
+      });
+
+      performance.mark('resolveFirstProjectSetup');
+
       const formattedUser = this.formatUserResponse(
         {
           ...user,
           role,
         },
         permissions,
+        setupState,
       );
 
       performance.mark('formatUserResponse');
@@ -528,9 +567,16 @@ export class AuthService {
       (rolePermission) => rolePermission.permission.key,
     );
 
+    const setupState =
+      await this.getFirstProjectSetupState(updatedUser);
+
     return {
       success: true,
-      user: this.formatUserResponse(updatedUser, permissions),
+      user: this.formatUserResponse(
+        updatedUser,
+        permissions,
+        setupState,
+      ),
     };
   }
 
@@ -587,12 +633,20 @@ export class AuthService {
 
       performance.mark('buildPermissions');
 
+      const setupState = await this.getFirstProjectSetupState({
+        ...user,
+        role,
+      });
+
+      performance.mark('resolveFirstProjectSetup');
+
       const response = this.formatUserResponse(
         {
           ...user,
           role,
         },
         permissions,
+        setupState,
       );
 
       performance.mark('formatUserResponse');
@@ -624,7 +678,17 @@ export class AuthService {
     }
   }
 
-  private formatUserResponse(user: any, permissions: string[]) {
+  private formatUserResponse(
+    user: any,
+    permissions: string[],
+    setupState: {
+      requiresFirstProject: boolean;
+      requiredSetupStep: string | null;
+    } = {
+      requiresFirstProject: false,
+      requiredSetupStep: null,
+    },
+  ) {
     const roleName = String(user.role?.name || '');
     const normalizedRole = roleName
       .trim()
@@ -672,6 +736,8 @@ export class AuthService {
       isActive: user.isActive,
       mustChangePassword: user.mustChangePassword,
       lastLoginAt: user.lastLoginAt || null,
+      requiresFirstProject: setupState.requiresFirstProject,
+      requiredSetupStep: setupState.requiredSetupStep,
 
       // Operational scope resolved from backend relations.
       // User = identity/access, Employee = operational project assignment.

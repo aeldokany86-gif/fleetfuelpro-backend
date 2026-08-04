@@ -7,7 +7,11 @@ import {
   Patch,
   Post,
   Query,
+  Req,
+  UseGuards,
 } from "@nestjs/common";
+
+import { AuthGuard } from "@nestjs/passport";
 
 import { ProjectsService } from "./projects.service";
 
@@ -25,6 +29,23 @@ export class ProjectsController {
   ) {
     return this.projectsService.create(createProjectDto);
   }
+
+  @UseGuards(AuthGuard("jwt"))
+  @Post("bootstrap-first-project")
+  createBootstrapFirstProject(
+    @Body()
+    createProjectDto: CreateProjectDto,
+    @Req()
+    req: any,
+  ) {
+    return this.projectsService.createBootstrapFirstProject(
+      createProjectDto,
+      req.user.userId,
+      req.user.companyId,
+      req.user.roleName,
+    );
+  }
+
 
   @Get()
   findAll(
