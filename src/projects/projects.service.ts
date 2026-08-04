@@ -1,3 +1,5 @@
+// PROJECTS REPORT TERMINOLOGY VERSION: ENDED_STATUS_V2
+// Expected master summary field: endedProjects (deletedProjects was removed).
 import {
   BadRequestException,
   Injectable,
@@ -279,17 +281,23 @@ export class ProjectsService {
     const status = String(filters.status || "")
       .trim()
       .toUpperCase();
-    if (status && !["ACTIVE", "INACTIVE"].includes(status)) {
+    if (
+      status &&
+      !["ACTIVE", "INACTIVE", "ENDED", "DELETED"].includes(status)
+    ) {
       throw new BadRequestException(
-        "Project status must be ACTIVE or INACTIVE",
+        "Project status must be ACTIVE, INACTIVE, or ENDED",
       );
     }
 
     const projectWhere = {
       companyId,
-      deletedAt: null,
       ...(filters.projectId ? { id: filters.projectId } : {}),
-      ...(status ? { isActive: status === "ACTIVE" } : {}),
+      ...(status === "ENDED" || status === "DELETED"
+        ? { deletedAt: { not: null } }
+        : status
+          ? { deletedAt: null, isActive: status === "ACTIVE" }
+          : {}),
     };
 
     const now = new Date();
@@ -317,6 +325,24 @@ export class ProjectsService {
     });
 
     const projectIds = projects.map((project) => project.id);
+    const initialPriceRows = projectIds.length
+      ? await this.prisma.projectFuelPriceHistory.findMany({
+          where: {
+            projectId: { in: projectIds },
+            reason: { startsWith: "Initial project fuel price" },
+          },
+          select: { projectId: true, effectiveFrom: true },
+          orderBy: [{ effectiveFrom: "asc" }, { createdAt: "asc" }],
+        })
+      : [];
+
+    const projectStartById = new Map<string, Date>();
+    for (const row of initialPriceRows) {
+      if (!projectStartById.has(row.projectId)) {
+        projectStartById.set(row.projectId, row.effectiveFrom);
+      }
+    }
+
     const operationGroups = projectIds.length
       ? await this.prisma.operation.groupBy({
           by: ["projectIdAtOperation"],
@@ -347,7 +373,11 @@ export class ProjectsService {
         projectName: project.name,
         location: project.location,
         description: project.description,
-        status: project.isActive ? "ACTIVE" : "INACTIVE",
+        status: project.deletedAt
+          ? "ENDED"
+          : project.isActive
+            ? "ACTIVE"
+            : "INACTIVE",
         managerId: project.projectManager?.id || null,
         managerName: project.projectManager?.fullName || null,
         managerEmail: project.projectManager?.email || null,
@@ -357,7 +387,10 @@ export class ProjectsService {
         vatRate: project.currentVatRate,
         grossPricePerLiter: project.currentGrossFuelPrice,
         currency: project.fuelPriceCurrency,
+        // Compatibility alias kept for existing frontend consumers.
         priceEffectiveFrom: project.fuelPriceEffectiveFrom,
+        currentPriceEffectiveFrom: project.fuelPriceEffectiveFrom,
+        latestPriceEffectiveFrom: project.fuelPriceEffectiveFrom,
         assetsCount: project._count.assets,
         stationsCount: project._count.stations,
         employeesCount: project._count.employees,
@@ -365,6 +398,9 @@ export class ProjectsService {
         consumedQuantity: operations?._sum?.quantity || 0,
         totalCost: operations?._sum?.totalCostAtOperation || 0,
         createdAt: project.createdAt,
+        projectStartDate:
+          projectStartById.get(project.id) || project.createdAt,
+        projectEndDate: project.deletedAt,
       };
     });
 
@@ -375,6 +411,7 @@ export class ProjectsService {
         activeProjects: rows.filter((row) => row.status === "ACTIVE").length,
         inactiveProjects: rows.filter((row) => row.status === "INACTIVE")
           .length,
+        endedProjects: rows.filter((row) => row.status === "ENDED").length,
         totalAssets: rows.reduce((sum, row) => sum + row.assetsCount, 0),
         totalStations: rows.reduce((sum, row) => sum + row.stationsCount, 0),
         totalEmployees: rows.reduce((sum, row) => sum + row.employeesCount, 0),
@@ -416,7 +453,6 @@ export class ProjectsService {
     const history = await this.prisma.projectFuelPriceHistory.findMany({
       where: {
         companyId,
-        project: { deletedAt: null },
         ...(filters.projectId ? { projectId: filters.projectId } : {}),
         ...(Object.keys(effectiveFrom).length ? { effectiveFrom } : {}),
       },
@@ -434,6 +470,7 @@ export class ProjectsService {
       projectCode: row.project.code,
       projectName: row.project.name,
       effectiveFrom: row.effectiveFrom,
+      priceEffectiveFrom: row.effectiveFrom,
       basePricePerLiter: row.basePricePerLiter,
       transportCostPerLiter: row.transportCost,
       operationalPricePerLiter: row.pricePerLiter,
@@ -748,6 +785,23 @@ export class ProjectsService {
 
     if (Number.isNaN(effectiveFrom.getTime())) {
       throw new BadRequestException("Effective date is invalid");
+    }
+
+    const initialPrice = await this.prisma.projectFuelPriceHistory.findFirst({
+      where: {
+        projectId: project.id,
+        reason: { startsWith: "Initial project fuel price" },
+      },
+      select: { effectiveFrom: true },
+      orderBy: [{ effectiveFrom: "asc" }, { createdAt: "asc" }],
+    });
+
+    const projectStartDate = initialPrice?.effectiveFrom || project.createdAt;
+
+    if (effectiveFrom.getTime() < projectStartDate.getTime()) {
+      throw new BadRequestException(
+        `Fuel price cannot be updated with a date before project creation (${projectStartDate.toISOString()})`,
+      );
     }
 
     return this.prisma.$transaction(
