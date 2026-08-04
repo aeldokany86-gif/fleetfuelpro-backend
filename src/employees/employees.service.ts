@@ -15,6 +15,22 @@ export class EmployeesService {
     private prisma: PrismaService,
   ) {}
 
+  private normalizeRoleName(roleName?: string) {
+    return String(roleName || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, '');
+  }
+
+  private isPlatformUser(roleName?: string) {
+    const normalizedRole = this.normalizeRoleName(roleName);
+
+    return (
+      normalizedRole === 'platformuser' ||
+      normalizedRole === 'platformadmin'
+    );
+  }
+
   private normalizeEmployeeId(
     employeeId: string,
   ) {
@@ -25,42 +41,96 @@ export class EmployeesService {
 
   async create(
     createEmployeeDto: CreateEmployeeDto,
+    actorCompanyId: string,
+    actorRoleName: string,
   ) {
+    const platformUser = this.isPlatformUser(actorRoleName);
+    const targetCompanyId = platformUser
+      ? createEmployeeDto.companyId
+      : actorCompanyId;
+
+    if (!targetCompanyId) {
+      throw new BadRequestException(
+        'Company ID is required',
+      );
+    }
+
     const company =
       await this.prisma.company.findFirst({
         where: {
-          id: createEmployeeDto.companyId,
-          deletedAt: null,
-        },
-      });
-
-    if (!company) {
-      throw new BadRequestException(
-        'Company not found',
-      );
-    }
-
-    if (!createEmployeeDto.projectId) {
-      throw new BadRequestException(
-        'Employee must be assigned to an active project',
-      );
-    }
-
-    const project =
-      await this.prisma.project.findFirst({
-        where: {
-          id: createEmployeeDto.projectId,
-          companyId:
-            createEmployeeDto.companyId,
+          id: targetCompanyId,
           deletedAt: null,
           isActive: true,
         },
       });
 
-    if (!project) {
+    if (!company) {
       throw new BadRequestException(
-        'Project must be active',
+        'Company not found or inactive',
       );
+    }
+
+    let project: any = null;
+    const isBootstrapEmployee =
+      platformUser && !createEmployeeDto.projectId;
+
+    if (isBootstrapEmployee) {
+      const [
+        existingEmployees,
+        existingUsers,
+        existingProjects,
+      ] = await this.prisma.$transaction([
+        this.prisma.employee.count({
+          where: {
+            companyId: targetCompanyId,
+            deletedAt: null,
+          },
+        }),
+        this.prisma.user.count({
+          where: {
+            companyId: targetCompanyId,
+            deletedAt: null,
+          },
+        }),
+        this.prisma.project.count({
+          where: {
+            companyId: targetCompanyId,
+            deletedAt: null,
+          },
+        }),
+      ]);
+
+      if (
+        existingEmployees > 0 ||
+        existingUsers > 0 ||
+        existingProjects > 0
+      ) {
+        throw new BadRequestException(
+          'An employee without a project is allowed only as the first bootstrap Admin employee of a new company',
+        );
+      }
+    } else {
+      if (!createEmployeeDto.projectId) {
+        throw new BadRequestException(
+          'Employee must be assigned to an active project',
+        );
+      }
+
+      project =
+        await this.prisma.project.findFirst({
+          where: {
+            id: createEmployeeDto.projectId,
+            companyId: targetCompanyId,
+            deletedAt: null,
+            isActive: true,
+          },
+        });
+
+      if (!project) {
+        throw new BadRequestException(
+          'Project must be active and belong to the selected company',
+        );
+      }
     }
 
     const employeeId =
@@ -72,7 +142,7 @@ export class EmployeesService {
       await this.prisma.employee.findFirst({
         where: {
           companyId:
-            createEmployeeDto.companyId,
+            targetCompanyId,
           employeeId,
         },
       });
@@ -88,7 +158,7 @@ export class EmployeesService {
     return this.prisma.employee.create({
       data: {
         companyId:
-          createEmployeeDto.companyId,
+          targetCompanyId,
 
         employeeId,
 
@@ -104,15 +174,17 @@ export class EmployeesService {
           null,
 
         projectId:
-          createEmployeeDto.projectId,
+          project?.id || null,
 
         linkedUserId:
           createEmployeeDto.linkedUserId ||
           null,
 
         jobTitle:
-          createEmployeeDto.jobTitle ||
-          'Operator',
+          isBootstrapEmployee
+            ? 'Company Admin'
+            : createEmployeeDto.jobTitle ||
+              'Operator',
 
         status:
           createEmployeeDto.status ||

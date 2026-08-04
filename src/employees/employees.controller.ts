@@ -7,7 +7,13 @@ import {
   Patch,
   Post,
   Query,
+  Request,
+  UseGuards,
 } from '@nestjs/common';
+
+import { AuthGuard } from '@nestjs/passport';
+import { Roles } from '../auth/roles.decorator';
+import { RolesGuard } from '../auth/roles.guard';
 
 import { EmployeesService } from './employees.service';
 
@@ -20,12 +26,17 @@ export class EmployeesController {
     private readonly employeesService: EmployeesService,
   ) {}
 
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin', 'Platform User', 'PlatformAdmin')
   @Post()
   create(
     @Body() createEmployeeDto: CreateEmployeeDto,
+    @Request() req,
   ) {
     return this.employeesService.create(
       createEmployeeDto,
+      req.user.companyId,
+      req.user.roleName || req.user.role || req.user.roleNameNormalized,
     );
   }
 

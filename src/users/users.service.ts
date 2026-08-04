@@ -340,6 +340,58 @@ export class UsersService {
       linkedEmployeeId: createUserDto.linkedEmployeeId,
     });
 
+    if (this.isPlatformUser(actorRoleName)) {
+      const normalizedSelectedRole =
+        this.normalizeRoleName(selectedRole.name);
+
+      if (normalizedSelectedRole !== 'admin') {
+        throw new BadRequestException(
+          'Platform User can create only the first company Admin user',
+        );
+      }
+
+      if (employee.projectId) {
+        throw new BadRequestException(
+          'The bootstrap Admin employee must not be assigned to a project before the first project is created',
+        );
+      }
+
+      const [
+        existingUsers,
+        existingProjects,
+        bootstrapEmployees,
+      ] = await this.prisma.$transaction([
+        this.prisma.user.count({
+          where: {
+            companyId: targetCompanyId,
+            deletedAt: null,
+          },
+        }),
+        this.prisma.project.count({
+          where: {
+            companyId: targetCompanyId,
+            deletedAt: null,
+          },
+        }),
+        this.prisma.employee.count({
+          where: {
+            companyId: targetCompanyId,
+            deletedAt: null,
+          },
+        }),
+      ]);
+
+      if (
+        existingUsers > 0 ||
+        existingProjects > 0 ||
+        bootstrapEmployees !== 1
+      ) {
+        throw new BadRequestException(
+          'Bootstrap Admin user can be created only once for a new company with exactly one unassigned employee',
+        );
+      }
+    }
+
     const email = this.normalizeEmail(createUserDto.email || employee.email || undefined);
 
     if (this.isPlatformRoleName(selectedRole.name) && !email) {

@@ -9,8 +9,9 @@ export class CreateEmployeeDto {
 
   email?: string;
 
-  // REQUIRED
-  projectId: string;
+  // Required for normal employees.
+  // Optional only for the one-time Platform bootstrap Admin employee.
+  projectId?: string;
 
   linkedUserId?: string;
 
