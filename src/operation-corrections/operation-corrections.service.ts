@@ -816,6 +816,146 @@ export class OperationCorrectionsService {
       ],
     });
 
+    const assetIds = new Set<string>();
+    const stationIds = new Set<string>();
+    const userIds = new Set<string>();
+
+    for (const correction of rows) {
+      const oldValue = this.fromJsonValue(correction.oldValue);
+      const newValue = this.fromJsonValue(correction.newValue);
+      const values = [oldValue, newValue]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+
+      if (correction.fieldName === 'ASSET_ID') {
+        values.forEach((value) => assetIds.add(value));
+      }
+
+      if (
+        correction.fieldName === 'SOURCE_STATION_ID' ||
+        correction.fieldName === 'DESTINATION_STATION_ID'
+      ) {
+        values.forEach((value) => stationIds.add(value));
+      }
+
+      if (correction.fieldName === 'FUELER_ID') {
+        values.forEach((value) => userIds.add(value));
+      }
+    }
+
+    const [valueAssets, valueStations, valueUsers] = await Promise.all([
+      assetIds.size
+        ? (this.prisma as any).asset.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              id: { in: Array.from(assetIds) },
+            },
+            select: {
+              id: true,
+              assetId: true,
+              type: true,
+              category: true,
+            },
+          })
+        : Promise.resolve([]),
+      stationIds.size
+        ? (this.prisma as any).station.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              id: { in: Array.from(stationIds) },
+            },
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+            },
+          })
+        : Promise.resolve([]),
+      userIds.size
+        ? (this.prisma as any).user.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              id: { in: Array.from(userIds) },
+            },
+            select: {
+              id: true,
+              fullName: true,
+              email: true,
+              linkedEmployee: {
+                select: {
+                  employeeId: true,
+                  name: true,
+                },
+              },
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const assetValueLabels = new Map(
+      valueAssets.map((asset: any) => [
+        asset.id,
+        asset.assetId ||
+          asset.type ||
+          asset.category ||
+          asset.id,
+      ]),
+    );
+
+    const stationValueLabels = new Map(
+      valueStations.map((station: any) => [
+        station.id,
+        station.stationId ||
+          station.name ||
+          station.id,
+      ]),
+    );
+
+    const userValueLabels = new Map(
+      valueUsers.map((user: any) => [
+        user.id,
+        user.linkedEmployee?.name ||
+          user.fullName ||
+          user.linkedEmployee?.employeeId ||
+          user.email ||
+          user.id,
+      ]),
+    );
+
+    const getCorrectionValueLabel = (
+      fieldName: string,
+      rawValue: any,
+    ) => {
+      const normalizedValue = this.fromJsonValue(rawValue);
+
+      if (
+        normalizedValue === null ||
+        normalizedValue === undefined ||
+        normalizedValue === ''
+      ) {
+        return null;
+      }
+
+      const key = String(normalizedValue);
+
+      if (fieldName === 'ASSET_ID') {
+        return assetValueLabels.get(key) || key;
+      }
+
+      if (
+        fieldName === 'SOURCE_STATION_ID' ||
+        fieldName === 'DESTINATION_STATION_ID'
+      ) {
+        return stationValueLabels.get(key) || key;
+      }
+
+      if (fieldName === 'FUELER_ID') {
+        return userValueLabels.get(key) || key;
+      }
+
+      return normalizedValue;
+    };
+
     const data = rows.map((correction: any) => {
       const operation = correction.operation || {};
       const requestedBy = correction.requestedBy;
@@ -889,6 +1029,14 @@ export class OperationCorrectionsService {
         fieldName: correction.fieldName,
         oldValue: this.fromJsonValue(correction.oldValue),
         newValue: this.fromJsonValue(correction.newValue),
+        oldValueLabel: getCorrectionValueLabel(
+          correction.fieldName,
+          correction.oldValue,
+        ),
+        newValueLabel: getCorrectionValueLabel(
+          correction.fieldName,
+          correction.newValue,
+        ),
         reason: correction.reason || '-',
         status: correction.status,
         requestedByUserId:
