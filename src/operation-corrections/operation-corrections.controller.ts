@@ -12,6 +12,35 @@ export class OperationCorrectionsController {
     return this.service.create(dto, req);
   }
 
+  @Get('reports/corrections')
+  getOperationCorrectionsReport(
+    @Req() req: any,
+    @Query('companyId') companyId?: string,
+    @Query('projectId') projectId?: string,
+    @Query('operationNo') operationNo?: string,
+    @Query('status') status?: string,
+    @Query('requestedByUserId') requestedByUserId?: string,
+    @Query('fieldName') fieldName?: string,
+    @Query('operationType') operationType?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    return this.service.getOperationCorrectionsReport(
+      {
+        companyId,
+        projectId,
+        operationNo,
+        status,
+        requestedByUserId,
+        fieldName,
+        operationType,
+        dateFrom,
+        dateTo,
+      },
+      req,
+    );
+  }
+
   @Get('reports/odometer-history')
   getOdometerCorrectionHistory(
     @Query('companyId') companyId?: string,

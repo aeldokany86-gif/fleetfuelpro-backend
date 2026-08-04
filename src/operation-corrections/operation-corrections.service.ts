@@ -553,6 +553,390 @@ export class OperationCorrectionsService {
     };
   }
 
+  async getOperationCorrectionsReport(
+    filters: {
+      companyId?: string;
+      projectId?: string;
+      operationNo?: string;
+      status?: string;
+      requestedByUserId?: string;
+      fieldName?: string;
+      operationType?: string;
+      dateFrom?: string;
+      dateTo?: string;
+    },
+    request?: RequestLike,
+  ) {
+    const currentUser = await this.resolveCurrentUser(request);
+
+    if (
+      !['Manager', 'Admin', 'TopManagement', 'PlatformAdmin'].includes(
+        currentUser.role,
+      )
+    ) {
+      throw new ForbiddenException(
+        'You do not have permission to view operation correction reports.',
+      );
+    }
+
+    const requestedCompanyId = String(filters.companyId || '').trim();
+
+    if (
+      requestedCompanyId &&
+      requestedCompanyId !== currentUser.companyId
+    ) {
+      throw new ForbiddenException(
+        'Operation correction report can only be generated for your company.',
+      );
+    }
+
+    const parseReportDate = (
+      value: string | undefined,
+      fieldName: string,
+      endOfDay = false,
+    ) => {
+      const raw = String(value || '').trim();
+      if (!raw) return undefined;
+
+      const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+      const parsed = new Date(
+        dateOnly
+          ? `${raw}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}`
+          : raw,
+      );
+
+      if (Number.isNaN(parsed.getTime())) {
+        throw new BadRequestException(`Invalid ${fieldName}.`);
+      }
+
+      return parsed;
+    };
+
+    const dateFrom = parseReportDate(filters.dateFrom, 'dateFrom');
+    const dateTo = parseReportDate(filters.dateTo, 'dateTo', true);
+
+    if (dateFrom && dateTo && dateFrom.getTime() > dateTo.getTime()) {
+      throw new BadRequestException(
+        'Date From cannot be later than Date To.',
+      );
+    }
+
+    const status = String(filters.status || '')
+      .trim()
+      .toUpperCase();
+    const operationType = String(filters.operationType || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+    const operationNo = String(filters.operationNo || '').trim();
+    const requestedByUserId = String(
+      filters.requestedByUserId || '',
+    ).trim();
+    const projectId = String(filters.projectId || '').trim();
+
+    const fieldName = filters.fieldName
+      ? this.normalizeCorrectionField(filters.fieldName)
+      : undefined;
+
+    const allowedStatuses = [
+      'PENDING',
+      'APPROVED',
+      'APPLIED',
+      'REJECTED',
+    ];
+
+    if (status && !allowedStatuses.includes(status)) {
+      throw new BadRequestException(
+        `Unsupported correction status: ${filters.status}`,
+      );
+    }
+
+    const managerProjectFilter =
+      currentUser.role === 'Manager'
+        ? {
+            OR: [
+              {
+                projectIdAtOperation: {
+                  in: currentUser.managedProjectIds,
+                },
+              },
+              {
+                sourceProjectIdAtOperation: {
+                  in: currentUser.managedProjectIds,
+                },
+              },
+              {
+                destinationProjectIdAtOperation: {
+                  in: currentUser.managedProjectIds,
+                },
+              },
+            ],
+          }
+        : {};
+
+    const selectedProjectFilter = projectId
+      ? {
+          OR: [
+            { projectIdAtOperation: projectId },
+            { sourceProjectIdAtOperation: projectId },
+            { destinationProjectIdAtOperation: projectId },
+          ],
+        }
+      : {};
+
+    const operationAndFilters: any[] = [];
+
+    if (Object.keys(managerProjectFilter).length) {
+      operationAndFilters.push(managerProjectFilter);
+    }
+
+    if (Object.keys(selectedProjectFilter).length) {
+      operationAndFilters.push(selectedProjectFilter);
+    }
+
+    const rows = await (this.prisma as any).operationCorrection.findMany({
+      where: {
+        companyId: currentUser.companyId,
+        ...(status ? { status } : {}),
+        ...(fieldName ? { fieldName } : {}),
+        ...(requestedByUserId ? { requestedByUserId } : {}),
+        ...(dateFrom || dateTo
+          ? {
+              createdAt: {
+                ...(dateFrom ? { gte: dateFrom } : {}),
+                ...(dateTo ? { lte: dateTo } : {}),
+              },
+            }
+          : {}),
+        operation: {
+          ...(operationNo
+            ? {
+                operationNo: {
+                  contains: operationNo,
+                  mode: 'insensitive',
+                },
+              }
+            : {}),
+          ...(operationType ? { type: operationType } : {}),
+          ...(operationAndFilters.length
+            ? { AND: operationAndFilters }
+            : {}),
+        },
+      },
+      select: {
+        id: true,
+        companyId: true,
+        operationId: true,
+        fieldName: true,
+        oldValue: true,
+        newValue: true,
+        reason: true,
+        status: true,
+        reviewNote: true,
+        requestedByUserId: true,
+        reviewedByUserId: true,
+        createdAt: true,
+        reviewedAt: true,
+        appliedAt: true,
+        rejectedAt: true,
+        requestedBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        reviewedBy: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+          },
+        },
+        operation: {
+          select: {
+            id: true,
+            operationNo: true,
+            type: true,
+            status: true,
+            createdAt: true,
+            completedAt: true,
+            projectIdAtOperation: true,
+            projectNameAtOperation: true,
+            sourceProjectIdAtOperation: true,
+            sourceProjectNameAtOperation: true,
+            destinationProjectIdAtOperation: true,
+            destinationProjectNameAtOperation: true,
+            assetId: true,
+            sourceStationId: true,
+            destinationStationId: true,
+            requestedByUserId: true,
+            asset: {
+              select: {
+                id: true,
+                assetId: true,
+                type: true,
+                category: true,
+              },
+            },
+            sourceStation: {
+              select: {
+                id: true,
+                stationId: true,
+                name: true,
+              },
+            },
+            destinationStation: {
+              select: {
+                id: true,
+                stationId: true,
+                name: true,
+              },
+            },
+            requestedBy: {
+              select: {
+                id: true,
+                fullName: true,
+                email: true,
+                linkedEmployee: {
+                  select: {
+                    id: true,
+                    employeeId: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      orderBy: [
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+    });
+
+    const data = rows.map((correction: any) => {
+      const operation = correction.operation || {};
+      const requestedBy = correction.requestedBy;
+      const reviewedBy = correction.reviewedBy;
+      const operationFueler = operation.requestedBy;
+      const linkedEmployee = operationFueler?.linkedEmployee;
+
+      return {
+        id: correction.id,
+        correctionId: correction.id,
+        companyId: correction.companyId,
+        operationBackendId:
+          operation.id || correction.operationId,
+        operationNo:
+          operation.operationNo || correction.operationId || '-',
+        operationType: operation.type || '-',
+        operationStatus: operation.status || '-',
+        operationDate:
+          operation.completedAt ||
+          operation.createdAt ||
+          null,
+        projectId:
+          operation.projectIdAtOperation ||
+          operation.sourceProjectIdAtOperation ||
+          operation.destinationProjectIdAtOperation ||
+          null,
+        projectName:
+          operation.projectNameAtOperation ||
+          operation.sourceProjectNameAtOperation ||
+          operation.destinationProjectNameAtOperation ||
+          '-',
+        sourceProjectId:
+          operation.sourceProjectIdAtOperation || null,
+        sourceProjectName:
+          operation.sourceProjectNameAtOperation || null,
+        destinationProjectId:
+          operation.destinationProjectIdAtOperation || null,
+        destinationProjectName:
+          operation.destinationProjectNameAtOperation || null,
+        assetBackendId:
+          operation.asset?.id || operation.assetId || null,
+        assetId:
+          operation.asset?.assetId || operation.assetId || null,
+        sourceStationBackendId:
+          operation.sourceStation?.id ||
+          operation.sourceStationId ||
+          null,
+        sourceStation:
+          operation.sourceStation?.name ||
+          operation.sourceStation?.stationId ||
+          null,
+        destinationStationBackendId:
+          operation.destinationStation?.id ||
+          operation.destinationStationId ||
+          null,
+        destinationStation:
+          operation.destinationStation?.name ||
+          operation.destinationStation?.stationId ||
+          null,
+        fuelerUserId:
+          operationFueler?.id ||
+          operation.requestedByUserId ||
+          null,
+        fuelerEmployeeId:
+          linkedEmployee?.employeeId || null,
+        fuelerName:
+          linkedEmployee?.name ||
+          operationFueler?.fullName ||
+          operationFueler?.email ||
+          '-',
+        fieldName: correction.fieldName,
+        oldValue: this.fromJsonValue(correction.oldValue),
+        newValue: this.fromJsonValue(correction.newValue),
+        reason: correction.reason || '-',
+        status: correction.status,
+        requestedByUserId:
+          requestedBy?.id ||
+          correction.requestedByUserId ||
+          null,
+        requestedBy:
+          requestedBy?.fullName ||
+          requestedBy?.email ||
+          '-',
+        requestDate: correction.createdAt,
+        reviewedByUserId:
+          reviewedBy?.id ||
+          correction.reviewedByUserId ||
+          null,
+        reviewedBy:
+          reviewedBy?.fullName ||
+          reviewedBy?.email ||
+          null,
+        reviewNote: correction.reviewNote || null,
+        reviewedAt: correction.reviewedAt,
+        appliedAt: correction.appliedAt,
+        rejectedAt: correction.rejectedAt,
+      };
+    });
+
+    const summary = {
+      total: data.length,
+      pending: data.filter(
+        (row: any) => row.status === 'PENDING',
+      ).length,
+      approved: data.filter(
+        (row: any) => row.status === 'APPROVED',
+      ).length,
+      applied: data.filter(
+        (row: any) => row.status === 'APPLIED',
+      ).length,
+      rejected: data.filter(
+        (row: any) => row.status === 'REJECTED',
+      ).length,
+    };
+
+    return {
+      summary,
+      data,
+    };
+  }
+
   async getOdometerCorrectionHistoryReport(filters: {
     companyId?: string;
     projectId?: string;
