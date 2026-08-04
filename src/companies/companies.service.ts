@@ -299,6 +299,199 @@ export class CompaniesService {
     });
   }
 
+  async getMasterReport(filters: {
+    companyId?: string;
+    status?: string;
+    createdFrom?: string;
+    createdTo?: string;
+  }) {
+    const status = String(filters.status || '').trim().toUpperCase();
+
+    if (status && !['ACTIVE', 'INACTIVE'].includes(status)) {
+      throw new BadRequestException(
+        'Status must be ACTIVE or INACTIVE',
+      );
+    }
+
+    const createdAt: {
+      gte?: Date;
+      lte?: Date;
+    } = {};
+
+    if (filters.createdFrom) {
+      const from = new Date(`${filters.createdFrom}T00:00:00.000Z`);
+
+      if (Number.isNaN(from.getTime())) {
+        throw new BadRequestException('Invalid createdFrom date');
+      }
+
+      createdAt.gte = from;
+    }
+
+    if (filters.createdTo) {
+      const to = new Date(`${filters.createdTo}T23:59:59.999Z`);
+
+      if (Number.isNaN(to.getTime())) {
+        throw new BadRequestException('Invalid createdTo date');
+      }
+
+      createdAt.lte = to;
+    }
+
+    if (
+      createdAt.gte &&
+      createdAt.lte &&
+      createdAt.gte.getTime() > createdAt.lte.getTime()
+    ) {
+      throw new BadRequestException(
+        'createdFrom cannot be later than createdTo',
+      );
+    }
+
+    const companies = await this.prisma.company.findMany({
+      where: {
+        deletedAt: null,
+        ...(filters.companyId ? { id: filters.companyId } : {}),
+        ...(status === 'ACTIVE'
+          ? { isActive: true }
+          : status === 'INACTIVE'
+            ? { isActive: false }
+            : {}),
+        ...(Object.keys(createdAt).length ? { createdAt } : {}),
+      },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        country: true,
+        currency: true,
+        timezone: true,
+        language: true,
+        subscriptionPlan: true,
+        isActive: true,
+        createdAt: true,
+        _count: {
+          select: {
+            projects: {
+              where: {
+                deletedAt: null,
+              },
+            },
+            users: {
+              where: {
+                deletedAt: null,
+              },
+            },
+            employees: {
+              where: {
+                deletedAt: null,
+              },
+            },
+            assets: {
+              where: {
+                deletedAt: null,
+              },
+            },
+            stations: {
+              where: {
+                deletedAt: null,
+              },
+            },
+            operations: {
+              where: {
+                status: 'COMPLETED',
+              },
+            },
+          },
+        },
+      },
+      orderBy: [
+        {
+          name: 'asc',
+        },
+        {
+          createdAt: 'desc',
+        },
+      ],
+    });
+
+    const companyIds = companies.map((company) => company.id);
+
+    const fuelTotals = companyIds.length
+      ? await this.prisma.operation.groupBy({
+          by: ['companyId'],
+          where: {
+            companyId: {
+              in: companyIds,
+            },
+            status: 'COMPLETED',
+            type: {
+              in: ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'],
+            },
+          },
+          _sum: {
+            quantity: true,
+          },
+        })
+      : [];
+
+    const totalsByCompany = new Map(
+      fuelTotals.map((item) => [
+        item.companyId,
+        {
+          totalFuelConsumed: Number(item._sum.quantity || 0),
+        },
+      ]),
+    );
+
+    const rows = companies.map((company) => {
+      const operationTotals = totalsByCompany.get(company.id) || {
+        totalFuelConsumed: 0,
+      };
+
+      return {
+        companyId: company.id,
+        companyCode: company.code,
+        companyName: company.name,
+        status: company.isActive ? 'ACTIVE' : 'INACTIVE',
+        country: company.country,
+        currency: company.currency,
+        timezone: company.timezone,
+        language: company.language,
+        subscriptionPlan: company.subscriptionPlan,
+        createdAt: company.createdAt,
+        projectsCount: company._count.projects,
+        usersCount: company._count.users,
+        employeesCount: company._count.employees,
+        assetsCount: company._count.assets,
+        stationsCount: company._count.stations,
+        fuelOperationsCount: company._count.operations,
+        totalFuelConsumed: operationTotals.totalFuelConsumed,
+      };
+    });
+
+    return {
+      summary: {
+        totalCompanies: rows.length,
+        activeCompanies: rows.filter(
+          (row) => row.status === 'ACTIVE',
+        ).length,
+        inactiveCompanies: rows.filter(
+          (row) => row.status === 'INACTIVE',
+        ).length,
+        totalProjects: rows.reduce(
+          (total, row) => total + row.projectsCount,
+          0,
+        ),
+        totalFuelConsumed: rows.reduce(
+          (total, row) => total + row.totalFuelConsumed,
+          0,
+        ),
+      },
+      rows,
+    };
+  }
+
   async create(dto: CreateCompanyDto) {
     const existingCompany = await this.prisma.company.findFirst({
       where: {

@@ -5,6 +5,7 @@ import {
   Patch,
   Param,
   Body,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 
@@ -36,6 +37,23 @@ export class CompaniesController {
   @Get()
   async findAll() {
     return this.companiesService.findAll();
+  }
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Platform User')
+  @Get('reports/master')
+  async getMasterReport(
+    @Query('companyId') companyId?: string,
+    @Query('status') status?: string,
+    @Query('createdFrom') createdFrom?: string,
+    @Query('createdTo') createdTo?: string,
+  ) {
+    return this.companiesService.getMasterReport({
+      companyId,
+      status,
+      createdFrom,
+      createdTo,
+    });
   }
 
   @UseGuards(AuthGuard('jwt'), RolesGuard)
