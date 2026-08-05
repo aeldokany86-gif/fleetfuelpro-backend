@@ -132,6 +132,7 @@ model User {
   passwordHash                  String
   isActive                      Boolean                    @default(true)
   mustChangePassword            Boolean                    @default(false)
+  preferredLanguage             String                     @default("en")
   lastLoginAt                   DateTime?
   createdById                   String?
   createdAt                     DateTime                   @default(now())

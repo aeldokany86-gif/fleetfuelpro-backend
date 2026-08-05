@@ -46,6 +46,18 @@ export class AuthController {
   }
 
   @UseGuards(AuthGuard('jwt'))
+  @Patch('preferences')
+  async updatePreferences(
+    @Req() req: any,
+    @Body() body: { preferredLanguage?: string },
+  ) {
+    return this.authService.updatePreferences(
+      req.user.userId,
+      body.preferredLanguage,
+    );
+  }
+
+  @UseGuards(AuthGuard('jwt'))
   @Patch('change-password')
   async changePassword(
     @Req() req: any,

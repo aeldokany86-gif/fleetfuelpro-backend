@@ -90,6 +90,20 @@ export class AuthService {
       .toLowerCase();
   }
 
+  private normalizePreferredLanguage(language?: string) {
+    const normalizedLanguage = String(language || '')
+      .trim()
+      .toLowerCase();
+
+    if (!['en', 'ar'].includes(normalizedLanguage)) {
+      throw new BadRequestException(
+        'Preferred language must be either en or ar',
+      );
+    }
+
+    return normalizedLanguage;
+  }
+
   private buildAuthInclude() {
     return {
       company: true,
@@ -233,6 +247,7 @@ export class AuthService {
         employeeId: true,
         isActive: true,
         mustChangePassword: true,
+        preferredLanguage: true,
         lastLoginAt: true,
         deletedAt: true,
       },
@@ -261,6 +276,7 @@ export class AuthService {
         employeeId: true,
         isActive: true,
         mustChangePassword: true,
+        preferredLanguage: true,
         lastLoginAt: true,
         deletedAt: true,
       },
@@ -504,6 +520,53 @@ export class AuthService {
     }
   }
 
+  async updatePreferences(
+    userId: string,
+    preferredLanguage?: string,
+  ) {
+    const normalizedLanguage =
+      this.normalizePreferredLanguage(preferredLanguage);
+
+    const user = await this.prisma.user.findFirst({
+      where: {
+        id: userId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        isActive: true,
+      },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    if (!user.isActive) {
+      throw new UnauthorizedException(
+        'Your account is inactive. Please contact your administrator.',
+      );
+    }
+
+    const updatedUser = await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        preferredLanguage: normalizedLanguage,
+      },
+      select: {
+        id: true,
+        preferredLanguage: true,
+        updatedAt: true,
+      },
+    });
+
+    return {
+      success: true,
+      preferredLanguage: updatedUser.preferredLanguage,
+      updatedAt: updatedUser.updatedAt,
+    };
+  }
+
   async changePassword(
     userId: string,
     currentPassword: string,
@@ -735,6 +798,7 @@ export class AuthService {
       permissions,
       isActive: user.isActive,
       mustChangePassword: user.mustChangePassword,
+      preferredLanguage: user.preferredLanguage || 'en',
       lastLoginAt: user.lastLoginAt || null,
       requiresFirstProject: setupState.requiresFirstProject,
       requiredSetupStep: setupState.requiredSetupStep,
