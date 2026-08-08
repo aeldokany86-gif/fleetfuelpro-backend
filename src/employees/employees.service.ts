@@ -39,6 +39,55 @@ export class EmployeesService {
       .toUpperCase();
   }
 
+  async checkEmployeeIdAvailability(
+    employeeIdValue: string,
+    requestedCompanyId: string | undefined,
+    actorCompanyId: string,
+    actorRoleName: string,
+  ) {
+    const employeeId = this.normalizeEmployeeId(employeeIdValue);
+
+    if (!employeeId) {
+      throw new BadRequestException('Employee ID is required');
+    }
+
+    const platformUser = this.isPlatformUser(actorRoleName);
+    const targetCompanyId = platformUser
+      ? requestedCompanyId
+      : actorCompanyId;
+
+    if (!targetCompanyId) {
+      throw new BadRequestException('Company ID is required');
+    }
+
+    const duplicate = await this.prisma.employee.findFirst({
+      where: {
+        companyId: targetCompanyId,
+        employeeId,
+      },
+      select: {
+        id: true,
+        deletedAt: true,
+      },
+    });
+
+    if (!duplicate) {
+      return {
+        employeeId,
+        available: true,
+        status: 'AVAILABLE',
+      };
+    }
+
+    return {
+      employeeId,
+      available: false,
+      status: duplicate.deletedAt
+        ? 'PREVIOUSLY_USED'
+        : 'ACTIVE_DUPLICATE',
+    };
+  }
+
   async create(
     createEmployeeDto: CreateEmployeeDto,
     actorCompanyId: string,

@@ -81,6 +81,22 @@ export class EmployeesController {
     });
   }
 
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin', 'Platform User', 'PlatformAdmin')
+  @Get('check-id')
+  checkEmployeeId(
+    @Query('employeeId') employeeId: string,
+    @Query('companyId') companyId: string | undefined,
+    @Request() req,
+  ) {
+    return this.employeesService.checkEmployeeIdAvailability(
+      employeeId,
+      companyId,
+      req.user.companyId,
+      req.user.roleName || req.user.role || req.user.roleNameNormalized,
+    );
+  }
+
   @Get(':id')
   findOne(
     @Param('id') id: string,
