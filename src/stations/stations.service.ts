@@ -78,6 +78,64 @@ export class StationsService {
     return requester;
   }
 
+  private async ensureStationActionDirectPermission(
+    station: any,
+    userId: string | undefined,
+    actionType: 'ZERO_BALANCE' | 'INVENTORY_ADJUSTMENT' | 'COUNTER_RESET',
+  ) {
+    if (!userId) {
+      throw new BadRequestException('Actor user is required');
+    }
+
+    const actor = await this.getRequester(userId, station.companyId);
+    const roleName = actor.role?.name || '';
+
+    if (actionType === 'INVENTORY_ADJUSTMENT') {
+      if (!this.isAdminRole(roleName)) {
+        throw new BadRequestException(
+          'Inventory adjustment requires Admin approval',
+        );
+      }
+      return actor;
+    }
+
+    if (this.isAdminRole(roleName)) {
+      return actor;
+    }
+
+    if (!this.isManagerRole(roleName)) {
+      throw new BadRequestException(
+        'Only the assigned Project Manager or Admin can execute this station action directly',
+      );
+    }
+
+    const projectManagerId =
+      station.project?.projectManagerId ||
+      (station.projectId
+        ? (
+            await this.prisma.project.findFirst({
+              where: {
+                id: station.projectId,
+                companyId: station.companyId,
+                deletedAt: null,
+                isActive: true,
+              },
+              select: {
+                projectManagerId: true,
+              },
+            })
+          )?.projectManagerId
+        : null);
+
+    if (!projectManagerId || projectManagerId !== userId) {
+      throw new BadRequestException(
+        'Only the assigned Project Manager can execute this station action directly',
+      );
+    }
+
+    return actor;
+  }
+
   private buildUniqueApprovers(
     approvers: Array<{
       approverUserId: string;
@@ -511,11 +569,20 @@ export class StationsService {
         id,
         deletedAt: null,
       },
+      include: {
+        project: true,
+      },
     });
 
     if (!station) {
       throw new NotFoundException('Station not found');
     }
+
+    await this.ensureStationActionDirectPermission(
+      station,
+      body.createdByUserId,
+      'COUNTER_RESET',
+    );
 
     const newCounter = Number(body.newCounter);
     if (!Number.isFinite(newCounter) || newCounter < 0) {
@@ -533,6 +600,12 @@ export class StationsService {
     if (effectiveAt.getTime() < station.createdAt.getTime()) {
       throw new BadRequestException(
         'Reset effective date cannot be before the station creation date',
+      );
+    }
+
+    if (effectiveAt.getTime() > Date.now()) {
+      throw new BadRequestException(
+        'Reset effective date cannot be in the future',
       );
     }
 
@@ -1583,6 +1656,26 @@ export class StationsService {
       throw new BadRequestException('Inventory adjustment reason is required');
     }
 
+    const permissionStation = await this.prisma.station.findFirst({
+      where: {
+        id: stationId,
+        deletedAt: null,
+      },
+      include: {
+        project: true,
+      },
+    });
+
+    if (!permissionStation) {
+      throw new NotFoundException('Station not found');
+    }
+
+    await this.ensureStationActionDirectPermission(
+      permissionStation,
+      body.createdByUserId,
+      'INVENTORY_ADJUSTMENT',
+    );
+
     const movementAt = this.parseOptionalDate(body.movementAt);
 
     return this.prisma.$transaction(
@@ -1658,6 +1751,26 @@ export class StationsService {
       throw new BadRequestException('Zero balance reason is required');
     }
 
+    const permissionStation = await this.prisma.station.findFirst({
+      where: {
+        id: stationId,
+        deletedAt: null,
+      },
+      include: {
+        project: true,
+      },
+    });
+
+    if (!permissionStation) {
+      throw new NotFoundException('Station not found');
+    }
+
+    await this.ensureStationActionDirectPermission(
+      permissionStation,
+      body.createdByUserId,
+      'ZERO_BALANCE',
+    );
+
     const movementAt = this.parseOptionalDate(body.movementAt);
 
     return this.prisma.$transaction(
@@ -1675,7 +1788,7 @@ export class StationsService {
 
         const balanceBefore = Number(station.currentStock || 0);
 
-        if (balanceBefore <= 0) {
+        if (balanceBefore === 0) {
           throw new BadRequestException(
             'Current station stock is already zero',
           );
@@ -1722,6 +1835,655 @@ export class StationsService {
         maxWait: 10000,
         timeout: 20000,
       },
+    );
+  }
+
+  async createActionRequest(
+    stationId: string,
+    body: {
+      actionType: string;
+      requestedByUserId: string;
+      reason: string;
+      actualStock?: number;
+      newCounter?: number;
+      effectiveAt?: string;
+      movementAt?: string;
+    },
+  ) {
+    const actionType = String(body.actionType || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+
+    if (
+      !['ZERO_BALANCE', 'INVENTORY_ADJUSTMENT', 'COUNTER_RESET'].includes(
+        actionType,
+      )
+    ) {
+      throw new BadRequestException('Unsupported station action request type');
+    }
+
+    if (!body.requestedByUserId) {
+      throw new BadRequestException('Requester user is required');
+    }
+
+    if (!body.reason?.trim()) {
+      throw new BadRequestException('Request reason is required');
+    }
+
+    const station = await this.prisma.station.findFirst({
+      where: {
+        id: stationId,
+        deletedAt: null,
+      },
+      include: {
+        project: true,
+      },
+    });
+
+    if (!station) {
+      throw new NotFoundException('Station not found');
+    }
+
+    if (!station.projectId || !station.project) {
+      throw new BadRequestException(
+        'Station must be assigned to an active project before submitting this request',
+      );
+    }
+
+    const requester = await this.getRequester(
+      body.requestedByUserId,
+      station.companyId,
+    );
+    const requesterRoleName = requester.role?.name || '';
+
+    if (actionType === 'INVENTORY_ADJUSTMENT') {
+      if (!this.isManagerRole(requesterRoleName)) {
+        throw new BadRequestException(
+          'Only the assigned Project Manager can submit an inventory adjustment request',
+        );
+      }
+
+      if (station.project.projectManagerId !== body.requestedByUserId) {
+        throw new BadRequestException(
+          'Only the assigned Project Manager can submit an inventory adjustment request for this station',
+        );
+      }
+    } else {
+      if (!this.isOfficerRole(requesterRoleName)) {
+        throw new BadRequestException(
+          'Only Officer can submit this station action request',
+        );
+      }
+
+      if (!station.project.projectManagerId) {
+        throw new BadRequestException(
+          'Station project has no assigned Project Manager',
+        );
+      }
+    }
+
+    let requestedActualStock: number | null = null;
+    let requestedCounter: number | null = null;
+    let effectiveAt: Date | null = null;
+    let movementAt: Date | null = null;
+
+    if (actionType === 'INVENTORY_ADJUSTMENT') {
+      requestedActualStock = Number(body.actualStock);
+      if (
+        !Number.isFinite(requestedActualStock) ||
+        requestedActualStock < 0
+      ) {
+        throw new BadRequestException(
+          'Actual stock must be a valid zero or positive number',
+        );
+      }
+      movementAt = body.movementAt
+        ? this.parseOptionalDate(body.movementAt)
+        : new Date();
+    }
+
+    if (actionType === 'ZERO_BALANCE') {
+      if (Number(station.currentStock || 0) === 0) {
+        throw new BadRequestException('Current station stock is already zero');
+      }
+      movementAt = body.movementAt
+        ? this.parseOptionalDate(body.movementAt)
+        : new Date();
+    }
+
+    if (actionType === 'COUNTER_RESET') {
+      requestedCounter = Number(body.newCounter);
+      if (!Number.isFinite(requestedCounter) || requestedCounter < 0) {
+        throw new BadRequestException(
+          'New counter must be a valid zero or positive number',
+        );
+      }
+
+      effectiveAt = body.effectiveAt
+        ? this.parseOptionalDate(body.effectiveAt)
+        : new Date();
+
+      if (effectiveAt.getTime() < station.createdAt.getTime()) {
+        throw new BadRequestException(
+          'Reset effective date cannot be before the station creation date',
+        );
+      }
+
+      if (effectiveAt.getTime() > Date.now()) {
+        throw new BadRequestException(
+          'Reset effective date cannot be in the future',
+        );
+      }
+    }
+
+    const conflictingActionTypes =
+      actionType === 'COUNTER_RESET'
+        ? ['COUNTER_RESET']
+        : ['ZERO_BALANCE', 'INVENTORY_ADJUSTMENT'];
+
+    const existingPending = await this.prisma.stationActionRequest.findFirst({
+      where: {
+        stationId,
+        status: 'PENDING',
+        actionType: {
+          in: conflictingActionTypes as any,
+        },
+      },
+    });
+
+    if (existingPending) {
+      throw new BadRequestException(
+        'A pending station action request already exists for this station',
+      );
+    }
+
+    return this.prisma.stationActionRequest.create({
+      data: {
+        companyId: station.companyId,
+        stationId: station.id,
+        projectId: station.projectId,
+        requestedByUserId: body.requestedByUserId,
+        actionType: actionType as any,
+        status: 'PENDING' as any,
+        reason: body.reason.trim(),
+        requestedActualStock,
+        requestedCounter,
+        effectiveAt,
+        movementAt,
+      },
+      include: {
+        station: {
+          include: {
+            project: true,
+          },
+        },
+        project: true,
+        requestedBy: {
+          include: {
+            role: true,
+          },
+        },
+        reviewedBy: {
+          include: {
+            role: true,
+          },
+        },
+      },
+    });
+  }
+
+  async getActionRequests(
+    userId: string,
+    status?: string,
+  ) {
+    if (!userId) {
+      throw new BadRequestException('User ID is required');
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: {
+        id: userId,
+        deletedAt: null,
+        isActive: true,
+      },
+      include: {
+        role: true,
+      },
+    });
+
+    if (!user) {
+      throw new BadRequestException('User is invalid or inactive');
+    }
+
+    const roleName = user.role?.name || '';
+    const normalizedStatus = String(status || '')
+      .trim()
+      .toUpperCase();
+
+    if (
+      normalizedStatus &&
+      !['PENDING', 'PROCESSING', 'APPROVED', 'REJECTED'].includes(
+        normalizedStatus,
+      )
+    ) {
+      throw new BadRequestException('Invalid station action request status');
+    }
+
+    const visibility: any[] = [
+      {
+        requestedByUserId: user.id,
+      },
+    ];
+
+    if (this.isAdminRole(roleName)) {
+      visibility.push({
+        companyId: user.companyId,
+      });
+    } else if (this.isManagerRole(roleName)) {
+      visibility.push({
+        project: {
+          is: {
+            projectManagerId: user.id,
+          },
+        },
+        actionType: {
+          in: ['ZERO_BALANCE', 'COUNTER_RESET'] as any,
+        },
+      });
+    }
+
+    return this.prisma.stationActionRequest.findMany({
+      where: {
+        companyId: user.companyId,
+        ...(normalizedStatus
+          ? {
+              status: normalizedStatus as any,
+            }
+          : {}),
+        OR: visibility,
+      },
+      include: {
+        station: {
+          include: {
+            project: true,
+          },
+        },
+        project: true,
+        requestedBy: {
+          include: {
+            role: true,
+          },
+        },
+        reviewedBy: {
+          include: {
+            role: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+  }
+
+  async reviewActionRequest(
+    requestId: string,
+    body: {
+      reviewerUserId: string;
+      approve: boolean;
+      reviewNote?: string;
+    },
+  ) {
+    if (!body.reviewerUserId) {
+      throw new BadRequestException('Reviewer user is required');
+    }
+
+    const request = await this.prisma.stationActionRequest.findFirst({
+      where: {
+        id: requestId,
+      },
+      include: {
+        station: {
+          include: {
+            project: true,
+          },
+        },
+        project: true,
+        requestedBy: {
+          include: {
+            role: true,
+          },
+        },
+      },
+    });
+
+    if (!request) {
+      throw new NotFoundException('Station action request not found');
+    }
+
+    if (request.status !== 'PENDING') {
+      throw new BadRequestException('Station action request already reviewed');
+    }
+
+    const reviewer = await this.getRequester(
+      body.reviewerUserId,
+      request.companyId,
+    );
+    const reviewerRoleName = reviewer.role?.name || '';
+    const actionType = String(request.actionType || '').toUpperCase();
+
+    if (actionType === 'INVENTORY_ADJUSTMENT') {
+      if (!this.isAdminRole(reviewerRoleName)) {
+        throw new BadRequestException(
+          'Only Admin can review an inventory adjustment request',
+        );
+      }
+    } else {
+      if (!this.isManagerRole(reviewerRoleName)) {
+        throw new BadRequestException(
+          'Only the assigned Project Manager can review this station request',
+        );
+      }
+
+      const assignedManagerId =
+        request.station?.project?.projectManagerId ||
+        request.project?.projectManagerId ||
+        null;
+
+      if (!assignedManagerId || assignedManagerId !== body.reviewerUserId) {
+        throw new BadRequestException(
+          'Only the assigned Project Manager can review this station request',
+        );
+      }
+    }
+
+    const now = new Date();
+    const reviewNote = String(body.reviewNote || '').trim();
+
+    if (!body.approve) {
+      return this.prisma.$transaction(
+        async (tx) => {
+          const claimed = await tx.stationActionRequest.updateMany({
+            where: {
+              id: requestId,
+              status: 'PENDING' as any,
+            },
+            data: {
+              status: 'REJECTED' as any,
+              reviewedByUserId: body.reviewerUserId,
+              reviewNote: reviewNote || 'Rejected',
+              reviewedAt: now,
+              rejectedAt: now,
+            },
+          });
+
+          if (claimed.count !== 1) {
+            throw new BadRequestException(
+              'Station action request already reviewed',
+            );
+          }
+
+          return tx.stationActionRequest.findUnique({
+            where: {
+              id: requestId,
+            },
+            include: {
+              station: {
+                include: {
+                  project: true,
+                },
+              },
+              project: true,
+              requestedBy: {
+                include: {
+                  role: true,
+                },
+              },
+              reviewedBy: {
+                include: {
+                  role: true,
+                },
+              },
+            },
+          });
+        },
+        { maxWait: 5000, timeout: 20000 },
+      );
+    }
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        const claimed = await tx.stationActionRequest.updateMany({
+          where: {
+            id: requestId,
+            status: 'PENDING' as any,
+          },
+          data: {
+            status: 'PROCESSING' as any,
+            reviewedByUserId: body.reviewerUserId,
+            reviewNote: reviewNote || 'Approved',
+            reviewedAt: now,
+          },
+        });
+
+        if (claimed.count !== 1) {
+          throw new BadRequestException(
+            'Station action request already reviewed',
+          );
+        }
+
+        const station = await tx.station.findFirst({
+          where: {
+            id: request.stationId,
+            deletedAt: null,
+          },
+        });
+
+        if (!station) {
+          throw new NotFoundException('Station not found');
+        }
+
+        let actionResult: any = null;
+
+        if (actionType === 'ZERO_BALANCE') {
+          const balanceBefore = Number(station.currentStock || 0);
+
+          if (balanceBefore === 0) {
+            throw new BadRequestException(
+              'Current station stock is already zero',
+            );
+          }
+
+          const movementAt = request.movementAt || now;
+          const quantity = -balanceBefore;
+
+          const movement = await tx.stationStockMovement.create({
+            data: {
+              stationId: station.id,
+              companyId: station.companyId,
+              movementType: 'ZERO_BALANCE' as any,
+              quantity,
+              balanceBefore,
+              balanceAfter: 0,
+              referenceType: 'STATION_ACTION_REQUEST',
+              referenceId: request.id,
+              reason: request.reason,
+              movementAt,
+              createdByUserId: body.reviewerUserId,
+            },
+          });
+
+          const updatedStation = await tx.station.update({
+            where: {
+              id: station.id,
+            },
+            data: {
+              currentStock: 0,
+            },
+            include: {
+              company: true,
+              project: true,
+            },
+          });
+
+          actionResult = {
+            station: updatedStation,
+            movement,
+            balanceBefore,
+            balanceAfter: 0,
+          };
+        } else if (actionType === 'INVENTORY_ADJUSTMENT') {
+          const actualStock = Number(request.requestedActualStock);
+
+          if (!Number.isFinite(actualStock) || actualStock < 0) {
+            throw new BadRequestException(
+              'Requested actual stock is invalid',
+            );
+          }
+
+          const balanceBefore = Number(station.currentStock || 0);
+          const quantity = actualStock - balanceBefore;
+          const movementAt = request.movementAt || now;
+
+          const movement = await tx.stationStockMovement.create({
+            data: {
+              stationId: station.id,
+              companyId: station.companyId,
+              movementType: 'PHYSICAL_ADJUSTMENT' as any,
+              quantity,
+              balanceBefore,
+              balanceAfter: actualStock,
+              referenceType: 'STATION_ACTION_REQUEST',
+              referenceId: request.id,
+              reason: request.reason,
+              movementAt,
+              createdByUserId: body.reviewerUserId,
+            },
+          });
+
+          const updatedStation = await tx.station.update({
+            where: {
+              id: station.id,
+            },
+            data: {
+              currentStock: actualStock,
+            },
+            include: {
+              company: true,
+              project: true,
+            },
+          });
+
+          actionResult = {
+            station: updatedStation,
+            movement,
+            balanceBefore,
+            actualStock,
+            adjustmentQuantity: quantity,
+          };
+        } else if (actionType === 'COUNTER_RESET') {
+          const newCounter = Number(request.requestedCounter);
+
+          if (!Number.isFinite(newCounter) || newCounter < 0) {
+            throw new BadRequestException(
+              'Requested counter value is invalid',
+            );
+          }
+
+          const effectiveAt = request.effectiveAt || now;
+
+          if (effectiveAt.getTime() < station.createdAt.getTime()) {
+            throw new BadRequestException(
+              'Reset effective date cannot be before the station creation date',
+            );
+          }
+
+          if (effectiveAt.getTime() > now.getTime()) {
+            throw new BadRequestException(
+              'Reset effective date cannot be in the future',
+            );
+          }
+
+          const resetRecord = await tx.stationCounterReset.create({
+            data: {
+              stationId: station.id,
+              companyId: station.companyId,
+              oldCounter: Number(station.currentCounter || 0),
+              newCounter,
+              lifetimeAtReset: this.getEffectiveStationLifetime(station),
+              oldCounterCycle: Number(station.currentCounterCycle || 1),
+              newCounterCycle: Number(station.currentCounterCycle || 1) + 1,
+              reason: request.reason,
+              effectiveAt,
+              createdByUserId: body.reviewerUserId,
+            },
+          });
+
+          await this.rebuildStationLifetimeHistory(tx, station.id);
+
+          const [updatedStation, rebuiltResetRecord] = await Promise.all([
+            tx.station.findUnique({
+              where: {
+                id: station.id,
+              },
+              include: {
+                company: true,
+                project: true,
+              },
+            }),
+            tx.stationCounterReset.findUnique({
+              where: {
+                id: resetRecord.id,
+              },
+            }),
+          ]);
+
+          actionResult = {
+            station: updatedStation,
+            resetRecord: rebuiltResetRecord,
+          };
+        } else {
+          throw new BadRequestException(
+            'Unsupported station action request type',
+          );
+        }
+
+        const updatedRequest = await tx.stationActionRequest.update({
+          where: {
+            id: requestId,
+          },
+          data: {
+            status: 'APPROVED' as any,
+            approvedAt: now,
+            appliedAt: now,
+          },
+          include: {
+            station: {
+              include: {
+                project: true,
+              },
+            },
+            project: true,
+            requestedBy: {
+              include: {
+                role: true,
+              },
+            },
+            reviewedBy: {
+              include: {
+                role: true,
+              },
+            },
+          },
+        });
+
+        return {
+          request: updatedRequest,
+          result: actionResult,
+        };
+      },
+      { maxWait: 5000, timeout: 20000 },
     );
   }
 
@@ -2337,6 +3099,12 @@ export class StationsService {
       });
 
       await tx.stationTransferRequest.deleteMany({
+        where: {
+          stationId: id,
+        },
+      });
+
+      await tx.stationActionRequest.deleteMany({
         where: {
           stationId: id,
         },

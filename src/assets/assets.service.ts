@@ -77,6 +77,54 @@ export class AssetsService {
   }
 
 
+  private async ensureAssetOdometerDirectPermission(
+    asset: any,
+    userId: string | undefined,
+  ) {
+    if (!userId) {
+      throw new BadRequestException('Actor user is required');
+    }
+
+    const actor = await this.getRequester(userId, asset.companyId);
+    const roleName = actor.role?.name || '';
+
+    if (this.isAdminRole(roleName)) {
+      return actor;
+    }
+
+    if (!this.isManagerRole(roleName)) {
+      throw new BadRequestException(
+        'Only the assigned Project Manager or Admin can reset an asset odometer directly',
+      );
+    }
+
+    const projectManagerId =
+      asset.project?.projectManagerId ||
+      (asset.projectId
+        ? (
+            await this.prisma.project.findFirst({
+              where: {
+                id: asset.projectId,
+                companyId: asset.companyId,
+                deletedAt: null,
+                isActive: true,
+              },
+              select: {
+                projectManagerId: true,
+              },
+            })
+          )?.projectManagerId
+        : null);
+
+    if (!projectManagerId || projectManagerId !== userId) {
+      throw new BadRequestException(
+        'Only the assigned Project Manager can reset this asset odometer directly',
+      );
+    }
+
+    return actor;
+  }
+
   private async ensureCompany(companyId: string) {
     const company = await this.prisma.company.findFirst({
       where: {
@@ -501,9 +549,17 @@ export class AssetsService {
         select: {
           id: true,
           companyId: true,
+          projectId: true,
+          createdAt: true,
           currentOdometer: true,
           currentLifetimeOdometer: true,
           currentMeterCycle: true,
+          project: {
+            select: {
+              id: true,
+              projectManagerId: true,
+            },
+          },
         },
       }),
       this.prisma.operation.findFirst({
@@ -523,6 +579,23 @@ export class AssetsService {
 
     if (!asset) {
       throw new NotFoundException('Asset not found');
+    }
+
+    await this.ensureAssetOdometerDirectPermission(
+      asset,
+      body.createdByUserId,
+    );
+
+    if (effectiveAt.getTime() < asset.createdAt.getTime()) {
+      throw new BadRequestException(
+        'Reset effective date cannot be before the asset creation date',
+      );
+    }
+
+    if (effectiveAt.getTime() > now.getTime()) {
+      throw new BadRequestException(
+        'Reset effective date cannot be in the future',
+      );
     }
 
     /*
@@ -591,6 +664,543 @@ export class AssetsService {
     );
   }
 
+
+  async createActionRequest(
+    assetId: string,
+    body: {
+      actionType: string;
+      requestedByUserId: string;
+      reason: string;
+      newOdometer?: number;
+      effectiveAt?: string;
+    },
+  ) {
+    const actionType = String(body.actionType || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+
+    if (actionType !== 'ODOMETER_RESET') {
+      throw new BadRequestException('Unsupported asset action request type');
+    }
+
+    if (!body.requestedByUserId) {
+      throw new BadRequestException('Requester user is required');
+    }
+
+    if (!body.reason?.trim()) {
+      throw new BadRequestException('Request reason is required');
+    }
+
+    const asset = await this.prisma.asset.findFirst({
+      where: {
+        id: assetId,
+        deletedAt: null,
+      },
+      include: {
+        project: true,
+      },
+    });
+
+    if (!asset) {
+      throw new NotFoundException('Asset not found');
+    }
+
+    if (!asset.projectId || !asset.project) {
+      throw new BadRequestException(
+        'Asset must be assigned to an active project before submitting this request',
+      );
+    }
+
+    const requester = await this.getRequester(
+      body.requestedByUserId,
+      asset.companyId,
+    );
+
+    if (!this.isOfficerRole(requester.role?.name || '')) {
+      throw new BadRequestException(
+        'Only Officer can submit an asset odometer reset request',
+      );
+    }
+
+    if (!asset.project.projectManagerId) {
+      throw new BadRequestException(
+        'Asset project has no assigned Project Manager',
+      );
+    }
+
+    const requestedOdometer = Number(body.newOdometer);
+    if (!Number.isFinite(requestedOdometer) || requestedOdometer < 0) {
+      throw new BadRequestException(
+        'New odometer must be a valid non-negative number',
+      );
+    }
+
+    const now = new Date();
+    const rawEffectiveAt = String(body.effectiveAt || '').trim();
+    const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(rawEffectiveAt);
+    let effectiveAt = rawEffectiveAt ? new Date(rawEffectiveAt) : now;
+
+    if (Number.isNaN(effectiveAt.getTime())) {
+      throw new BadRequestException('Invalid effective date');
+    }
+
+    if (isDateOnly && rawEffectiveAt === now.toISOString().slice(0, 10)) {
+      effectiveAt = now;
+    }
+
+    if (effectiveAt.getTime() < asset.createdAt.getTime()) {
+      throw new BadRequestException(
+        'Reset effective date cannot be before the asset creation date',
+      );
+    }
+
+    if (effectiveAt.getTime() > now.getTime()) {
+      throw new BadRequestException(
+        'Reset effective date cannot be in the future',
+      );
+    }
+
+    const latestCompletedOperation = await this.prisma.operation.findFirst({
+      where: {
+        assetId,
+        status: 'COMPLETED',
+        odometer: { not: null },
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: {
+        id: true,
+        operationNo: true,
+        createdAt: true,
+      },
+    });
+
+    if (
+      latestCompletedOperation &&
+      effectiveAt.getTime() < latestCompletedOperation.createdAt.getTime()
+    ) {
+      throw new BadRequestException(
+        `Reset effective date cannot be earlier than the latest completed operation (${latestCompletedOperation.operationNo}). Use the historical correction workflow for a backdated reset.`,
+      );
+    }
+
+    const existingPending = await this.prisma.assetActionRequest.findFirst({
+      where: {
+        assetId,
+        status: 'PENDING',
+        actionType: 'ODOMETER_RESET' as any,
+      },
+    });
+
+    if (existingPending) {
+      throw new BadRequestException(
+        'A pending odometer reset request already exists for this asset',
+      );
+    }
+
+    return this.prisma.assetActionRequest.create({
+      data: {
+        companyId: asset.companyId,
+        assetId: asset.id,
+        projectId: asset.projectId,
+        requestedByUserId: body.requestedByUserId,
+        actionType: 'ODOMETER_RESET' as any,
+        status: 'PENDING' as any,
+        reason: body.reason.trim(),
+        requestedOdometer,
+        effectiveAt,
+      },
+      include: {
+        asset: {
+          include: {
+            project: true,
+          },
+        },
+        project: true,
+        requestedBy: {
+          include: {
+            role: true,
+          },
+        },
+        reviewedBy: {
+          include: {
+            role: true,
+          },
+        },
+      },
+    });
+  }
+
+  async getActionRequests(
+    userId: string,
+    status?: string,
+  ) {
+    if (!userId) {
+      throw new BadRequestException('User ID is required');
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: {
+        id: userId,
+        deletedAt: null,
+        isActive: true,
+      },
+      include: {
+        role: true,
+      },
+    });
+
+    if (!user) {
+      throw new BadRequestException('User is invalid or inactive');
+    }
+
+    const normalizedStatus = String(status || '')
+      .trim()
+      .toUpperCase();
+
+    if (
+      normalizedStatus &&
+      !['PENDING', 'PROCESSING', 'APPROVED', 'REJECTED'].includes(
+        normalizedStatus,
+      )
+    ) {
+      throw new BadRequestException('Invalid asset action request status');
+    }
+
+    const visibility: any[] = [
+      {
+        requestedByUserId: user.id,
+      },
+    ];
+
+    if (this.isAdminRole(user.role?.name || '')) {
+      visibility.push({
+        companyId: user.companyId,
+      });
+    } else if (this.isManagerRole(user.role?.name || '')) {
+      visibility.push({
+        project: {
+          is: {
+            projectManagerId: user.id,
+          },
+        },
+        actionType: 'ODOMETER_RESET' as any,
+      });
+    }
+
+    return this.prisma.assetActionRequest.findMany({
+      where: {
+        companyId: user.companyId,
+        ...(normalizedStatus
+          ? {
+              status: normalizedStatus as any,
+            }
+          : {}),
+        OR: visibility,
+      },
+      include: {
+        asset: {
+          include: {
+            project: true,
+          },
+        },
+        project: true,
+        requestedBy: {
+          include: {
+            role: true,
+          },
+        },
+        reviewedBy: {
+          include: {
+            role: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+  }
+
+  async reviewActionRequest(
+    requestId: string,
+    body: {
+      reviewerUserId: string;
+      approve: boolean;
+      reviewNote?: string;
+    },
+  ) {
+    if (!body.reviewerUserId) {
+      throw new BadRequestException('Reviewer user is required');
+    }
+
+    const request = await this.prisma.assetActionRequest.findFirst({
+      where: {
+        id: requestId,
+      },
+      include: {
+        asset: {
+          include: {
+            project: true,
+          },
+        },
+        project: true,
+        requestedBy: {
+          include: {
+            role: true,
+          },
+        },
+      },
+    });
+
+    if (!request) {
+      throw new NotFoundException('Asset action request not found');
+    }
+
+    if (request.status !== 'PENDING') {
+      throw new BadRequestException('Asset action request already reviewed');
+    }
+
+    const reviewer = await this.getRequester(
+      body.reviewerUserId,
+      request.companyId,
+    );
+
+    if (!this.isManagerRole(reviewer.role?.name || '')) {
+      throw new BadRequestException(
+        'Only the assigned Project Manager can review this asset request',
+      );
+    }
+
+    const assignedManagerId =
+      request.asset?.project?.projectManagerId ||
+      request.project?.projectManagerId ||
+      null;
+
+    if (!assignedManagerId || assignedManagerId !== body.reviewerUserId) {
+      throw new BadRequestException(
+        'Only the assigned Project Manager can review this asset request',
+      );
+    }
+
+    const now = new Date();
+    const reviewNote = String(body.reviewNote || '').trim();
+
+    if (!body.approve) {
+      return this.prisma.$transaction(
+        async (tx) => {
+          const claimed = await tx.assetActionRequest.updateMany({
+            where: {
+              id: requestId,
+              status: 'PENDING' as any,
+            },
+            data: {
+              status: 'REJECTED' as any,
+              reviewedByUserId: body.reviewerUserId,
+              reviewNote: reviewNote || 'Rejected',
+              reviewedAt: now,
+              rejectedAt: now,
+            },
+          });
+
+          if (claimed.count !== 1) {
+            throw new BadRequestException(
+              'Asset action request already reviewed',
+            );
+          }
+
+          return tx.assetActionRequest.findUnique({
+            where: {
+              id: requestId,
+            },
+            include: {
+              asset: {
+                include: {
+                  project: true,
+                },
+              },
+              project: true,
+              requestedBy: {
+                include: {
+                  role: true,
+                },
+              },
+              reviewedBy: {
+                include: {
+                  role: true,
+                },
+              },
+            },
+          });
+        },
+        { maxWait: 5000, timeout: 15000 },
+      );
+    }
+
+    return this.prisma.$transaction(
+      async (tx) => {
+        const claimed = await tx.assetActionRequest.updateMany({
+          where: {
+            id: requestId,
+            status: 'PENDING' as any,
+          },
+          data: {
+            status: 'PROCESSING' as any,
+            reviewedByUserId: body.reviewerUserId,
+            reviewNote: reviewNote || 'Approved',
+            reviewedAt: now,
+          },
+        });
+
+        if (claimed.count !== 1) {
+          throw new BadRequestException(
+            'Asset action request already reviewed',
+          );
+        }
+
+        const asset = await tx.asset.findFirst({
+          where: {
+            id: request.assetId,
+            deletedAt: null,
+          },
+        });
+
+        if (!asset) {
+          throw new NotFoundException('Asset not found');
+        }
+
+        const newOdometer = Number(request.requestedOdometer);
+        if (!Number.isFinite(newOdometer) || newOdometer < 0) {
+          throw new BadRequestException(
+            'Requested odometer value is invalid',
+          );
+        }
+
+        const effectiveAt = request.effectiveAt || now;
+
+        if (effectiveAt.getTime() < asset.createdAt.getTime()) {
+          throw new BadRequestException(
+            'Reset effective date cannot be before the asset creation date',
+          );
+        }
+
+        if (effectiveAt.getTime() > now.getTime()) {
+          throw new BadRequestException(
+            'Reset effective date cannot be in the future',
+          );
+        }
+
+        const latestCompletedOperation = await tx.operation.findFirst({
+          where: {
+            assetId: asset.id,
+            status: 'COMPLETED',
+            odometer: { not: null },
+          },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          select: {
+            id: true,
+            operationNo: true,
+            createdAt: true,
+          },
+        });
+
+        if (
+          latestCompletedOperation &&
+          effectiveAt.getTime() < latestCompletedOperation.createdAt.getTime()
+        ) {
+          throw new BadRequestException(
+            `Reset effective date cannot be earlier than the latest completed operation (${latestCompletedOperation.operationNo}). Use the historical correction workflow for a backdated reset.`,
+          );
+        }
+
+        const currentLifetime = this.getEffectiveAssetLifetime(asset);
+        const oldMeterCycle = Number(asset.currentMeterCycle || 1);
+        const newMeterCycle = oldMeterCycle + 1;
+        const oldOdometer = Number(asset.currentOdometer || 0);
+
+        const resetRecord = await tx.assetOdometerReset.create({
+          data: {
+            assetId: asset.id,
+            companyId: asset.companyId,
+            oldOdometer,
+            newOdometer,
+            lifetimeAtReset: currentLifetime,
+            oldMeterCycle,
+            newMeterCycle,
+            reason: request.reason,
+            effectiveAt,
+            createdByUserId: body.reviewerUserId,
+          },
+        });
+
+        const updatedAsset = await tx.asset.update({
+          where: {
+            id: asset.id,
+          },
+          data: {
+            currentOdometer: newOdometer,
+            currentLifetimeOdometer: currentLifetime,
+            currentMeterCycle: newMeterCycle,
+          },
+          include: {
+            company: {
+              select: {
+                id: true,
+                name: true,
+                code: true,
+              },
+            },
+            project: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+                projectManagerId: true,
+              },
+            },
+          },
+        });
+
+        const updatedRequest = await tx.assetActionRequest.update({
+          where: {
+            id: requestId,
+          },
+          data: {
+            status: 'APPROVED' as any,
+            approvedAt: now,
+            appliedAt: now,
+          },
+          include: {
+            asset: {
+              include: {
+                project: true,
+              },
+            },
+            project: true,
+            requestedBy: {
+              include: {
+                role: true,
+              },
+            },
+            reviewedBy: {
+              include: {
+                role: true,
+              },
+            },
+          },
+        });
+
+        return {
+          request: updatedRequest,
+          result: {
+            asset: updatedAsset,
+            resetRecord,
+          },
+        };
+      },
+      { maxWait: 5000, timeout: 15000 },
+    );
+  }
 
   private getEffectiveAssetLifetime(asset: any) {
     const storedLifetime = Number(asset?.currentLifetimeOdometer || 0);

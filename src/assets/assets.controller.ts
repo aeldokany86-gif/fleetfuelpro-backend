@@ -83,9 +83,30 @@ export class AssetsController {
     });
   }
 
+  @Get('actions/requests')
+  getActionRequests(
+    @Query('userId') userId: string,
+    @Query('status') status?: string,
+  ) {
+    return this.assetsService.getActionRequests(userId, status);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.assetsService.findOne(id);
+  }
+
+  @Patch('action-requests/:id/review')
+  reviewActionRequest(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      reviewerUserId: string;
+      approve: boolean;
+      reviewNote?: string;
+    },
+  ) {
+    return this.assetsService.reviewActionRequest(id, body);
   }
 
   @Patch(':id')
@@ -105,6 +126,21 @@ export class AssetsController {
     },
   ) {
     return this.assetsService.update(id, body);
+  }
+
+  @Post(':id/action-requests')
+  createActionRequest(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      actionType: string;
+      requestedByUserId: string;
+      reason: string;
+      newOdometer?: number;
+      effectiveAt?: string;
+    },
+  ) {
+    return this.assetsService.createActionRequest(id, body);
   }
 
   @Post(':id/reset-odometer')

@@ -24,6 +24,7 @@ model Company {
   updatedAt                DateTime                   @updatedAt
   deletedAt                DateTime?
   assets                   Asset[]
+  assetActionRequests      AssetActionRequest[]
   assetAssignmentHistory   AssetAssignmentHistory[]
   assetTransferRequests    AssetTransferRequest[]
   employees                Employee[]
@@ -37,6 +38,7 @@ model Company {
   stationAssignmentHistory StationAssignmentHistory[]
   stationStockMovements    StationStockMovement[]
   stationTransferRequests  StationTransferRequest[]
+  stationActionRequests    StationActionRequest[]
   users                    User[]
 }
 
@@ -61,6 +63,7 @@ model Project {
   fuelPriceCurrency            String                     @default("SAR")
   fuelPriceEffectiveFrom       DateTime?
   assets                       Asset[]
+  assetActionRequests          AssetActionRequest[]
   assetAssignmentHistoryFrom   AssetAssignmentHistory[]   @relation("AssetAssignmentFromProject")
   assetAssignmentHistoryTo     AssetAssignmentHistory[]   @relation("AssetAssignmentToProject")
   assetTransferApprovals       AssetTransferApproval[]    @relation("AssetTransferApprovalProject")
@@ -81,6 +84,7 @@ model Project {
   stationTransferApprovals     StationTransferApproval[]  @relation("StationTransferApprovalProject")
   stationTransferRequestsFrom  StationTransferRequest[]   @relation("StationTransferFromProject")
   stationTransferRequestsTo    StationTransferRequest[]   @relation("StationTransferToProject")
+  stationActionRequests        StationActionRequest[]
 
   @@unique([companyId, code])
   @@index([companyId])
@@ -143,6 +147,8 @@ model User {
   createdAssets                 Asset[]                    @relation("AssetCreatedBy")
   assetAssignmentHistory        AssetAssignmentHistory[]   @relation("AssetAssignmentAssignedBy")
   assetOdometerResets           AssetOdometerReset[]
+  requestedAssetActions         AssetActionRequest[]       @relation("AssetActionRequestedBy")
+  reviewedAssetActions          AssetActionRequest[]       @relation("AssetActionReviewedBy")
   assetTransferApprovals        AssetTransferApproval[]    @relation("AssetTransferApprover")
   requestedAssetTransfers       AssetTransferRequest[]     @relation("AssetTransferRequestedBy")
   createdEmployees              Employee[]                 @relation("EmployeeCreatedBy")
@@ -163,6 +169,8 @@ model User {
   stationStockMovements         StationStockMovement[]
   stationTransferApprovals      StationTransferApproval[]  @relation("StationTransferApprover")
   requestedStationTransfers     StationTransferRequest[]   @relation("StationTransferRequestedBy")
+  requestedStationActions       StationActionRequest[]     @relation("StationActionRequestedBy")
+  reviewedStationActions        StationActionRequest[]     @relation("StationActionReviewedBy")
   company                       Company                    @relation(fields: [companyId], references: [id])
   createdBy                     User?                      @relation("UserCreatedBy", fields: [createdById], references: [id])
   createdUsers                  User[]                     @relation("UserCreatedBy")
@@ -281,6 +289,7 @@ model Asset {
   createdBy               User?                    @relation("AssetCreatedBy", fields: [createdById], references: [id])
   project                 Project?                 @relation(fields: [projectId], references: [id])
   assignmentHistory       AssetAssignmentHistory[]
+  actionRequests          AssetActionRequest[]
   odometerResetHistory    AssetOdometerReset[]
   transferRequests        AssetTransferRequest[]
   operations              Operation[]
@@ -369,6 +378,41 @@ model AssetTransferApproval {
   @@index([status])
 }
 
+model AssetActionRequest {
+  id                String                   @id @default(cuid())
+  companyId         String
+  assetId           String
+  projectId         String?
+  requestedByUserId String
+  actionType        AssetActionType
+  status            AssetActionRequestStatus @default(PENDING)
+  reason            String
+  requestedOdometer Float?
+  effectiveAt       DateTime?
+  reviewedByUserId  String?
+  reviewNote        String?
+  reviewedAt        DateTime?
+  approvedAt        DateTime?
+  rejectedAt        DateTime?
+  appliedAt         DateTime?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  company           Company                  @relation(fields: [companyId], references: [id])
+  asset             Asset                    @relation(fields: [assetId], references: [id])
+  project           Project?                 @relation(fields: [projectId], references: [id])
+  requestedBy       User                     @relation("AssetActionRequestedBy", fields: [requestedByUserId], references: [id])
+  reviewedBy        User?                    @relation("AssetActionReviewedBy", fields: [reviewedByUserId], references: [id])
+
+  @@index([companyId])
+  @@index([assetId])
+  @@index([projectId])
+  @@index([requestedByUserId])
+  @@index([reviewedByUserId])
+  @@index([actionType])
+  @@index([status])
+  @@index([createdAt])
+}
+
 model AssetAssignmentHistory {
   id                String                @id @default(cuid())
   companyId         String
@@ -424,6 +468,7 @@ model Station {
   counterResetHistory    StationCounterReset[]
   stockMovements         StationStockMovement[]
   transferRequests       StationTransferRequest[]
+  actionRequests         StationActionRequest[]
 
   @@unique([companyId, stationId])
   @@index([companyId])
@@ -686,6 +731,43 @@ model StationTransferApproval {
   @@index([status])
 }
 
+model StationActionRequest {
+  id                   String                     @id @default(cuid())
+  companyId            String
+  stationId            String
+  projectId            String?
+  requestedByUserId    String
+  actionType           StationActionType
+  status               StationActionRequestStatus @default(PENDING)
+  reason               String
+  requestedActualStock Float?
+  requestedCounter     Float?
+  effectiveAt          DateTime?
+  movementAt           DateTime?
+  reviewedByUserId     String?
+  reviewNote           String?
+  reviewedAt           DateTime?
+  approvedAt           DateTime?
+  rejectedAt           DateTime?
+  appliedAt            DateTime?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  company              Company                    @relation(fields: [companyId], references: [id])
+  station              Station                    @relation(fields: [stationId], references: [id])
+  project              Project?                   @relation(fields: [projectId], references: [id])
+  requestedBy          User                       @relation("StationActionRequestedBy", fields: [requestedByUserId], references: [id])
+  reviewedBy           User?                      @relation("StationActionReviewedBy", fields: [reviewedByUserId], references: [id])
+
+  @@index([companyId])
+  @@index([stationId])
+  @@index([projectId])
+  @@index([requestedByUserId])
+  @@index([reviewedByUserId])
+  @@index([actionType])
+  @@index([status])
+  @@index([createdAt])
+}
+
 model StationAssignmentHistory {
   id                String                  @id @default(cuid())
   companyId         String
@@ -724,6 +806,17 @@ model RefreshToken {
   user      User      @relation(fields: [userId], references: [id])
 }
 
+enum AssetActionType {
+  ODOMETER_RESET
+}
+
+enum AssetActionRequestStatus {
+  PENDING
+  PROCESSING
+  APPROVED
+  REJECTED
+}
+
 enum AssetAssignmentType {
   INITIAL_ASSIGNMENT
   TRANSFER
@@ -756,6 +849,19 @@ enum StationStockMovementType {
   EXTERNAL_TRANSFER_OUT
   COUNTER_CORRECTION
   PHYSICAL_ADJUSTMENT
+}
+
+enum StationActionType {
+  ZERO_BALANCE
+  INVENTORY_ADJUSTMENT
+  COUNTER_RESET
+}
+
+enum StationActionRequestStatus {
+  PENDING
+  PROCESSING
+  APPROVED
+  REJECTED
 }
 
 enum StationTransferStatus {

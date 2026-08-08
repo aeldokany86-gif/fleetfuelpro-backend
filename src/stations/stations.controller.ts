@@ -73,6 +73,14 @@ export class StationsController {
     return this.stationsService.getPendingTransferRequests();
   }
 
+  @Get('actions/requests')
+  getActionRequests(
+    @Query('userId') userId: string,
+    @Query('status') status?: string,
+  ) {
+    return this.stationsService.getActionRequests(userId, status);
+  }
+
   @Get('stock-movements')
   getAllStockMovements(
     @Query('companyId') companyId?: string,
@@ -191,6 +199,36 @@ export class StationsController {
     },
   ) {
     return this.stationsService.zeroBalance(id, body);
+  }
+
+  @Post(':id/action-requests')
+  createActionRequest(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      actionType: string;
+      requestedByUserId: string;
+      reason: string;
+      actualStock?: number;
+      newCounter?: number;
+      effectiveAt?: string;
+      movementAt?: string;
+    },
+  ) {
+    return this.stationsService.createActionRequest(id, body);
+  }
+
+  @Patch('action-requests/:id/review')
+  reviewActionRequest(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      reviewerUserId: string;
+      approve: boolean;
+      reviewNote?: string;
+    },
+  ) {
+    return this.stationsService.reviewActionRequest(id, body);
   }
 
   @Post(':id/transfer')
