@@ -16,6 +16,7 @@ import { StationsModule } from './stations/stations.module';
 import { OperationsModule } from './operations/operations.module';
 import { OperationCorrectionsModule } from './operation-corrections/operation-corrections.module';
 import { UploadsModule } from './uploads/uploads.module';
+import { ImportsModule } from './imports/imports.module';
 
 @Module({
   imports: [
@@ -32,6 +33,7 @@ import { UploadsModule } from './uploads/uploads.module';
     OperationsModule,
     OperationCorrectionsModule,
     UploadsModule,
+    ImportsModule,
   ],
   controllers: [AppController, EmployeesController],
   providers: [AppService, EmployeesService],

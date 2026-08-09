@@ -585,4 +585,33 @@ export class CompaniesService {
       },
     });
   }
+
+  async updateDataImportAccess(id: string, enabled: boolean) {
+    if (typeof enabled !== 'boolean') {
+      throw new BadRequestException(
+        'Data Import access status must be true or false',
+      );
+    }
+
+    const company = await this.prisma.company.findFirst({
+      where: {
+        id,
+        deletedAt: null,
+      },
+    });
+
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+
+    return this.prisma.company.update({
+      where: {
+        id,
+      },
+      data: {
+        dataImportEnabled: enabled,
+      },
+    });
+  }
+
 }

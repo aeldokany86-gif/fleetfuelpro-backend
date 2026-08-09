@@ -10,16 +10,14 @@ import { PrismaService } from "../prisma/prisma.service";
 
 import { CreateProjectDto } from "./dto/create-project.dto";
 import { UpdateProjectDto } from "./dto/update-project.dto";
+import { ProjectCreationDomainService } from "./project-creation-domain.service";
 
 @Injectable()
 export class ProjectsService {
-  constructor(private prisma: PrismaService) {}
-
-  private normalizeCode(code: string) {
-    return String(code || "")
-      .trim()
-      .toUpperCase();
-  }
+  constructor(
+    private prisma: PrismaService,
+    private projectCreationDomain: ProjectCreationDomainService,
+  ) {}
 
   private normalizeRoleName(roleName: string) {
     return String(roleName || "")
@@ -39,76 +37,6 @@ export class ProjectsService {
 
   private isCompanyAdminRole(roleName: string) {
     return this.normalizeRoleName(roleName) === "ADMIN";
-  }
-
-  private roundPrice(value: number) {
-    return Math.round((Number(value) + Number.EPSILON) * 1_000_000) / 1_000_000;
-  }
-
-  private resolveFuelPriceComponents(data: {
-    pricePerLiter?: number;
-    basePricePerLiter?: number;
-    transportCostPerLiter?: number;
-    vatRate?: number;
-  }) {
-    const hasComponentPricing = data.basePricePerLiter !== undefined;
-
-    if (!hasComponentPricing) {
-      const legacyPrice = Number(data.pricePerLiter);
-
-      if (!Number.isFinite(legacyPrice) || legacyPrice <= 0) {
-        throw new BadRequestException(
-          "Price per liter must be greater than zero",
-        );
-      }
-
-      return {
-        isLegacy: true,
-        basePricePerLiter: null,
-        transportCostPerLiter: null,
-        vatRate: null,
-        vatAmountPerLiter: null,
-        netPricePerLiter: this.roundPrice(legacyPrice),
-        grossPricePerLiter: null,
-      };
-    }
-
-    const basePricePerLiter = Number(data.basePricePerLiter);
-    const transportCostPerLiter = Number(data.transportCostPerLiter ?? 0);
-    const vatRate = Number(data.vatRate ?? 0);
-
-    if (!Number.isFinite(basePricePerLiter) || basePricePerLiter <= 0) {
-      throw new BadRequestException(
-        "Base fuel price per liter must be greater than zero",
-      );
-    }
-
-    if (!Number.isFinite(transportCostPerLiter) || transportCostPerLiter < 0) {
-      throw new BadRequestException(
-        "Transport cost per liter cannot be negative",
-      );
-    }
-
-    if (!Number.isFinite(vatRate) || vatRate < 0 || vatRate > 100) {
-      throw new BadRequestException("VAT rate must be between 0 and 100");
-    }
-
-    const netPricePerLiter = this.roundPrice(
-      basePricePerLiter + transportCostPerLiter,
-    );
-    const vatAmountPerLiter = this.roundPrice(
-      netPricePerLiter * (vatRate / 100),
-    );
-
-    return {
-      isLegacy: false,
-      basePricePerLiter: this.roundPrice(basePricePerLiter),
-      transportCostPerLiter: this.roundPrice(transportCostPerLiter),
-      vatRate: this.roundPrice(vatRate),
-      vatAmountPerLiter,
-      netPricePerLiter,
-      grossPricePerLiter: this.roundPrice(netPricePerLiter + vatAmountPerLiter),
-    };
   }
 
   private applyEffectiveCurrentPrice(project: any) {
@@ -141,7 +69,7 @@ export class ProjectsService {
       throw new BadRequestException("Company not found");
     }
 
-    const projectCode = this.normalizeCode(createProjectDto.code);
+    const projectCode = this.projectCreationDomain.normalizeCode(createProjectDto.code);
 
     const existingProject = await this.prisma.project.findFirst({
       where: {
@@ -162,7 +90,7 @@ export class ProjectsService {
       );
     }
 
-    const initialPricing = this.resolveFuelPriceComponents({
+    const initialPricing = this.projectCreationDomain.resolveFuelPriceComponents({
       pricePerLiter: createProjectDto.initialFuelPrice,
       basePricePerLiter: createProjectDto.initialBasePricePerLiter,
       transportCostPerLiter: createProjectDto.initialTransportCostPerLiter,
@@ -171,64 +99,20 @@ export class ProjectsService {
 
     const effectiveFrom = new Date();
 
-    const createdProject = await this.prisma.$transaction(async (tx) => {
-      const project = await tx.project.create({
-        data: {
-          companyId: createProjectDto.companyId,
-          code: projectCode,
-          name: createProjectDto.name?.trim(),
-          location: createProjectDto.location?.trim() || null,
-          description: createProjectDto.description?.trim() || null,
-          isActive: createProjectDto.isActive ?? true,
-          currentFuelPrice: initialPricing.netPricePerLiter,
-          currentBaseFuelPrice: initialPricing.basePricePerLiter,
-          currentTransportCostPerLiter: initialPricing.transportCostPerLiter,
-          currentVatRate: initialPricing.vatRate,
-          currentGrossFuelPrice: initialPricing.grossPricePerLiter,
-          fuelPriceCurrency: company.currency || "SAR",
-          fuelPriceEffectiveFrom: effectiveFrom,
-        },
-        include: {
-          company: {
-            select: {
-              id: true,
-              name: true,
-              code: true,
-            },
-          },
-          projectManager: {
-            select: {
-              id: true,
-              fullName: true,
-              email: true,
-              isActive: true,
-            },
-          },
-        },
-      });
-
-      await tx.projectFuelPriceHistory.create({
-        data: {
-          projectId: project.id,
-          companyId: project.companyId,
-          country: company.country || "Unknown",
-          currency: company.currency || "SAR",
-          basePricePerLiter: initialPricing.basePricePerLiter,
-          transportCost: initialPricing.transportCostPerLiter,
-          pricePerLiter: initialPricing.netPricePerLiter,
-          vatRate: initialPricing.vatRate,
-          vatAmountPerLiter: initialPricing.vatAmountPerLiter,
-          grossPricePerLiter: initialPricing.grossPricePerLiter,
-          effectiveFrom,
-          reason: initialPricing.isLegacy
-            ? "Initial project fuel price (legacy combined price)"
-            : "Initial project fuel price",
-          createdByUserId: null,
-        },
-      });
-
-      return project;
-    });
+    const createdProject = await this.prisma.$transaction((tx) =>
+      this.projectCreationDomain.createProjectWithInitialPrice(tx, {
+        company,
+        companyId: createProjectDto.companyId,
+        projectCode,
+        name: createProjectDto.name,
+        location: createProjectDto.location,
+        description: createProjectDto.description,
+        isActive: createProjectDto.isActive,
+        initialPricing,
+        effectiveFrom,
+        createdByUserId: null,
+      }),
+    );
 
     return createdProject;
   }
@@ -262,7 +146,7 @@ export class ProjectsService {
       );
     }
 
-    const projectCode = this.normalizeCode(createProjectDto.code);
+    const projectCode = this.projectCreationDomain.normalizeCode(createProjectDto.code);
     const effectiveFrom = new Date();
 
     const result = await this.prisma.$transaction(
@@ -344,7 +228,7 @@ export class ProjectsService {
           );
         }
 
-        const initialPricing = this.resolveFuelPriceComponents({
+        const initialPricing = this.projectCreationDomain.resolveFuelPriceComponents({
           pricePerLiter: createProjectDto.initialFuelPrice,
           basePricePerLiter: createProjectDto.initialBasePricePerLiter,
           transportCostPerLiter:
@@ -352,61 +236,21 @@ export class ProjectsService {
           vatRate: createProjectDto.initialVatRate,
         });
 
-        const project = await tx.project.create({
-          data: {
+        const project = await this.projectCreationDomain.createProjectWithInitialPrice(
+          tx,
+          {
+            company,
             companyId: actorCompanyId,
-            code: projectCode,
-            name: createProjectDto.name?.trim(),
-            location: createProjectDto.location?.trim() || null,
-            description: createProjectDto.description?.trim() || null,
-            isActive: createProjectDto.isActive ?? true,
-            currentFuelPrice: initialPricing.netPricePerLiter,
-            currentBaseFuelPrice: initialPricing.basePricePerLiter,
-            currentTransportCostPerLiter:
-              initialPricing.transportCostPerLiter,
-            currentVatRate: initialPricing.vatRate,
-            currentGrossFuelPrice: initialPricing.grossPricePerLiter,
-            fuelPriceCurrency: company.currency || "SAR",
-            fuelPriceEffectiveFrom: effectiveFrom,
-          },
-          include: {
-            company: {
-              select: {
-                id: true,
-                name: true,
-                code: true,
-              },
-            },
-            projectManager: {
-              select: {
-                id: true,
-                fullName: true,
-                email: true,
-                isActive: true,
-              },
-            },
-          },
-        });
-
-        await tx.projectFuelPriceHistory.create({
-          data: {
-            projectId: project.id,
-            companyId: actorCompanyId,
-            country: company.country || "Unknown",
-            currency: company.currency || "SAR",
-            basePricePerLiter: initialPricing.basePricePerLiter,
-            transportCost: initialPricing.transportCostPerLiter,
-            pricePerLiter: initialPricing.netPricePerLiter,
-            vatRate: initialPricing.vatRate,
-            vatAmountPerLiter: initialPricing.vatAmountPerLiter,
-            grossPricePerLiter: initialPricing.grossPricePerLiter,
+            projectCode,
+            name: createProjectDto.name,
+            location: createProjectDto.location,
+            description: createProjectDto.description,
+            isActive: createProjectDto.isActive,
+            initialPricing,
             effectiveFrom,
-            reason: initialPricing.isLegacy
-              ? "Initial project fuel price (legacy combined price)"
-              : "Initial project fuel price",
             createdByUserId: actorUserId,
           },
-        });
+        );
 
         const updatedEmployee = await tx.employee.update({
           where: {
@@ -766,7 +610,7 @@ export class ProjectsService {
       updateProjectDto.companyId || existingProject.companyId;
 
     const nextCode = updateProjectDto.code
-      ? this.normalizeCode(updateProjectDto.code)
+      ? this.projectCreationDomain.normalizeCode(updateProjectDto.code)
       : existingProject.code;
 
     if (
@@ -987,7 +831,7 @@ export class ProjectsService {
       throw new NotFoundException("Project not found");
     }
 
-    const pricing = this.resolveFuelPriceComponents(data);
+    const pricing = this.projectCreationDomain.resolveFuelPriceComponents(data);
 
     const effectiveFrom = data.effectiveFrom
       ? new Date(data.effectiveFrom)

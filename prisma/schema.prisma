@@ -18,6 +18,7 @@ model Company {
   logoUrl                  String?
   subscriptionPlan         String                     @default("trial")
   isActive                 Boolean                    @default(true)
+  dataImportEnabled        Boolean                    @default(false)
   currency                 String                     @default("SAR")
   language                 String                     @default("EN-AR")
   createdAt                DateTime                   @default(now())
@@ -40,6 +41,90 @@ model Company {
   stationTransferRequests  StationTransferRequest[]
   stationActionRequests    StationActionRequest[]
   users                    User[]
+  importBatches            ImportBatch[]
+}
+
+enum ImportType {
+  PROJECTS
+  EMPLOYEES
+  ASSETS
+  STATIONS
+  OPENING_VALUES
+  HISTORICAL_OPERATIONS
+}
+
+enum ImportBatchStatus {
+  UPLOADED
+  VALIDATING
+  VALIDATED
+  READY_TO_IMPORT
+  IMPORTING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ImportExecutionMode {
+  ALL_OR_NOTHING
+}
+
+model ImportBatch {
+  id                  String              @id @default(cuid())
+  companyId           String
+  importType          ImportType
+  schemaVersion       Int
+  validationVersion   Int                 @default(1)
+  templateLanguage    String?
+  originalFileName    String
+  fileSizeBytes       Int
+  fileHash            String
+  status              ImportBatchStatus   @default(UPLOADED)
+  executionMode       ImportExecutionMode @default(ALL_OR_NOTHING)
+  totalRows           Int                 @default(0)
+  validRows           Int                 @default(0)
+  invalidRows         Int                 @default(0)
+  warningRows         Int                 @default(0)
+  importedRows        Int                 @default(0)
+  failedRows          Int                 @default(0)
+  uploadedByUserId    String
+  confirmedByUserId   String?
+  uploadedAt          DateTime            @default(now())
+  validatedAt         DateTime?
+  confirmedAt         DateTime?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  failedAt            DateTime?
+  failureCode         String?
+  failureMessage      String?
+  company             Company             @relation(fields: [companyId], references: [id])
+  uploadedBy          User                @relation("ImportBatchUploadedBy", fields: [uploadedByUserId], references: [id])
+  confirmedBy         User?               @relation("ImportBatchConfirmedBy", fields: [confirmedByUserId], references: [id])
+  rows                 ImportRow[]
+
+  @@index([companyId])
+  @@index([importType])
+  @@index([status])
+  @@index([uploadedByUserId])
+  @@index([uploadedAt])
+}
+
+model ImportRow {
+  id             String      @id @default(cuid())
+  batchId        String
+  rowNumber      Int
+  sourceData     Json
+  normalizedData Json?
+  computedData   Json?
+  errors         Json?
+  warnings       Json?
+  isValid        Boolean     @default(false)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  batch          ImportBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, rowNumber])
+  @@index([batchId])
+  @@index([isValid])
 }
 
 model Project {
@@ -171,6 +256,8 @@ model User {
   requestedStationTransfers     StationTransferRequest[]   @relation("StationTransferRequestedBy")
   requestedStationActions       StationActionRequest[]     @relation("StationActionRequestedBy")
   reviewedStationActions        StationActionRequest[]     @relation("StationActionReviewedBy")
+  uploadedImportBatches         ImportBatch[]               @relation("ImportBatchUploadedBy")
+  confirmedImportBatches        ImportBatch[]               @relation("ImportBatchConfirmedBy")
   company                       Company                    @relation(fields: [companyId], references: [id])
   createdBy                     User?                      @relation("UserCreatedBy", fields: [createdById], references: [id])
   createdUsers                  User[]                     @relation("UserCreatedBy")

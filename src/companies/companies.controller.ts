@@ -81,4 +81,15 @@ export class CompaniesController {
   ) {
     return this.companiesService.updateStatus(id, body.isActive);
   }
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Platform User')
+  @Patch(':id/data-import-access')
+  async updateDataImportAccess(
+    @Param('id') id: string,
+    @Body() body: { enabled: boolean },
+  ) {
+    return this.companiesService.updateDataImportAccess(id, body.enabled);
+  }
+
 }
