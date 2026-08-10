@@ -7,6 +7,56 @@ const PROJECTS_TEMPLATE_TYPE = 'PROJECTS';
 const PROJECTS_SCHEMA_VERSION = 1;
 const PROJECTS_MAX_ROWS = 500;
 
+const EMPLOYEES_TEMPLATE_TYPE = 'EMPLOYEES';
+const EMPLOYEES_SCHEMA_VERSION = 1;
+const EMPLOYEES_MAX_ROWS = 500;
+
+const EMPLOYEE_COLUMNS = [
+  {
+    canonicalField: 'employeeId',
+    required: true,
+    type: 'text',
+    en: 'Employee ID',
+    ar: 'كود الموظف',
+  },
+  {
+    canonicalField: 'employeeName',
+    required: true,
+    type: 'text',
+    en: 'Employee Name',
+    ar: 'اسم الموظف',
+  },
+  {
+    canonicalField: 'phone',
+    required: false,
+    type: 'text',
+    en: 'Phone',
+    ar: 'رقم الجوال',
+  },
+  {
+    canonicalField: 'email',
+    required: false,
+    type: 'text',
+    en: 'Email',
+    ar: 'البريد الإلكتروني',
+  },
+  {
+    canonicalField: 'projectCode',
+    required: true,
+    type: 'text',
+    en: 'Project Code',
+    ar: 'كود المشروع',
+  },
+  {
+    canonicalField: 'jobTitle',
+    required: false,
+    type: 'text',
+    defaultValue: 'Operator',
+    en: 'Job Title',
+    ar: 'المسمى الوظيفي',
+  },
+] as const;
+
 const PROJECT_COLUMNS = [
   {
     canonicalField: 'projectCode',
@@ -290,4 +340,156 @@ export class ImportTemplateService {
       schemaVersion: PROJECTS_SCHEMA_VERSION,
     };
   }
+
+  async buildEmployeesTemplate(languageInput?: string) {
+    const language = this.normalizeTemplateLanguage(languageInput);
+    const isArabic = language === 'ar';
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Fleet Fuel PRO';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const dataSheetName = isArabic ? 'الموظفين' : 'Employees';
+    const instructionsSheetName = isArabic ? 'تعليمات' : 'Instructions';
+
+    const instructions = workbook.addWorksheet(instructionsSheetName, {
+      views: [{ rightToLeft: isArabic }],
+    });
+
+    instructions.columns = [{ width: 110 }];
+    instructions.getCell('A1').value = isArabic
+      ? 'Fleet Fuel PRO - نموذج استيراد الموظفين'
+      : 'Fleet Fuel PRO - Employees Import Template';
+    instructions.getCell('A1').font = {
+      bold: true,
+      size: 16,
+      color: { argb: 'FFFFFFFF' },
+    };
+    instructions.getCell('A1').fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0F172A' },
+    };
+    instructions.getCell('A1').alignment = {
+      horizontal: isArabic ? 'right' : 'left',
+      vertical: 'middle',
+    };
+    instructions.getRow(1).height = 28;
+
+    const instructionsText = isArabic
+      ? [
+          '1. أدخل البيانات في ورقة "الموظفين" فقط ولا تغيّر أسماء الأعمدة.',
+          '2. الحقول المطلوبة: كود الموظف، اسم الموظف، كود المشروع.',
+          '3. كود المشروع لا يتأثر بحالة الأحرف؛ مثال P001 و p001 يشيران إلى نفس المشروع.',
+          '4. يجب أن يشير كود المشروع إلى مشروع نشط داخل نفس الشركة.',
+          '5. رقم الجوال والبريد الإلكتروني والمسمى الوظيفي حقول اختيارية. المسمى الوظيفي الافتراضي هو Operator.',
+          '6. حالة كل موظف مستورد تُنشأ تلقائيًا ON_DUTY ولا يتم ربطه بأي مستخدم نظام.',
+          '7. الحد الأقصى للاستيراد في هذه النسخة هو 500 موظف.',
+          '8. لا تحذف أو تعدل ورقة النظام المخفية _fleetfuel_meta.',
+        ]
+      : [
+          '1. Enter data only in the "Employees" sheet and do not rename the columns.',
+          '2. Required fields: Employee ID, Employee Name, Project Code.',
+          '3. Project Code is case-insensitive; for example P001 and p001 identify the same project.',
+          '4. Project Code must identify an active project in the same company.',
+          '5. Phone, Email, and Job Title are optional. Job Title defaults to Operator.',
+          '6. Every imported employee is created automatically with status ON_DUTY and without a linked system user.',
+          '7. The maximum import size in this version is 500 employees.',
+          '8. Do not delete or modify the hidden system sheet _fleetfuel_meta.',
+        ];
+
+    instructionsText.forEach((text, index) => {
+      const cell = instructions.getCell(index + 3, 1);
+      cell.value = text;
+      cell.alignment = {
+        horizontal: isArabic ? 'right' : 'left',
+        vertical: 'top',
+        wrapText: true,
+      };
+      cell.font = { size: 11 };
+      instructions.getRow(index + 3).height = 26;
+    });
+
+    const employees = workbook.addWorksheet(dataSheetName, {
+      views: [{ state: 'frozen', ySplit: 1, rightToLeft: isArabic }],
+    });
+
+    employees.columns = EMPLOYEE_COLUMNS.map((column) => ({
+      header: column[language],
+      key: column.canonicalField,
+      width:
+        column.canonicalField === 'employeeName' ||
+        column.canonicalField === 'email' ||
+        column.canonicalField === 'jobTitle'
+          ? 26
+          : 20,
+    }));
+
+    const headerRow = employees.getRow(1);
+    headerRow.height = 28;
+    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0F172A' },
+    };
+    headerRow.alignment = {
+      horizontal: 'center',
+      vertical: 'middle',
+      wrapText: true,
+    };
+
+    // Keep import identifiers/contact values as text.
+    // Applying the format only at column level is not sufficient in all Excel
+    // versions for previously blank cells, so pre-style every allowed data cell.
+    for (let column = 1; column <= EMPLOYEE_COLUMNS.length; column += 1) {
+      employees.getColumn(column).numFmt = '@';
+    }
+
+    for (let row = 2; row <= EMPLOYEES_MAX_ROWS + 1; row += 1) {
+      for (let column = 1; column <= EMPLOYEE_COLUMNS.length; column += 1) {
+        employees.getCell(row, column).numFmt = '@';
+      }
+    }
+
+    const meta = workbook.addWorksheet('_fleetfuel_meta');
+    meta.state = 'veryHidden';
+    meta.addRows([
+      ['metaKey', 'metaValue'],
+      ['templateType', EMPLOYEES_TEMPLATE_TYPE],
+      ['schemaVersion', EMPLOYEES_SCHEMA_VERSION],
+      ['templateLanguage', language],
+      ['dataSheet', dataSheetName],
+      ['maxRows', EMPLOYEES_MAX_ROWS],
+      ['executionMode', 'ALL_OR_NOTHING'],
+      ['defaultStatus', 'ON_DUTY'],
+      ['linkedUserPolicy', 'UNLINKED'],
+      [],
+      ['columnHeader', 'canonicalField', 'required', 'type', 'rules'],
+      ...EMPLOYEE_COLUMNS.map((column) => [
+        column[language],
+        column.canonicalField,
+        column.required ? 'true' : 'false',
+        column.type,
+        JSON.stringify({
+          ...('defaultValue' in column
+            ? { defaultValue: column.defaultValue }
+            : {}),
+        }),
+      ]),
+    ]);
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const fileName = `FleetFuelPRO_Employees_Import_Template_v${EMPLOYEES_SCHEMA_VERSION}_${language}.xlsx`;
+
+    return {
+      buffer: Buffer.from(buffer),
+      fileName,
+      language,
+      templateType: EMPLOYEES_TEMPLATE_TYPE,
+      schemaVersion: EMPLOYEES_SCHEMA_VERSION,
+    };
+  }
+
 }

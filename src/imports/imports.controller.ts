@@ -18,6 +18,8 @@ import { ImportUploadService } from './import-upload.service';
 import { ImportsService } from './imports.service';
 import { ProjectImportConfirmationService } from './project-import-confirmation.service';
 import { ProjectImportValidationService } from './project-import-validation.service';
+import { EmployeeImportValidationService } from './employee-import-validation.service';
+import { EmployeeImportConfirmationService } from './employee-import-confirmation.service';
 
 const MAX_IMPORT_FILE_SIZE = 5 * 1024 * 1024;
 
@@ -30,6 +32,8 @@ export class ImportsController {
     private readonly importUploadService: ImportUploadService,
     private readonly projectImportValidationService: ProjectImportValidationService,
     private readonly projectImportConfirmationService: ProjectImportConfirmationService,
+    private readonly employeeImportValidationService: EmployeeImportValidationService,
+    private readonly employeeImportConfirmationService: EmployeeImportConfirmationService,
   ) {}
 
   @Get('access')
@@ -90,17 +94,74 @@ export class ImportsController {
     });
   }
 
+
+  @Get('templates/employees')
+  async downloadEmployeesTemplate(
+    @Request() req,
+    @Query('language') language = 'en',
+    @Query('companyId') companyId?: string,
+  ) {
+    await this.importsService.resolveImportContext(
+      req.user.userId,
+      req.user.roleName,
+      req.user.companyId,
+      companyId,
+    );
+
+    const template =
+      await this.importTemplateService.buildEmployeesTemplate(language);
+
+    return new StreamableFile(template.buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${template.fileName}"`,
+    });
+  }
+
+  @Post('employees/upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_IMPORT_FILE_SIZE },
+    }),
+  )
+  async uploadEmployeesImport(
+    @Request() req,
+    @UploadedFile() file: Express.Multer.File,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.importUploadService.uploadEmployeesTemplate({
+      file,
+      actorUserId: req.user.userId,
+      actorRoleName: req.user.roleName,
+      actorCompanyId: req.user.companyId,
+      targetCompanyId: companyId,
+    });
+  }
+
   @Post('batches/:id/validate')
   async validateBatch(
     @Request() req,
     @Param('id') id: string,
   ) {
-    return this.projectImportValidationService.validateProjectsBatch({
+    const batch = await this.importsService.getBatch(
+      id,
+      req.user.userId,
+      req.user.roleName,
+      req.user.companyId,
+    );
+
+    const input = {
       batchId: id,
       actorUserId: req.user.userId,
       actorRoleName: req.user.roleName,
       actorCompanyId: req.user.companyId,
-    });
+    };
+
+    if (batch.importType === 'EMPLOYEES') {
+      return this.employeeImportValidationService.validateEmployeesBatch(input);
+    }
+
+    return this.projectImportValidationService.validateProjectsBatch(input);
   }
 
   @Post('batches/:id/confirm')
@@ -108,12 +169,25 @@ export class ImportsController {
     @Request() req,
     @Param('id') id: string,
   ) {
-    return this.projectImportConfirmationService.confirmProjectsBatch({
+    const batch = await this.importsService.getBatch(
+      id,
+      req.user.userId,
+      req.user.roleName,
+      req.user.companyId,
+    );
+
+    const input = {
       batchId: id,
       actorUserId: req.user.userId,
       actorRoleName: req.user.roleName,
       actorCompanyId: req.user.companyId,
-    });
+    };
+
+    if (batch.importType === 'EMPLOYEES') {
+      return this.employeeImportConfirmationService.confirmEmployeesBatch(input);
+    }
+
+    return this.projectImportConfirmationService.confirmProjectsBatch(input);
   }
 
   @Get('batches/:id/preview')
@@ -121,12 +195,25 @@ export class ImportsController {
     @Request() req,
     @Param('id') id: string,
   ) {
-    return this.projectImportValidationService.getProjectsPreview({
+    const batch = await this.importsService.getBatch(
+      id,
+      req.user.userId,
+      req.user.roleName,
+      req.user.companyId,
+    );
+
+    const input = {
       batchId: id,
       actorUserId: req.user.userId,
       actorRoleName: req.user.roleName,
       actorCompanyId: req.user.companyId,
-    });
+    };
+
+    if (batch.importType === 'EMPLOYEES') {
+      return this.employeeImportValidationService.getEmployeesPreview(input);
+    }
+
+    return this.projectImportValidationService.getProjectsPreview(input);
   }
 
   @Get('batches/:id')
