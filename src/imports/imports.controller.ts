@@ -16,6 +16,7 @@ import { memoryStorage } from 'multer';
 import { ImportTemplateService } from './import-template.service';
 import { ImportUploadService } from './import-upload.service';
 import { ImportsService } from './imports.service';
+import { ProjectImportConfirmationService } from './project-import-confirmation.service';
 import { ProjectImportValidationService } from './project-import-validation.service';
 
 const MAX_IMPORT_FILE_SIZE = 5 * 1024 * 1024;
@@ -28,6 +29,7 @@ export class ImportsController {
     private readonly importTemplateService: ImportTemplateService,
     private readonly importUploadService: ImportUploadService,
     private readonly projectImportValidationService: ProjectImportValidationService,
+    private readonly projectImportConfirmationService: ProjectImportConfirmationService,
   ) {}
 
   @Get('access')
@@ -94,6 +96,19 @@ export class ImportsController {
     @Param('id') id: string,
   ) {
     return this.projectImportValidationService.validateProjectsBatch({
+      batchId: id,
+      actorUserId: req.user.userId,
+      actorRoleName: req.user.roleName,
+      actorCompanyId: req.user.companyId,
+    });
+  }
+
+  @Post('batches/:id/confirm')
+  async confirmBatch(
+    @Request() req,
+    @Param('id') id: string,
+  ) {
+    return this.projectImportConfirmationService.confirmProjectsBatch({
       batchId: id,
       actorUserId: req.user.userId,
       actorRoleName: req.user.roleName,
