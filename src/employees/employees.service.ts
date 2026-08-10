@@ -8,11 +8,13 @@ import { PrismaService } from '../prisma/prisma.service';
 
 import { CreateEmployeeDto } from './dto/create-employee.dto';
 import { UpdateEmployeeDto } from './dto/update-employee.dto';
+import { EmployeeCreationDomainService } from './employee-creation-domain.service';
 
 @Injectable()
 export class EmployeesService {
   constructor(
     private prisma: PrismaService,
+    private readonly employeeCreationDomainService: EmployeeCreationDomainService,
   ) {}
 
   private normalizeRoleName(roleName?: string) {
@@ -34,9 +36,9 @@ export class EmployeesService {
   private normalizeEmployeeId(
     employeeId: string,
   ) {
-    return String(employeeId || '')
-      .trim()
-      .toUpperCase();
+    return this.employeeCreationDomainService.normalizeEmployeeId(
+      employeeId,
+    );
   }
 
   async checkEmployeeIdAvailability(
@@ -204,55 +206,24 @@ export class EmployeesService {
       );
     }
 
-    return this.prisma.employee.create({
-      data: {
-        companyId:
-          targetCompanyId,
-
+    return this.employeeCreationDomainService.createEmployee(
+      this.prisma,
+      {
+        companyId: targetCompanyId,
         employeeId,
-
-        name:
-          createEmployeeDto.name?.trim(),
-
-        phone:
-          createEmployeeDto.phone?.trim() ||
-          null,
-
-        email:
-          createEmployeeDto.email?.trim() ||
-          null,
-
-        projectId:
-          project?.id || null,
-
-        linkedUserId:
-          createEmployeeDto.linkedUserId ||
-          null,
-
-        jobTitle:
-          isBootstrapEmployee
-            ? 'Company Admin'
-            : createEmployeeDto.jobTitle ||
-              'Operator',
-
+        name: createEmployeeDto.name,
+        phone: createEmployeeDto.phone,
+        email: createEmployeeDto.email,
+        projectId: project?.id || null,
+        linkedUserId: createEmployeeDto.linkedUserId || null,
+        jobTitle: isBootstrapEmployee
+          ? 'Company Admin'
+          : createEmployeeDto.jobTitle || 'Operator',
         status:
           createEmployeeDto.status ||
           'ON_DUTY',
       },
-
-      include: {
-        project: true,
-
-        linkedUser: {
-          select: {
-            id: true,
-            fullName: true,
-            email: true,
-            isActive: true,
-          },
-        },
-      },
-    });
+    );
   }
 
   async findAll(
