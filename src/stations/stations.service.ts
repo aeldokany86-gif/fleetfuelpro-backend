@@ -5,23 +5,21 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { StationCreationDomainService } from './station-creation-domain.service';
 
 @Injectable()
 export class StationsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private readonly stationCreationDomainService: StationCreationDomainService,
+  ) {}
 
   private normalizeStationId(stationId: string) {
-    return String(stationId || '').trim().toUpperCase();
+    return this.stationCreationDomainService.normalizeStationId(stationId);
   }
 
   private mapStationStatus(status?: string) {
-    const normalized = String(status || 'ACTIVE')
-      .trim()
-      .toUpperCase()
-      .replace(/[\s-]+/g, '_');
-
-    if (normalized === 'INACTIVE') return 'INACTIVE';
-    return 'ACTIVE';
+    return this.stationCreationDomainService.mapStationStatus(status);
   }
 
   private parseOptionalDate(value?: string, fallback = new Date()) {
@@ -368,82 +366,37 @@ export class StationsService {
       );
     }
 
-    const openingBalance = Number(body.openingBalance || 0);
-    if (!Number.isFinite(openingBalance)) {
-      throw new BadRequestException('Opening balance must be a valid number');
-    }
+    const openingBalance =
+      this.stationCreationDomainService.normalizeOpeningBalance(
+        body.openingBalance,
+      );
 
-    const currentCounter = Number(body.currentCounter || 0);
-    if (!Number.isFinite(currentCounter) || currentCounter < 0) {
-      throw new BadRequestException('Station counter must be a valid positive number');
-    }
+    const currentCounter =
+      this.stationCreationDomainService.normalizeCurrentCounter(
+        body.currentCounter,
+      );
 
-    const createdStation = await this.prisma.station.create({
-      data: {
-        companyId: body.companyId,
-        stationId,
-        name: body.name?.trim() || null,
-        type: body.type?.trim() || null,
-        capacity:
-          body.capacity === undefined || body.capacity === null
-            ? null
-            : Number(body.capacity),
-        openingBalance,
-        currentStock: openingBalance,
-        currentCounter,
-        currentLifetimeCounter: currentCounter,
-        currentCounterCycle: 1,
-        projectId: body.projectId || null,
-        status: this.mapStationStatus(body.status) as any,
-        createdById: body.createdById || null,
-      },
-      include: {
-        company: true,
-        project: true,
-      },
-    });
+    const capacity =
+      this.stationCreationDomainService.normalizeCapacity(
+        body.capacity,
+      );
 
-    // Keep the user-facing create operation fast. History/supporting records are
-    // written after the station is created and should not hold the main response.
-    // Run them sequentially instead of Promise.all to avoid stressing the Supabase pooler.
-    void (async () => {
-      try {
-        await this.prisma.stationStockMovement.create({
-          data: {
-            companyId: body.companyId,
-            stationId: createdStation.id,
-            movementType: 'OPENING_BALANCE' as any,
-            quantity: openingBalance,
-            balanceBefore: 0,
-            balanceAfter: openingBalance,
-            referenceType: 'STATION_CREATE',
-            referenceId: createdStation.id,
-            reason: 'Initial station opening balance',
-            createdByUserId: body.createdById || null,
-          },
-        });
-
-        if (body.projectId) {
-          await this.prisma.stationAssignmentHistory.create({
-            data: {
-              companyId: body.companyId,
-              stationId: createdStation.id,
-              fromProjectId: null,
-              toProjectId: body.projectId,
-              transferRequestId: null,
-              assignmentType: 'INITIAL_ASSIGNMENT' as any,
-              reason: 'Initial station project assignment',
-              assignedAt: new Date(),
-              assignedByUserId: body.createdById || null,
-            },
-          });
-        }
-      } catch (error) {
-        console.warn('Station post-create history write failed', error);
-      }
-    })();
-
-    return createdStation;
+    return this.prisma.$transaction(
+      (tx) =>
+        this.stationCreationDomainService.createStation(tx, {
+          companyId: body.companyId,
+          stationId,
+          name: body.name,
+          type: body.type,
+          capacity,
+          openingBalance,
+          currentCounter,
+          projectId: body.projectId || null,
+          status: body.status,
+          createdById: body.createdById,
+        }),
+      { maxWait: 5000, timeout: 15000 },
+    );
   }
 
   async update(
