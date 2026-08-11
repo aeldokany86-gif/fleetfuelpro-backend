@@ -20,6 +20,8 @@ import { ProjectImportConfirmationService } from './project-import-confirmation.
 import { ProjectImportValidationService } from './project-import-validation.service';
 import { EmployeeImportValidationService } from './employee-import-validation.service';
 import { EmployeeImportConfirmationService } from './employee-import-confirmation.service';
+import { StationImportValidationService } from './station-import-validation.service';
+import { StationImportConfirmationService } from './station-import-confirmation.service';
 
 const MAX_IMPORT_FILE_SIZE = 5 * 1024 * 1024;
 
@@ -34,6 +36,8 @@ export class ImportsController {
     private readonly projectImportConfirmationService: ProjectImportConfirmationService,
     private readonly employeeImportValidationService: EmployeeImportValidationService,
     private readonly employeeImportConfirmationService: EmployeeImportConfirmationService,
+    private readonly stationImportValidationService: StationImportValidationService,
+    private readonly stationImportConfirmationService: StationImportConfirmationService,
   ) {}
 
   @Get('access')
@@ -138,6 +142,50 @@ export class ImportsController {
     });
   }
 
+
+  @Get('templates/stations')
+  async downloadStationsTemplate(
+    @Request() req,
+    @Query('language') language = 'en',
+    @Query('companyId') companyId?: string,
+  ) {
+    await this.importsService.resolveImportContext(
+      req.user.userId,
+      req.user.roleName,
+      req.user.companyId,
+      companyId,
+    );
+
+    const template =
+      await this.importTemplateService.buildStationsTemplate(language);
+
+    return new StreamableFile(template.buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${template.fileName}"`,
+    });
+  }
+
+  @Post('stations/upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_IMPORT_FILE_SIZE },
+    }),
+  )
+  async uploadStationsImport(
+    @Request() req,
+    @UploadedFile() file: Express.Multer.File,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.importUploadService.uploadStationsTemplate({
+      file,
+      actorUserId: req.user.userId,
+      actorRoleName: req.user.roleName,
+      actorCompanyId: req.user.companyId,
+      targetCompanyId: companyId,
+    });
+  }
+
   @Post('batches/:id/validate')
   async validateBatch(
     @Request() req,
@@ -159,6 +207,10 @@ export class ImportsController {
 
     if (batch.importType === 'EMPLOYEES') {
       return this.employeeImportValidationService.validateEmployeesBatch(input);
+    }
+
+    if (batch.importType === 'STATIONS') {
+      return this.stationImportValidationService.validateStationsBatch(input);
     }
 
     return this.projectImportValidationService.validateProjectsBatch(input);
@@ -187,6 +239,10 @@ export class ImportsController {
       return this.employeeImportConfirmationService.confirmEmployeesBatch(input);
     }
 
+    if (batch.importType === 'STATIONS') {
+      return this.stationImportConfirmationService.confirmStationsBatch(input);
+    }
+
     return this.projectImportConfirmationService.confirmProjectsBatch(input);
   }
 
@@ -211,6 +267,10 @@ export class ImportsController {
 
     if (batch.importType === 'EMPLOYEES') {
       return this.employeeImportValidationService.getEmployeesPreview(input);
+    }
+
+    if (batch.importType === 'STATIONS') {
+      return this.stationImportValidationService.getStationsPreview(input);
     }
 
     return this.projectImportValidationService.getProjectsPreview(input);

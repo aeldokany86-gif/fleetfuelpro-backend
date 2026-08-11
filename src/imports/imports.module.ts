@@ -9,6 +9,9 @@ import { ProjectImportValidationService } from './project-import-validation.serv
 import { EmployeeCreationDomainService } from '../employees/employee-creation-domain.service';
 import { EmployeeImportValidationService } from './employee-import-validation.service';
 import { EmployeeImportConfirmationService } from './employee-import-confirmation.service';
+import { StationCreationDomainService } from '../stations/station-creation-domain.service';
+import { StationImportValidationService } from './station-import-validation.service';
+import { StationImportConfirmationService } from './station-import-confirmation.service';
 
 @Module({
   controllers: [ImportsController],
@@ -22,6 +25,9 @@ import { EmployeeImportConfirmationService } from './employee-import-confirmatio
     EmployeeCreationDomainService,
     EmployeeImportValidationService,
     EmployeeImportConfirmationService,
+    StationCreationDomainService,
+    StationImportValidationService,
+    StationImportConfirmationService,
   ],
   exports: [
     ImportsService,
@@ -31,6 +37,8 @@ import { EmployeeImportConfirmationService } from './employee-import-confirmatio
     ProjectImportConfirmationService,
     EmployeeImportValidationService,
     EmployeeImportConfirmationService,
+    StationImportValidationService,
+    StationImportConfirmationService,
   ],
 })
 export class ImportsModule {}
