@@ -521,11 +521,40 @@ export class EmployeesService {
       },
     });
 
+    const normalizedUpdatedName =
+      updateEmployeeDto.name !== undefined
+        ? updateEmployeeDto.name.trim()
+        : undefined;
+
+    const shouldSyncLinkedUserName =
+      normalizedUpdatedName !== undefined &&
+      Boolean(existing.linkedUserId);
+
+    const shouldDeactivateLinkedUser =
+      isRetiring &&
+      Boolean(existing.linkedUserId);
+
     if (
-      !isRetiring ||
-      !existing.linkedUserId
+      !shouldSyncLinkedUserName &&
+      !shouldDeactivateLinkedUser
     ) {
       return employeeUpdate;
+    }
+
+    const userUpdateData: {
+      fullName?: string;
+      isActive?: boolean;
+      deletedAt?: Date | null;
+    } = {};
+
+    if (shouldSyncLinkedUserName) {
+      userUpdateData.fullName =
+        normalizedUpdatedName;
+    }
+
+    if (shouldDeactivateLinkedUser) {
+      userUpdateData.isActive = false;
+      userUpdateData.deletedAt = retiredAt;
     }
 
     const [updatedEmployee] =
@@ -533,13 +562,10 @@ export class EmployeesService {
         employeeUpdate,
         this.prisma.user.updateMany({
           where: {
-            id: existing.linkedUserId,
+            id: existing.linkedUserId!,
             deletedAt: null,
           },
-          data: {
-            isActive: false,
-            deletedAt: retiredAt,
-          },
+          data: userUpdateData,
         }),
       ]);
 
