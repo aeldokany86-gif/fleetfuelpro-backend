@@ -12,6 +12,9 @@ import { EmployeeImportConfirmationService } from './employee-import-confirmatio
 import { StationCreationDomainService } from '../stations/station-creation-domain.service';
 import { StationImportValidationService } from './station-import-validation.service';
 import { StationImportConfirmationService } from './station-import-confirmation.service';
+import { AssetCreationDomainService } from '../assets/asset-creation-domain.service';
+import { AssetImportValidationService } from './asset-import-validation.service';
+import { AssetImportConfirmationService } from './asset-import-confirmation.service';
 
 @Module({
   controllers: [ImportsController],
@@ -28,6 +31,9 @@ import { StationImportConfirmationService } from './station-import-confirmation.
     StationCreationDomainService,
     StationImportValidationService,
     StationImportConfirmationService,
+    AssetCreationDomainService,
+    AssetImportValidationService,
+    AssetImportConfirmationService,
   ],
   exports: [
     ImportsService,
@@ -39,6 +45,8 @@ import { StationImportConfirmationService } from './station-import-confirmation.
     EmployeeImportConfirmationService,
     StationImportValidationService,
     StationImportConfirmationService,
+    AssetImportValidationService,
+    AssetImportConfirmationService,
   ],
 })
 export class ImportsModule {}

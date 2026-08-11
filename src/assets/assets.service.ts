@@ -7,26 +7,21 @@ import {
 import { randomUUID } from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { AssetCreationDomainService } from './asset-creation-domain.service';
 
 @Injectable()
 export class AssetsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private readonly assetCreationDomainService: AssetCreationDomainService,
+  ) {}
 
   private normalizeAssetId(assetId: string) {
-    return String(assetId || '')
-      .trim()
-      .toUpperCase()
-      .replace(/\s+/g, '');
+    return this.assetCreationDomainService.normalizeAssetId(assetId);
   }
 
   private mapAssetStatus(status?: string) {
-    const normalized = String(status || 'ACTIVE')
-      .trim()
-      .toUpperCase()
-      .replace(/[\s-]+/g, '_');
-
-    if (normalized === 'INACTIVE') return 'INACTIVE';
-    return 'ACTIVE';
+    return this.assetCreationDomainService.mapAssetStatus(status);
   }
 
   private normalizeRoleName(roleName: string) {
@@ -321,57 +316,16 @@ export class AssetsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const createdAsset = await tx.asset.create({
-        data: {
-          companyId: body.companyId,
-          assetId,
-          type: body.type.trim(),
-          category: body.category?.trim() || null,
-          fuelTankCapacity:
-            body.fuelTankCapacity === undefined || body.fuelTankCapacity === null
-              ? null
-              : Number(body.fuelTankCapacity),
-          currentOdometer:
-            body.currentOdometer === undefined || body.currentOdometer === null
-              ? 0
-              : Number(body.currentOdometer),
-          currentLifetimeOdometer:
-            body.currentOdometer === undefined || body.currentOdometer === null
-              ? 0
-              : Number(body.currentOdometer),
-          currentMeterCycle: 1,
-          projectId: body.projectId || null,
-          status: this.mapAssetStatus(body.status) as any,
-          createdById: body.createdById || null,
-        },
-        include: {
-          company: {
-            select: { id: true, name: true, code: true },
-          },
-          project: {
-            select: { id: true, code: true, name: true, projectManagerId: true },
-          },
-        },
-      });
-
-      if (body.projectId) {
-        await tx.assetAssignmentHistory.create({
-          data: {
-            companyId: body.companyId,
-            assetId: createdAsset.id,
-            fromProjectId: null,
-            toProjectId: body.projectId,
-            transferRequestId: null,
-            assignmentType: 'INITIAL_ASSIGNMENT' as any,
-            reason: 'Initial asset project assignment',
-            assignedAt: new Date(),
-            assignedByUserId: body.createdById || null,
-          },
-        });
-      }
-
-      return createdAsset;
+    return this.assetCreationDomainService.createAsset(this.prisma as any, {
+      companyId: body.companyId,
+      assetId,
+      type: body.type,
+      category: body.category,
+      fuelTankCapacity: body.fuelTankCapacity,
+      currentOdometer: body.currentOdometer,
+      projectId: body.projectId || null,
+      status: body.status,
+      createdById: body.createdById || null,
     });
   }
 

@@ -22,6 +22,8 @@ import { EmployeeImportValidationService } from './employee-import-validation.se
 import { EmployeeImportConfirmationService } from './employee-import-confirmation.service';
 import { StationImportValidationService } from './station-import-validation.service';
 import { StationImportConfirmationService } from './station-import-confirmation.service';
+import { AssetImportValidationService } from './asset-import-validation.service';
+import { AssetImportConfirmationService } from './asset-import-confirmation.service';
 
 const MAX_IMPORT_FILE_SIZE = 5 * 1024 * 1024;
 
@@ -38,6 +40,8 @@ export class ImportsController {
     private readonly employeeImportConfirmationService: EmployeeImportConfirmationService,
     private readonly stationImportValidationService: StationImportValidationService,
     private readonly stationImportConfirmationService: StationImportConfirmationService,
+    private readonly assetImportValidationService: AssetImportValidationService,
+    private readonly assetImportConfirmationService: AssetImportConfirmationService,
   ) {}
 
   @Get('access')
@@ -186,6 +190,50 @@ export class ImportsController {
     });
   }
 
+
+  @Get('templates/assets')
+  async downloadAssetsTemplate(
+    @Request() req,
+    @Query('language') language = 'en',
+    @Query('companyId') companyId?: string,
+  ) {
+    await this.importsService.resolveImportContext(
+      req.user.userId,
+      req.user.roleName,
+      req.user.companyId,
+      companyId,
+    );
+
+    const template =
+      await this.importTemplateService.buildAssetsTemplate(language);
+
+    return new StreamableFile(template.buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="${template.fileName}"`,
+    });
+  }
+
+  @Post('assets/upload')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: memoryStorage(),
+      limits: { fileSize: MAX_IMPORT_FILE_SIZE },
+    }),
+  )
+  async uploadAssetsImport(
+    @Request() req,
+    @UploadedFile() file: Express.Multer.File,
+    @Query('companyId') companyId?: string,
+  ) {
+    return this.importUploadService.uploadAssetsTemplate({
+      file,
+      actorUserId: req.user.userId,
+      actorRoleName: req.user.roleName,
+      actorCompanyId: req.user.companyId,
+      targetCompanyId: companyId,
+    });
+  }
+
   @Post('batches/:id/validate')
   async validateBatch(
     @Request() req,
@@ -211,6 +259,10 @@ export class ImportsController {
 
     if (batch.importType === 'STATIONS') {
       return this.stationImportValidationService.validateStationsBatch(input);
+    }
+
+    if (batch.importType === 'ASSETS') {
+      return this.assetImportValidationService.validateAssetsBatch(input);
     }
 
     return this.projectImportValidationService.validateProjectsBatch(input);
@@ -243,6 +295,10 @@ export class ImportsController {
       return this.stationImportConfirmationService.confirmStationsBatch(input);
     }
 
+    if (batch.importType === 'ASSETS') {
+      return this.assetImportConfirmationService.confirmAssetsBatch(input);
+    }
+
     return this.projectImportConfirmationService.confirmProjectsBatch(input);
   }
 
@@ -271,6 +327,10 @@ export class ImportsController {
 
     if (batch.importType === 'STATIONS') {
       return this.stationImportValidationService.getStationsPreview(input);
+    }
+
+    if (batch.importType === 'ASSETS') {
+      return this.assetImportValidationService.getAssetsPreview(input);
     }
 
     return this.projectImportValidationService.getProjectsPreview(input);

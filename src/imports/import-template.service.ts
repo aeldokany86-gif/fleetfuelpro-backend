@@ -12,6 +12,58 @@ const EMPLOYEES_SCHEMA_VERSION = 1;
 const EMPLOYEES_MAX_ROWS = 500;
 
 
+
+const ASSETS_TEMPLATE_TYPE = 'ASSETS';
+const ASSETS_SCHEMA_VERSION = 1;
+const ASSETS_MAX_ROWS = 500;
+
+const ASSET_COLUMNS = [
+  {
+    canonicalField: 'assetId',
+    required: true,
+    type: 'text',
+    en: 'Asset ID',
+    ar: 'كود المعدة',
+  },
+  {
+    canonicalField: 'assetType',
+    required: true,
+    type: 'text',
+    en: 'Asset Type',
+    ar: 'نوع المعدة',
+  },
+  {
+    canonicalField: 'category',
+    required: false,
+    type: 'text',
+    en: 'Category',
+    ar: 'الفئة',
+  },
+  {
+    canonicalField: 'fuelTankCapacity',
+    required: false,
+    type: 'number',
+    minInclusive: 0,
+    en: 'Fuel Tank Capacity',
+    ar: 'سعة خزان الوقود',
+  },
+  {
+    canonicalField: 'projectCode',
+    required: true,
+    type: 'text',
+    en: 'Project Code',
+    ar: 'كود المشروع',
+  },
+  {
+    canonicalField: 'currentOdometer',
+    required: true,
+    type: 'number',
+    minInclusive: 0,
+    en: 'Current Odometer',
+    ar: 'العداد الحالي',
+  },
+] as const;
+
 const STATIONS_TEMPLATE_TYPE = 'STATIONS';
 const STATIONS_SCHEMA_VERSION = 1;
 const STATIONS_MAX_ROWS = 500;
@@ -699,6 +751,156 @@ export class ImportTemplateService {
       language,
       templateType: STATIONS_TEMPLATE_TYPE,
       schemaVersion: STATIONS_SCHEMA_VERSION,
+    };
+  }
+
+
+  async buildAssetsTemplate(languageInput?: string) {
+    const language = this.normalizeTemplateLanguage(languageInput);
+    const isArabic = language === 'ar';
+
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = 'Fleet Fuel PRO';
+    workbook.created = new Date();
+    workbook.modified = new Date();
+
+    const dataSheetName = isArabic ? 'المعدات' : 'Assets';
+    const instructionsSheetName = isArabic ? 'تعليمات' : 'Instructions';
+
+    const instructions = workbook.addWorksheet(instructionsSheetName, {
+      views: [{ rightToLeft: isArabic }],
+    });
+
+    instructions.columns = [{ width: 110 }];
+    instructions.getCell('A1').value = isArabic
+      ? 'Fleet Fuel PRO - نموذج استيراد المعدات'
+      : 'Fleet Fuel PRO - Assets Import Template';
+    instructions.getCell('A1').font = {
+      bold: true,
+      size: 16,
+      color: { argb: 'FFFFFFFF' },
+    };
+    instructions.getCell('A1').fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0F172A' },
+    };
+    instructions.getCell('A1').alignment = {
+      horizontal: isArabic ? 'right' : 'left',
+      vertical: 'middle',
+    };
+    instructions.getRow(1).height = 28;
+
+    const instructionsText = isArabic
+      ? [
+          '1. أدخل البيانات في ورقة "المعدات" فقط ولا تغيّر أسماء الأعمدة.',
+          '2. الحقول المطلوبة: كود المعدة، نوع المعدة، كود المشروع، العداد الحالي.',
+          '3. يتم توحيد كود المعدة تلقائيًا بإزالة المسافات وتحويل الأحرف الإنجليزية إلى كبيرة.',
+          '4. يجب أن يشير كود المشروع إلى مشروع نشط داخل نفس الشركة.',
+          '5. الفئة وسعة خزان الوقود حقول اختيارية.',
+          '6. سعة خزان الوقود عند إدخالها والعداد الحالي يجب أن يكونا صفرًا أو أكبر.',
+          '7. كل معدة مستوردة تُنشأ تلقائيًا بحالة ACTIVE، ويبدأ العداد التراكمي من قيمة العداد الحالي.',
+          '8. الحد الأقصى للاستيراد في هذه النسخة هو 500 معدة.',
+          '9. لا تحذف أو تعدل ورقة النظام المخفية _fleetfuel_meta.',
+        ]
+      : [
+          '1. Enter data only in the "Assets" sheet and do not rename the columns.',
+          '2. Required fields: Asset ID, Asset Type, Project Code, Current Odometer.',
+          '3. Asset ID is normalized automatically by removing spaces and converting English letters to uppercase.',
+          '4. Project Code must identify an active project in the same company.',
+          '5. Category and Fuel Tank Capacity are optional.',
+          '6. Fuel Tank Capacity, when provided, and Current Odometer must be zero or positive.',
+          '7. Every imported asset is created automatically with status ACTIVE, and Lifetime Odometer starts from Current Odometer.',
+          '8. The maximum import size in this version is 500 assets.',
+          '9. Do not delete or modify the hidden system sheet _fleetfuel_meta.',
+        ];
+
+    instructionsText.forEach((text, index) => {
+      const cell = instructions.getCell(index + 3, 1);
+      cell.value = text;
+      cell.alignment = {
+        horizontal: isArabic ? 'right' : 'left',
+        vertical: 'top',
+        wrapText: true,
+      };
+      cell.font = { size: 11 };
+      instructions.getRow(index + 3).height = 26;
+    });
+
+    const assets = workbook.addWorksheet(dataSheetName, {
+      views: [{ state: 'frozen', ySplit: 1, rightToLeft: isArabic }],
+    });
+
+    assets.columns = ASSET_COLUMNS.map((column) => ({
+      header: column[language],
+      key: column.canonicalField,
+      width:
+        column.canonicalField === 'assetType' ||
+        column.canonicalField === 'category'
+          ? 26
+          : 22,
+    }));
+
+    const headerRow = assets.getRow(1);
+    headerRow.height = 28;
+    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF0F172A' },
+    };
+    headerRow.alignment = {
+      horizontal: 'center',
+      vertical: 'middle',
+      wrapText: true,
+    };
+
+    for (const field of ['assetId', 'projectCode'] as const) {
+      const columnIndex =
+        ASSET_COLUMNS.findIndex((column) => column.canonicalField === field) + 1;
+      assets.getColumn(columnIndex).numFmt = '@';
+
+      for (let row = 2; row <= ASSETS_MAX_ROWS + 1; row += 1) {
+        assets.getCell(row, columnIndex).numFmt = '@';
+      }
+    }
+
+    const meta = workbook.addWorksheet('_fleetfuel_meta');
+    meta.state = 'veryHidden';
+    meta.addRows([
+      ['metaKey', 'metaValue'],
+      ['templateType', ASSETS_TEMPLATE_TYPE],
+      ['schemaVersion', ASSETS_SCHEMA_VERSION],
+      ['templateLanguage', language],
+      ['dataSheet', dataSheetName],
+      ['maxRows', ASSETS_MAX_ROWS],
+      ['executionMode', 'ALL_OR_NOTHING'],
+      ['defaultStatus', 'ACTIVE'],
+      [],
+      [],
+      ['columnHeader', 'canonicalField', 'required', 'type', 'rules'],
+      ...ASSET_COLUMNS.map((column) => [
+        column[language],
+        column.canonicalField,
+        column.required ? 'true' : 'false',
+        column.type,
+        JSON.stringify({
+          ...('minInclusive' in column
+            ? { minInclusive: column.minInclusive }
+            : {}),
+        }),
+      ]),
+    ]);
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    const fileName = `FleetFuelPRO_Assets_Import_Template_v${ASSETS_SCHEMA_VERSION}_${language}.xlsx`;
+
+    return {
+      buffer: Buffer.from(buffer),
+      fileName,
+      language,
+      templateType: ASSETS_TEMPLATE_TYPE,
+      schemaVersion: ASSETS_SCHEMA_VERSION,
     };
   }
 
