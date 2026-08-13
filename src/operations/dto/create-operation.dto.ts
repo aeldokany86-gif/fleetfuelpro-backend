@@ -1,4 +1,5 @@
 import {
+  IsArray,
   IsEnum,
   IsNumber,
   IsOptional,
@@ -21,6 +22,20 @@ export enum OperationTypeDto {
   External_Transfer = 'External_Transfer',
 }
 
+export type OperationAttachmentDto = {
+  key?: string;
+  label?: string;
+  fileName?: string;
+  path?: string;
+  bucket?: string;
+  photoType?: string;
+  ownerType?: string;
+  ownerCode?: string;
+  mimeType?: string;
+  size?: number | string;
+  sizeBytes?: number | string;
+};
+
 export class CreateOperationDto {
   @IsEnum(OperationTypeDto)
   type!: OperationTypeDto;
@@ -36,6 +51,14 @@ export class CreateOperationDto {
   @IsOptional()
   @IsString()
   assetId?: string;
+
+  /*
+    Active operational project selected by the user.
+    Required by the service for multi-project Officer/Supervisor/Operator users.
+  */
+  @IsOptional()
+  @IsString()
+  currentProjectId?: string;
 
   @IsNumber()
   @IsPositive()
@@ -67,11 +90,12 @@ export class CreateOperationDto {
   notes?: string;
 
   /*
-    Optional until Supabase Storage upload is enabled.
-    Later this will store paths only, not Base64.
+    Operation photos are uploaded first and the operation request stores
+    only their Supabase Storage metadata/paths. The service enforces the
+    exact three required photo types for each operation type.
   */
-  @IsOptional()
-  attachments?: Record<string, unknown>;
+  @IsArray()
+  attachments!: OperationAttachmentDto[];
 
   /*
     TEMPORARY TESTING FIELDS ONLY.

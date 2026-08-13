@@ -41,7 +41,7 @@ type CurrentUserContext = {
   role: NormalizedRole;
   companyId?: string;
   existsInDatabase: boolean;
-  assignedProjectId?: string | null;
+  assignedProjectIds: string[];
   managedProjectIds: string[];
   fuelerEmployeeId: string | null;
   fuelerName: string;
@@ -157,6 +157,7 @@ export class OperationsService {
     this.validateRoleCanCreateAnyOperation(currentUser);
     this.validateRoleCanCreateOperationType(currentUser, type);
     this.validateRequiredFieldsByType(type, dto);
+    this.validateRequiredPhotosByType(type, dto.attachments);
 
     /*
       If you test with fake headers such as op-001/mgr-001, the user does not exist in DB.
@@ -202,6 +203,13 @@ export class OperationsService {
     );
     if (!approval) {
       throw new ForbiddenException('You do not have a pending approval for this operation.');
+    }
+
+    if (action === 'APPROVE') {
+      this.validateRequiredPhotosByType(
+        this.normalizeOperationType(operation.type),
+        operation.attachments,
+      );
     }
 
     const operationDto = {
@@ -473,14 +481,13 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
   const accessibleProjectIds =
     currentUser.role === 'Manager'
       ? currentUser.managedProjectIds
-      : ['Operator', 'Supervisor'].includes(currentUser.role) &&
-          currentUser.assignedProjectId
-        ? [currentUser.assignedProjectId]
+      : ['Officer', 'Operator', 'Supervisor'].includes(currentUser.role)
+        ? currentUser.assignedProjectIds
         : [];
   const scopedProjectIds = filters.projectId
     ? [filters.projectId]
     : accessibleProjectIds;
-  const needsProjectScope = ['Manager', 'Operator', 'Supervisor'].includes(
+  const needsProjectScope = ['Manager', 'Officer', 'Operator', 'Supervisor'].includes(
     currentUser.role,
   );
 
@@ -646,7 +653,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
               externalStationName: dto.externalStationName || null,
               invoiceNumber: dto.invoiceNumber || null,
               notes: dto.notes || null,
-              attachments: dto.attachments || undefined,
+              attachments: dto.attachments,
               fuelPriceHistoryId: costSnapshot.fuelPriceHistoryId,
               pricePerLiterAtOperation: costSnapshot.pricePerLiterAtOperation,
               totalCostAtOperation: costSnapshot.totalCostAtOperation,
@@ -772,6 +779,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         sourceStationId: dto.sourceStationId || null,
         destinationStationId: dto.destinationStationId || null,
         assetId: dto.assetId || null,
+        currentProjectId: dto.currentProjectId || null,
         quantity: dto.quantity,
         odometer: dto.odometer ?? null,
         stationCounter: dto.stationCounter ?? null,
@@ -779,6 +787,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         invoiceNumber: dto.invoiceNumber || null,
         externalInvoiceAmount: dto.externalInvoiceAmount ?? null,
         notes: dto.notes || null,
+        attachments: dto.attachments,
       },
     };
   }
@@ -801,9 +810,18 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     const dbUser = await (this.prisma as any).user.findUnique({
       where: { id: userId },
       include: {
+        company: { select: { multiProjectEnabled: true } },
         role: true,
         linkedEmployee: {
-          select: { projectId: true, employeeId: true, name: true },
+          select: {
+            projectId: true,
+            employeeId: true,
+            name: true,
+            projectAssignments: {
+              where: { project: { is: { deletedAt: null, isActive: true } } },
+              select: { projectId: true },
+            },
+          },
         },
         managedProjects: { where: { deletedAt: null, isActive: true }, select: { id: true } },
       },
@@ -816,7 +834,18 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         role: this.normalizeRole(dbUser.role?.name || fallbackRole),
         companyId: dbUser.companyId,
         existsInDatabase: true,
-        assignedProjectId: dbUser.linkedEmployee?.projectId || null,
+        assignedProjectIds: Array.from(
+          new Set(
+            [
+              dbUser.linkedEmployee?.projectId || null,
+              ...(dbUser.company?.multiProjectEnabled
+                ? (dbUser.linkedEmployee?.projectAssignments || []).map(
+                    (assignment: any) => assignment.projectId,
+                  )
+                : []),
+            ].filter(Boolean),
+          ),
+        ) as string[],
         managedProjectIds: dbUser.managedProjects.map((project: any) => project.id),
         fuelerEmployeeId:
           dbUser.linkedEmployee?.employeeId || dbUser.employeeId || null,
@@ -831,7 +860,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       role: this.normalizeRole(fallbackRole),
       companyId: dto.companyId,
       existsInDatabase: false,
-      assignedProjectId: null,
+      assignedProjectIds: [],
       managedProjectIds: [],
       fuelerEmployeeId: null,
       fuelerName: fallbackName || 'Testing User',
@@ -882,7 +911,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     this.validateProjectRules(type, entities);
     this.validateTankCapacity(type, entities, Number(dto.quantity));
-    this.validateUserProjectAccess(user, type, entities);
+    this.validateUserProjectAccess(user, type, entities, dto);
     return entities;
   }
 
@@ -902,8 +931,9 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     user: CurrentUserContext,
     type: NormalizedOperationType,
     entities: LoadedOperationEntities,
+    dto: CreateOperationDto,
   ) {
-    if (!['Operator', 'Supervisor', 'Manager'].includes(user.role)) return;
+    if (!['Officer', 'Operator', 'Supervisor', 'Manager'].includes(user.role)) return;
 
     const requiredProjectIds = new Set<string>();
     if (type === 'DIRECT_REFUEL') {
@@ -921,14 +951,97 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     }
 
     if (user.role === 'Manager') {
-      const hasAccess = [...requiredProjectIds].some((id) => user.managedProjectIds.includes(id));
-      if (!hasAccess) throw new ForbiddenException('Manager is not assigned to any project involved in this operation.');
+      const hasAccess = [...requiredProjectIds].some((id) =>
+        user.managedProjectIds.includes(id),
+      );
+      if (!hasAccess) {
+        throw new ForbiddenException(
+          'Manager is not assigned to any project involved in this operation.',
+        );
+      }
       return;
     }
 
-    if (!user.assignedProjectId || !requiredProjectIds.has(user.assignedProjectId)) {
-      throw new ForbiddenException('User can create operations for the assigned project only.');
+    const hasAllRequiredProjects = [...requiredProjectIds].every((id) =>
+      user.assignedProjectIds.includes(id),
+    );
+
+    if (!user.assignedProjectIds.length || !hasAllRequiredProjects) {
+      throw new ForbiddenException(
+        'User can create operations for assigned projects only.',
+      );
     }
+
+    /*
+      Selected Project Context enforcement for lower operational roles.
+
+      Single-project employees keep the current behavior and do not need to
+      send currentProjectId. Multi-project employees must explicitly send the
+      project currently selected in the User Project Card.
+
+      External Transfer is the intentional exception to "all entities must be
+      inside the selected project": the selected context is the SOURCE project,
+      while the destination may be another assigned project.
+    */
+    const selectedProjectId = String(dto.currentProjectId || '').trim();
+
+    if (user.assignedProjectIds.length > 1 && !selectedProjectId) {
+      throw new BadRequestException(
+        'currentProjectId is required for multi-project operations.',
+      );
+    }
+
+    const effectiveSelectedProjectId =
+      selectedProjectId || user.assignedProjectIds[0] || '';
+
+    if (
+      effectiveSelectedProjectId &&
+      !user.assignedProjectIds.includes(effectiveSelectedProjectId)
+    ) {
+      throw new ForbiddenException(
+        'Selected project is not assigned to this user.',
+      );
+    }
+
+    const operationContextProjectId =
+      this.getOperationContextProjectId(type, entities);
+
+    if (
+      effectiveSelectedProjectId &&
+      operationContextProjectId &&
+      operationContextProjectId !== effectiveSelectedProjectId
+    ) {
+      throw new ForbiddenException(
+        'Operation must be created inside the currently selected project.',
+      );
+    }
+  }
+
+  private getOperationContextProjectId(
+    type: NormalizedOperationType,
+    entities: LoadedOperationEntities,
+  ): string | null {
+    if (type === 'DIRECT_REFUEL') {
+      return entities.assetProjectId || entities.sourceProjectId || null;
+    }
+
+    if (type === 'EXTERNAL_DIRECT_REFUEL') {
+      return entities.assetProjectId || null;
+    }
+
+    if (type === 'INTERNAL_TRANSFER') {
+      return entities.sourceProjectId || entities.destinationProjectId || null;
+    }
+
+    if (type === 'EXTERNAL_SUPPLY') {
+      return entities.destinationProjectId || null;
+    }
+
+    if (type === 'EXTERNAL_TRANSFER') {
+      return entities.sourceProjectId || null;
+    }
+
+    return null;
   }
 
   private validateProjectRules(
@@ -1741,6 +1854,67 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     if (user.role === 'Supervisor') return;
     if (user.role === 'Manager') return;
+  }
+
+  private validateRequiredPhotosByType(
+    type: NormalizedOperationType,
+    attachments: unknown,
+  ) {
+    const requiredPhotoTypes: Record<NormalizedOperationType, string[]> = {
+      DIRECT_REFUEL: ['odometer', 'asset', 'asset-meter'],
+      EXTERNAL_DIRECT_REFUEL: ['invoice', 'asset-meter', 'asset'],
+      INTERNAL_TRANSFER: [
+        'destination-meter',
+        'station-number',
+        'fuel-quantity',
+      ],
+      EXTERNAL_SUPPLY: ['destination-meter', 'station-number', 'invoice'],
+      EXTERNAL_TRANSFER: [
+        'source-meter',
+        'destination-meter',
+        'fuel-quantity',
+      ],
+    };
+
+    if (!Array.isArray(attachments) || attachments.length !== 3) {
+      throw new BadRequestException(
+        'Exactly three required operation photos must be uploaded before saving the operation.',
+      );
+    }
+
+    const normalizedAttachments = attachments.map((attachment: any) => ({
+      photoType: String(
+        attachment?.photoType || attachment?.type || attachment?.key || '',
+      )
+        .trim()
+        .toLowerCase(),
+      path: String(attachment?.path || '').trim(),
+    }));
+
+    if (normalizedAttachments.some((attachment) => !attachment.path)) {
+      throw new BadRequestException(
+        'Every required operation photo must have a valid uploaded storage path.',
+      );
+    }
+
+    const expectedTypes = requiredPhotoTypes[type];
+    const receivedTypes = normalizedAttachments.map(
+      (attachment) => attachment.photoType,
+    );
+
+    const missingTypes = expectedTypes.filter(
+      (photoType) => !receivedTypes.includes(photoType),
+    );
+    const unexpectedTypes = receivedTypes.filter(
+      (photoType) => !expectedTypes.includes(photoType),
+    );
+    const uniqueTypes = new Set(receivedTypes);
+
+    if (missingTypes.length || unexpectedTypes.length || uniqueTypes.size !== 3) {
+      throw new BadRequestException(
+        `Invalid operation photo package for ${this.toDisplayType(type)}. Required photo types: ${expectedTypes.join(', ')}.`,
+      );
+    }
   }
 
   private validateRequiredFieldsByType(

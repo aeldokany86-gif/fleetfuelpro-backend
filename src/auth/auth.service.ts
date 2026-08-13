@@ -2,6 +2,7 @@ import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcryptjs';
+import { Prisma } from '@prisma/client';
 
 @Injectable()
 export class AuthService {
@@ -119,6 +120,15 @@ export class AuthService {
       linkedEmployee: {
         include: {
           project: true,
+          projectAssignments: {
+            where: { project: { is: { deletedAt: null, isActive: true } } },
+            include: {
+              project: {
+                select: { id: true, name: true, code: true },
+              },
+            },
+            orderBy: { assignedAt: 'asc' },
+          },
         },
       },
       managedProjects: {
@@ -132,7 +142,7 @@ export class AuthService {
           code: true,
         },
       },
-    };
+    } satisfies Prisma.UserInclude;
   }
 
   private async loadAuthRelationsSeparately(
@@ -175,6 +185,15 @@ export class AuthService {
           linkedEmployee: {
             include: {
               project: true,
+              projectAssignments: {
+                where: { project: { is: { deletedAt: null, isActive: true } } },
+                include: {
+                  project: {
+                    select: { id: true, name: true, code: true },
+                  },
+                },
+                orderBy: { assignedAt: 'asc' },
+              },
             },
           },
         },
@@ -766,15 +785,22 @@ export class AuthService {
 
     const employeeProject = user.linkedEmployee?.project;
 
+    const employeeAssignedProjects = [
+      ...(employeeProject
+        ? [{ id: employeeProject.id, name: employeeProject.name, code: employeeProject.code }]
+        : []),
+      ...(user.company?.multiProjectEnabled
+        ? (user.linkedEmployee?.projectAssignments || []).map((assignment: any) => assignment.project)
+        : []),
+    ].filter((project, index, list) =>
+      project && list.findIndex((item) => item?.id === project.id) === index,
+    );
+
     const assignedProjects = isAllProjectsRole
       ? ['All']
-      : employeeProject
-        ? [
-            employeeProject.id,
-            employeeProject.name,
-            employeeProject.code,
-          ].filter(Boolean)
-        : [];
+      : employeeAssignedProjects
+          .flatMap((project) => [project.id, project.name, project.code])
+          .filter(Boolean);
 
     const managedProjects =
       isAllProjectsRole
@@ -811,7 +837,9 @@ export class AuthService {
       fuelerId: user.linkedEmployee?.employeeId || user.linkedEmployee?.id || '',
       teamStatus: user.linkedEmployee?.status || '',
       teamProject: employeeProject?.name || employeeProject?.code || user.company?.name || '',
+      multiProjectEnabled: Boolean(user.company?.multiProjectEnabled),
       assignedProjects,
+      assignedProjectDetails: isAllProjectsRole ? [] : employeeAssignedProjects,
       managedProjects,
       linkedEmployee: user.linkedEmployee
         ? {

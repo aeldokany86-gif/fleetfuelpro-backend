@@ -24,6 +24,7 @@ export class EmployeeTransfersController {
       toProjectId: string;
       requestedByUserId: string;
       effectiveDate?: string;
+      keepLinkedProjects?: boolean;
     },
   ) {
     return this.service.createTransferRequest(
@@ -31,6 +32,8 @@ export class EmployeeTransfersController {
       body.toProjectId,
       body.requestedByUserId,
       body.effectiveDate,
+      null,
+      body.keepLinkedProjects ?? true,
     );
   }
 
@@ -41,12 +44,40 @@ export class EmployeeTransfersController {
       employeeIds: string[];
       toProjectId: string;
       requestedByUserId: string;
+      keepLinkedProjects?: boolean;
     },
   ) {
     return this.service.createBulkTransferRequests(
       body.employeeIds,
       body.toProjectId,
       body.requestedByUserId,
+      body.keepLinkedProjects ?? true,
+    );
+  }
+
+
+  @Get('project-removal-requests/pending')
+  pendingProjectRemovalRequests(
+    @Query('approverUserId') approverUserId: string,
+  ) {
+    return this.service.getPendingProjectRemovalRequests(approverUserId);
+  }
+
+  @Patch('project-removal-requests/:id/review')
+  reviewProjectRemovalRequest(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      reviewerUserId: string;
+      approve: boolean;
+      rejectionReason?: string;
+    },
+  ) {
+    return this.service.reviewProjectRemovalRequest(
+      id,
+      body.reviewerUserId,
+      body.approve,
+      body.rejectionReason,
     );
   }
 

@@ -97,6 +97,56 @@ export class EmployeesController {
     );
   }
 
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin', 'Manager', 'Platform User', 'PlatformAdmin')
+  @Get(':id/project-assignments')
+  getProjectAssignments(
+    @Param('id') id: string,
+    @Request() req,
+  ) {
+    return this.employeesService.getProjectAssignments(
+      id,
+      req.user.userId,
+      req.user.companyId,
+      req.user.roleName || req.user.role || req.user.roleNameNormalized,
+    );
+  }
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin', 'Manager', 'Platform User', 'PlatformAdmin')
+  @Post(':id/project-assignments')
+  addProjectAssignment(
+    @Param('id') id: string,
+    @Body() body: { projectId: string },
+    @Request() req,
+  ) {
+    return this.employeesService.addProjectAssignment(
+      id,
+      body.projectId,
+      req.user.userId,
+      req.user.companyId,
+      req.user.roleName || req.user.role || req.user.roleNameNormalized,
+    );
+  }
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin', 'Manager', 'Platform User', 'PlatformAdmin')
+  @Delete(':id/project-assignments')
+  removeProjectAssignments(
+    @Param('id') id: string,
+    @Body() body: { projectIds: string[] },
+    @Request() req,
+  ) {
+    return this.employeesService.removeProjectAssignments(
+      id,
+      body.projectIds,
+      req.user.userId,
+      req.user.companyId,
+      req.user.roleName || req.user.role || req.user.roleNameNormalized,
+    );
+  }
+
   @Get(':id')
   findOne(
     @Param('id') id: string,

@@ -208,7 +208,274 @@ export class EmployeeTransfersService {
       fromProject: true,
       toProject: true,
       approvals: true,
+      projectRemovalRequests: true,
     };
+  }
+
+
+  private async applyMultiProjectTransferState(
+    tx: any,
+    request: any,
+  ) {
+    // Keep the common "keep linked projects" path intentionally lightweight.
+    // The transfer transaction only needs the company feature flag before
+    // applying the Primary/Additional swap; full assignment loading is needed
+    // only for the optional cleanup workflow.
+    const company = await tx.company.findUnique({
+      where: { id: request.companyId },
+      select: { multiProjectEnabled: true },
+    });
+
+    if (!company) {
+      throw new NotFoundException('Company not found while applying transfer');
+    }
+
+    await tx.employee.update({
+      where: { id: request.employeeId },
+      data: { projectId: request.toProjectId },
+    });
+
+    // The destination becomes Primary, therefore it must never remain duplicated
+    // in the Additional Projects table.
+    await tx.employeeProjectAssignment.deleteMany({
+      where: {
+        employeeId: request.employeeId,
+        projectId: request.toProjectId,
+      },
+    });
+
+    if (!company.multiProjectEnabled) {
+      return;
+    }
+
+    if (request.keepLinkedProjects !== false) {
+      // Transfer changes only the Primary Project. The old Primary becomes
+      // Additional and all other Additional links are preserved.
+      if (request.fromProjectId && request.fromProjectId !== request.toProjectId) {
+        await tx.employeeProjectAssignment.upsert({
+          where: {
+            employeeId_projectId: {
+              employeeId: request.employeeId,
+              projectId: request.fromProjectId,
+            },
+          },
+          update: {},
+          create: {
+            companyId: request.companyId,
+            employeeId: request.employeeId,
+            projectId: request.fromProjectId,
+            assignedByUserId: request.requestedByUserId,
+          },
+        });
+      }
+      return;
+    }
+
+    // Cleanup mode needs the remaining Additional links. This query is deferred
+    // until here so normal transfers do not carry unnecessary relation loading
+    // inside the interactive Prisma transaction.
+    const additionalAssignments = await tx.employeeProjectAssignment.findMany({
+      where: {
+        employeeId: request.employeeId,
+      },
+      select: { projectId: true },
+    });
+
+    const previousLinkedProjectIds = Array.from(
+      new Set([
+        request.fromProjectId,
+        ...additionalAssignments.map((assignment: any) => assignment.projectId),
+      ]),
+    ).filter((projectId) => projectId && projectId !== request.toProjectId);
+
+    if (!previousLinkedProjectIds.length) {
+      return;
+    }
+
+    const linkedProjects = await tx.project.findMany({
+      where: {
+        id: { in: previousLinkedProjectIds },
+        companyId: request.companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        projectManagerId: true,
+      },
+    });
+
+    const projectById = new Map(
+      linkedProjects.map((project: any) => [project.id, project]),
+    );
+
+    const requester = await tx.user.findUnique({
+      where: { id: request.requestedByUserId },
+      include: { role: true },
+    });
+    const requesterIsManager = this.isManagerRole(requester?.role?.name || '');
+
+    for (const projectId of previousLinkedProjectIds) {
+      const project = projectById.get(projectId) as any;
+      if (!project) continue;
+
+      // Primary Project is always protected; this is a second guard in case
+      // project state changes between request creation and application.
+      if (projectId === request.toProjectId) continue;
+
+      const requesterManagesProject =
+        requesterIsManager && project.projectManagerId === request.requestedByUserId;
+
+      if (requesterManagesProject) {
+        await tx.employeeProjectAssignment.deleteMany({
+          where: {
+            employeeId: request.employeeId,
+            projectId,
+          },
+        });
+        continue;
+      }
+
+      // Keep the access active until that project's manager approves removal.
+      await tx.employeeProjectAssignment.upsert({
+        where: {
+          employeeId_projectId: {
+            employeeId: request.employeeId,
+            projectId,
+          },
+        },
+        update: {},
+        create: {
+          companyId: request.companyId,
+          employeeId: request.employeeId,
+          projectId,
+          assignedByUserId: request.requestedByUserId,
+        },
+      });
+
+      if (!project.projectManagerId) {
+        // No silent deletion when a project has no manager. Access stays in place.
+        // An Admin can resolve the project manager first, then the removal can be
+        // requested explicitly from Team management.
+        continue;
+      }
+
+      await tx.employeeProjectRemovalRequest.upsert({
+        where: {
+          transferRequestId_employeeId_projectId: {
+            transferRequestId: request.id,
+            employeeId: request.employeeId,
+            projectId,
+          },
+        },
+        update: {},
+        create: {
+          companyId: request.companyId,
+          employeeId: request.employeeId,
+          projectId,
+          transferRequestId: request.id,
+          requestedByUserId: request.requestedByUserId,
+          approverUserId: project.projectManagerId,
+          status: 'PENDING',
+          reason: 'REMOVE_LINKED_PROJECT_AFTER_EMPLOYEE_TRANSFER',
+        },
+      });
+    }
+  }
+
+  async getPendingProjectRemovalRequests(approverUserId: string) {
+    if (!approverUserId) {
+      throw new BadRequestException('Approver user ID is required');
+    }
+
+    return this.prisma.employeeProjectRemovalRequest.findMany({
+      where: {
+        approverUserId,
+        status: 'PENDING',
+      },
+      include: {
+        employee: true,
+        project: true,
+        transferRequest: {
+          include: {
+            fromProject: true,
+            toProject: true,
+          },
+        },
+        requestedBy: {
+          select: { id: true, fullName: true, email: true },
+        },
+      },
+      orderBy: { requestedAt: 'desc' },
+    });
+  }
+
+  async reviewProjectRemovalRequest(
+    requestId: string,
+    reviewerUserId: string,
+    approve: boolean,
+    rejectionReason?: string,
+  ) {
+    const request = await this.prisma.employeeProjectRemovalRequest.findUnique({
+      where: { id: requestId },
+      include: { employee: true, project: true },
+    });
+
+    if (!request) {
+      throw new NotFoundException('Project removal request not found');
+    }
+
+    if (request.status !== 'PENDING') {
+      throw new BadRequestException('Project removal request already reviewed');
+    }
+
+    if (request.approverUserId !== reviewerUserId) {
+      throw new BadRequestException('User cannot review this project removal request');
+    }
+
+    const reviewer = await this.getRequester(reviewerUserId, request.companyId);
+    if (!this.isManagerRole(reviewer.role?.name || '')) {
+      throw new BadRequestException('Only the assigned Project Manager can review this removal request');
+    }
+
+    const now = new Date();
+
+    if (!approve) {
+      return this.prisma.employeeProjectRemovalRequest.update({
+        where: { id: requestId },
+        data: {
+          status: 'REJECTED',
+          reviewedByUserId: reviewerUserId,
+          reviewedAt: now,
+          rejectionReason: rejectionReason || 'Rejected',
+        },
+        include: { employee: true, project: true },
+      });
+    }
+
+    // Never remove the employee from the current Primary Project, even if an
+    // older pending request exists for that project.
+    if (request.employee.projectId === request.projectId) {
+      throw new BadRequestException('Current primary project cannot be removed');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.employeeProjectAssignment.deleteMany({
+        where: {
+          employeeId: request.employeeId,
+          projectId: request.projectId,
+        },
+      });
+
+      return tx.employeeProjectRemovalRequest.update({
+        where: { id: requestId },
+        data: {
+          status: 'APPROVED',
+          reviewedByUserId: reviewerUserId,
+          reviewedAt: now,
+        },
+        include: { employee: true, project: true },
+      });
+    }, { timeout: 60000 });
   }
 
   async createTransferRequest(
@@ -217,6 +484,7 @@ export class EmployeeTransfersService {
     requestedByUserId: string,
     effectiveDate?: string | Date | null,
     transferBatchId?: string | null,
+    keepLinkedProjects: boolean = true,
   ) {
     const employee =
       await this.prisma.employee.findFirst({
@@ -339,6 +607,7 @@ export class EmployeeTransfersService {
           toProjectId,
           requestedByUserId,
           transferBatchId: transferBatchId || null,
+          keepLinkedProjects,
           employeeCodeAtTransfer: employee.employeeId,
           employeeNameAtTransfer: employee.name,
           status: 'PENDING',
@@ -430,6 +699,7 @@ export class EmployeeTransfersService {
             toProjectId,
             requestedByUserId,
             transferBatchId: transferBatchId || null,
+            keepLinkedProjects,
             employeeCodeAtTransfer: employee.employeeId,
             employeeNameAtTransfer: employee.name,
             status: fullyApproved
@@ -475,14 +745,7 @@ export class EmployeeTransfersService {
         return transferRequest;
       }
 
-      await tx.employee.update({
-        where: {
-          id: employee.id,
-        },
-        data: {
-          projectId: toProjectId,
-        },
-      });
+      await this.applyMultiProjectTransferState(tx, transferRequest);
 
       return tx.employeeTransferRequest.findFirst({
         where: {
@@ -490,13 +753,14 @@ export class EmployeeTransfersService {
         },
         include: this.buildInclude(),
       });
-    }, { timeout: 20000 });
+    }, { timeout: 60000 });
   }
 
   async createBulkTransferRequests(
     employeeIds: string[],
     toProjectId: string,
     requestedByUserId: string,
+    keepLinkedProjects: boolean = true,
   ) {
     const uniqueEmployeeIds = Array.from(
       new Set(
@@ -538,6 +802,7 @@ export class EmployeeTransfersService {
           requestedByUserId,
           null,
           transferBatchId,
+          keepLinkedProjects,
         ),
       );
     }
@@ -643,6 +908,7 @@ export class EmployeeTransfersService {
       requestedByName:
         request.requestedBy.fullName || request.requestedBy.email,
       status: request.status,
+      keepLinkedProjects: request.keepLinkedProjects,
       reason: request.reason,
       rejectionReason: request.rejectionReason,
       requestedAt: request.createdAt,
@@ -763,7 +1029,7 @@ export class EmployeeTransfersService {
             },
             include: this.buildInclude(),
           });
-        }, { timeout: 20000 });
+        }, { timeout: 60000 });
       }
 
       return this.prisma.$transaction(async (tx) => {
@@ -781,14 +1047,7 @@ export class EmployeeTransfersService {
           },
         });
 
-        await tx.employee.update({
-          where: {
-            id: request.employeeId,
-          },
-          data: {
-            projectId: request.toProjectId,
-          },
-        });
+        await this.applyMultiProjectTransferState(tx, request);
 
         return tx.employeeTransferRequest.update({
           where: {
@@ -803,7 +1062,7 @@ export class EmployeeTransfersService {
           },
           include: this.buildInclude(),
         });
-      }, { timeout: 20000 });
+      }, { timeout: 60000 });
     }
 
     const pendingApproval =
@@ -847,7 +1106,7 @@ export class EmployeeTransfersService {
 
           include: this.buildInclude(),
         });
-      }, { timeout: 20000 });
+      }, { timeout: 60000 });
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -887,14 +1146,7 @@ export class EmployeeTransfersService {
         });
       }
 
-      await tx.employee.update({
-        where: {
-          id: request.employeeId,
-        },
-        data: {
-          projectId: request.toProjectId,
-        },
-      });
+      await this.applyMultiProjectTransferState(tx, request);
 
       return tx.employeeTransferRequest.update({
         where: {
@@ -913,6 +1165,6 @@ export class EmployeeTransfersService {
 
         include: this.buildInclude(),
       });
-    }, { timeout: 20000 });
+    }, { timeout: 60000 });
   }
 }

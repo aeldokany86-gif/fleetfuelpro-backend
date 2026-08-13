@@ -92,4 +92,14 @@ export class CompaniesController {
     return this.companiesService.updateDataImportAccess(id, body.enabled);
   }
 
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Platform User')
+  @Patch(':id/multi-project-access')
+  async updateMultiProjectAccess(
+    @Param('id') id: string,
+    @Body() body: { enabled: boolean },
+  ) {
+    return this.companiesService.updateMultiProjectAccess(id, body.enabled);
+  }
+
 }

@@ -19,6 +19,7 @@ model Company {
   subscriptionPlan         String                     @default("trial")
   isActive                 Boolean                    @default(true)
   dataImportEnabled        Boolean                    @default(false)
+  multiProjectEnabled      Boolean                    @default(false)
   currency                 String                     @default("SAR")
   language                 String                     @default("EN-AR")
   createdAt                DateTime                   @default(now())
@@ -29,6 +30,8 @@ model Company {
   assetAssignmentHistory   AssetAssignmentHistory[]
   assetTransferRequests    AssetTransferRequest[]
   employees                Employee[]
+  employeeProjectAssignments EmployeeProjectAssignment[]
+  employeeProjectRemovalRequests EmployeeProjectRemovalRequest[]
   employeeTransferRequests EmployeeTransferRequest[]
   operations               Operation[]
   operationCorrections     OperationCorrection[]
@@ -155,6 +158,8 @@ model Project {
   assetTransferRequestsFrom    AssetTransferRequest[]     @relation("AssetTransferFromProject")
   assetTransferRequestsTo      AssetTransferRequest[]     @relation("AssetTransferToProject")
   employees                    Employee[]
+  employeeProjectAssignments  EmployeeProjectAssignment[]
+  employeeProjectRemovalRequests EmployeeProjectRemovalRequest[]
   employeeTransferApprovals    EmployeeTransferApproval[] @relation("EmployeeTransferApprovalProject")
   employeeTransferRequestsFrom EmployeeTransferRequest[]  @relation("EmployeeTransferFromProject")
   employeeTransferRequestsTo   EmployeeTransferRequest[]  @relation("EmployeeTransferToProject")
@@ -237,6 +242,10 @@ model User {
   assetTransferApprovals        AssetTransferApproval[]    @relation("AssetTransferApprover")
   requestedAssetTransfers       AssetTransferRequest[]     @relation("AssetTransferRequestedBy")
   createdEmployees              Employee[]                 @relation("EmployeeCreatedBy")
+  assignedEmployeeProjects      EmployeeProjectAssignment[] @relation("EmployeeProjectAssignmentAssignedBy")
+  requestedEmployeeProjectRemovals EmployeeProjectRemovalRequest[] @relation("EmployeeProjectRemovalRequestedBy")
+  approvedEmployeeProjectRemovals  EmployeeProjectRemovalRequest[] @relation("EmployeeProjectRemovalApprover")
+  reviewedEmployeeProjectRemovals  EmployeeProjectRemovalRequest[] @relation("EmployeeProjectRemovalReviewedBy")
   linkedEmployee                Employee?                  @relation("EmployeeLinkedUser")
   employeeTransferApprovals     EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
   requestedEmployeeTransfers    EmployeeTransferRequest[]  @relation("EmployeeTransferRequestedBy")
@@ -290,11 +299,32 @@ model Employee {
   linkedUser       User?                     @relation("EmployeeLinkedUser", fields: [linkedUserId], references: [id])
   project          Project?                  @relation(fields: [projectId], references: [id])
   transferRequests EmployeeTransferRequest[]
+  projectAssignments EmployeeProjectAssignment[]
+  projectRemovalRequests EmployeeProjectRemovalRequest[]
 
   @@unique([companyId, employeeId])
   @@index([companyId])
   @@index([projectId])
   @@index([status])
+}
+
+model EmployeeProjectAssignment {
+  id               String   @id @default(cuid())
+  companyId        String
+  employeeId       String
+  projectId        String
+  assignedByUserId String?
+  assignedAt       DateTime @default(now())
+  company          Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee         Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project          Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignedBy       User?    @relation("EmployeeProjectAssignmentAssignedBy", fields: [assignedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([employeeId, projectId])
+  @@index([companyId])
+  @@index([employeeId])
+  @@index([projectId])
+  @@index([assignedByUserId])
 }
 
 model EmployeeTransferRequest {
@@ -317,7 +347,9 @@ model EmployeeTransferRequest {
   createdAt              DateTime                   @default(now())
   updatedAt              DateTime                   @updatedAt
   effectiveDate          DateTime?
+  keepLinkedProjects     Boolean                    @default(true)
   approvals              EmployeeTransferApproval[]
+  projectRemovalRequests EmployeeProjectRemovalRequest[]
   company                Company                    @relation(fields: [companyId], references: [id])
   employee               Employee                   @relation(fields: [employeeId], references: [id])
   fromProject            Project                    @relation("EmployeeTransferFromProject", fields: [fromProjectId], references: [id])
@@ -353,6 +385,39 @@ model EmployeeTransferApproval {
   @@index([transferRequestId])
   @@index([approverUserId])
   @@index([projectId])
+  @@index([status])
+}
+
+model EmployeeProjectRemovalRequest {
+  id                String                       @id @default(cuid())
+  companyId         String
+  employeeId        String
+  projectId         String
+  transferRequestId String
+  requestedByUserId String
+  approverUserId    String
+  reviewedByUserId  String?
+  status            EmployeeProjectRemovalStatus @default(PENDING)
+  reason            String?
+  rejectionReason   String?
+  requestedAt       DateTime                     @default(now())
+  reviewedAt        DateTime?
+  updatedAt         DateTime                     @updatedAt
+  company           Company                      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employee          Employee                     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project           Project                      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  transferRequest   EmployeeTransferRequest      @relation(fields: [transferRequestId], references: [id], onDelete: Cascade)
+  requestedBy       User                         @relation("EmployeeProjectRemovalRequestedBy", fields: [requestedByUserId], references: [id])
+  approver          User                         @relation("EmployeeProjectRemovalApprover", fields: [approverUserId], references: [id])
+  reviewedBy        User?                        @relation("EmployeeProjectRemovalReviewedBy", fields: [reviewedByUserId], references: [id])
+
+  @@unique([transferRequestId, employeeId, projectId])
+  @@index([companyId])
+  @@index([employeeId])
+  @@index([projectId])
+  @@index([transferRequestId])
+  @@index([requestedByUserId])
+  @@index([approverUserId])
   @@index([status])
 }
 
@@ -1023,6 +1088,12 @@ enum EmployeeTransferStatus {
   CANCELLED
   APPLIED
   PARTIALLY_APPROVED
+}
+
+enum EmployeeProjectRemovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 enum EmployeeTransferApprovalStatus {
