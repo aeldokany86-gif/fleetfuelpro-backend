@@ -20,6 +20,7 @@ model Company {
   isActive                 Boolean                    @default(true)
   dataImportEnabled        Boolean                    @default(false)
   multiProjectEnabled      Boolean                    @default(false)
+  stationNegativeTolerancePercent Float                 @default(2)
   currency                 String                     @default("SAR")
   language                 String                     @default("EN-AR")
   createdAt                DateTime                   @default(now())

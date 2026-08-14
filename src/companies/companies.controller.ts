@@ -6,6 +6,7 @@ import {
   Param,
   Body,
   Query,
+  Request,
   UseGuards,
 } from '@nestjs/common';
 
@@ -101,5 +102,31 @@ export class CompaniesController {
   ) {
     return this.companiesService.updateMultiProjectAccess(id, body.enabled);
   }
+
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin')
+  @Get('settings/station-negative-tolerance')
+  async getStationNegativeTolerance(
+    @Request() req,
+  ) {
+    return this.companiesService.getStationNegativeTolerance(
+      req.user.companyId,
+    );
+  }
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin')
+  @Patch('settings/station-negative-tolerance')
+  async updateStationNegativeTolerance(
+    @Body() body: { percent: number },
+    @Request() req,
+  ) {
+    return this.companiesService.updateStationNegativeTolerance(
+      req.user.companyId,
+      body.percent,
+    );
+  }
+
 
 }

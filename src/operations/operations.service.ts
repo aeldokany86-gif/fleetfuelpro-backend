@@ -1327,6 +1327,14 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     const shouldApplyCounter =
       operation.stationCounter != null && counterStationId === station.id;
 
+    /*
+      Stock protection is enforced after the atomic database increment/decrement
+      inside the same transaction. If the new source balance is below the
+      company-configured tolerance, throwing here rolls the whole transaction back.
+
+      This avoids a read-then-write race condition when two operations consume
+      stock from the same station at nearly the same time.
+    */
     const updatedStation = await tx.station.update({
       where: { id: station.id },
       data: {
@@ -1350,11 +1358,53 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       },
       select: {
         currentStock: true,
+        capacity: true,
+        companyId: true,
       },
     });
 
     const balanceAfter = Number(updatedStation.currentStock || 0);
     const balanceBefore = balanceAfter - movementQuantity;
+
+    if (movementQuantity < 0) {
+      const company = await tx.company.findUnique({
+        where: { id: updatedStation.companyId },
+        select: {
+          stationNegativeTolerancePercent: true,
+        },
+      });
+
+      const configuredPercent = Number(
+        company?.stationNegativeTolerancePercent ?? 2,
+      );
+      const tolerancePercent =
+        Number.isFinite(configuredPercent) &&
+        configuredPercent >= 0 &&
+        configuredPercent <= 5
+          ? configuredPercent
+          : 2;
+
+      const stationCapacity = Number(updatedStation.capacity || 0);
+      const minimumAllowedBalance =
+        stationCapacity > 0
+          ? -Math.abs(stationCapacity * (tolerancePercent / 100))
+          : 0;
+
+      if (balanceAfter < minimumAllowedBalance - 0.000001) {
+        throw new BadRequestException(
+          [
+            'Operation would exceed the allowed negative station balance.',
+            `Current balance: ${balanceBefore.toFixed(2)} L.`,
+            `Requested quantity: ${Math.abs(movementQuantity).toFixed(2)} L.`,
+            `Expected balance: ${balanceAfter.toFixed(2)} L.`,
+            `Minimum allowed balance: ${minimumAllowedBalance.toFixed(2)} L`,
+            `(tolerance ${tolerancePercent}% of station capacity ${
+              stationCapacity > 0 ? stationCapacity.toFixed(2) : '0.00'
+            } L).`,
+          ].join(' '),
+        );
+      }
+    }
 
     await tx.stationStockMovement.create({
       data: {

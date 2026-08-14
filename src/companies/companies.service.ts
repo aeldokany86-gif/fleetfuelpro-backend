@@ -640,4 +640,87 @@ export class CompaniesService {
     });
   }
 
+
+  async getStationNegativeTolerance(companyId: string) {
+    if (!companyId) {
+      throw new BadRequestException('Authenticated company is required');
+    }
+
+    const company = await this.prisma.company.findFirst({
+      where: {
+        id: companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        stationNegativeTolerancePercent: true,
+      },
+    });
+
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+
+    return {
+      percent: Number(company.stationNegativeTolerancePercent ?? 2),
+      minPercent: 0,
+      maxPercent: 5,
+    };
+  }
+
+  async updateStationNegativeTolerance(
+    companyId: string,
+    percent: number,
+  ) {
+    if (!companyId) {
+      throw new BadRequestException('Authenticated company is required');
+    }
+
+    const normalizedPercent = Number(percent);
+
+    if (
+      !Number.isFinite(normalizedPercent) ||
+      normalizedPercent < 0 ||
+      normalizedPercent > 5
+    ) {
+      throw new BadRequestException(
+        'Station negative balance tolerance must be between 0% and 5%',
+      );
+    }
+
+    const company = await this.prisma.company.findFirst({
+      where: {
+        id: companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+
+    const updated = await this.prisma.company.update({
+      where: {
+        id: companyId,
+      },
+      data: {
+        stationNegativeTolerancePercent: normalizedPercent,
+      },
+      select: {
+        id: true,
+        stationNegativeTolerancePercent: true,
+      },
+    });
+
+    return {
+      percent: Number(updated.stationNegativeTolerancePercent),
+      minPercent: 0,
+      maxPercent: 5,
+    };
+  }
+
+
 }
