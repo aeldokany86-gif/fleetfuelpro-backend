@@ -322,6 +322,201 @@ export class ProjectsService {
     return projects.map((project) => this.applyEffectiveCurrentPrice(project));
   }
 
+  async getMobileProjectContext(
+    actorUserId: string,
+    actorCompanyId: string,
+    actorRoleName: string,
+  ) {
+    if (!actorUserId) {
+      throw new BadRequestException("Authenticated user is required");
+    }
+
+    if (!actorCompanyId) {
+      throw new BadRequestException("Authenticated company is required");
+    }
+
+    const user = await this.prisma.user.findFirst({
+      where: {
+        id: actorUserId,
+        companyId: actorCompanyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      include: {
+        role: true,
+        company: {
+          select: {
+            id: true,
+            multiProjectEnabled: true,
+          },
+        },
+        linkedEmployee: {
+          include: {
+            project: {
+              select: {
+                id: true,
+                name: true,
+                code: true,
+                companyId: true,
+                isActive: true,
+                deletedAt: true,
+              },
+            },
+            projectAssignments: {
+              where: {
+                project: {
+                  is: {
+                    companyId: actorCompanyId,
+                    deletedAt: null,
+                    isActive: true,
+                  },
+                },
+              },
+              include: {
+                project: {
+                  select: {
+                    id: true,
+                    name: true,
+                    code: true,
+                    companyId: true,
+                    isActive: true,
+                    deletedAt: true,
+                  },
+                },
+              },
+              orderBy: {
+                assignedAt: "asc",
+              },
+            },
+          },
+        },
+        managedProjects: {
+          where: {
+            companyId: actorCompanyId,
+            deletedAt: null,
+            isActive: true,
+          },
+          select: {
+            id: true,
+            name: true,
+            code: true,
+            companyId: true,
+          },
+          orderBy: {
+            name: "asc",
+          },
+        },
+      },
+    });
+
+    if (!user || !user.role) {
+      throw new BadRequestException("Authenticated user context is invalid");
+    }
+
+    const normalizedRole = this.normalizeRoleName(actorRoleName || user.role.name);
+
+    const allCompanyProjectsRoles = new Set([
+      "ADMIN",
+      "TOPMANAGEMENT",
+      "PLATFORMADMIN",
+      "PLATFORMUSER",
+    ]);
+
+    const allowAll =
+      allCompanyProjectsRoles.has(normalizedRole) || normalizedRole === "MANAGER";
+
+    const projectMap = new Map<
+      string,
+      { id: string; name: string; code: string }
+    >();
+
+    const addProject = (project?: {
+      id?: string;
+      name?: string;
+      code?: string | null;
+      companyId?: string;
+      isActive?: boolean;
+      deletedAt?: Date | null;
+    } | null) => {
+      if (
+        !project?.id ||
+        !project.name ||
+        project.companyId !== actorCompanyId ||
+        project.deletedAt ||
+        project.isActive === false
+      ) {
+        return;
+      }
+
+      projectMap.set(project.id, {
+        id: project.id,
+        name: project.name,
+        code: project.code || "",
+      });
+    };
+
+    if (allCompanyProjectsRoles.has(normalizedRole)) {
+      const companyProjects = await this.prisma.project.findMany({
+        where: {
+          companyId: actorCompanyId,
+          deletedAt: null,
+          isActive: true,
+        },
+        select: {
+          id: true,
+          name: true,
+          code: true,
+          companyId: true,
+        },
+        orderBy: {
+          name: "asc",
+        },
+      });
+
+      companyProjects.forEach((project) =>
+        projectMap.set(project.id, {
+          id: project.id,
+          name: project.name,
+          code: project.code || "",
+        }),
+      );
+    } else if (normalizedRole === "MANAGER") {
+      user.managedProjects.forEach((project) =>
+        projectMap.set(project.id, {
+          id: project.id,
+          name: project.name,
+          code: project.code || "",
+        }),
+      );
+
+      addProject(user.linkedEmployee?.project);
+
+      if (user.company?.multiProjectEnabled) {
+        user.linkedEmployee?.projectAssignments?.forEach((assignment) =>
+          addProject(assignment.project),
+        );
+      }
+    } else {
+      addProject(user.linkedEmployee?.project);
+
+      if (user.company?.multiProjectEnabled) {
+        user.linkedEmployee?.projectAssignments?.forEach((assignment) =>
+          addProject(assignment.project),
+        );
+      }
+    }
+
+    const projects = Array.from(projectMap.values()).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+
+    return {
+      allowAll,
+      projects,
+      defaultProjectId: projects.length === 1 ? projects[0].id : null,
+    };
+  }
+
   async getProjectsMasterReport(filters: {
     companyId?: string;
     projectId?: string;

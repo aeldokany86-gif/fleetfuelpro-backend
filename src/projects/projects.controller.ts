@@ -83,6 +83,19 @@ export class ProjectsController {
     });
   }
 
+  @UseGuards(AuthGuard("jwt"))
+  @Get("mobile-context")
+  getMobileProjectContext(
+    @Req()
+    req: any,
+  ) {
+    return this.projectsService.getMobileProjectContext(
+      req.user.userId,
+      req.user.companyId,
+      req.user.roleName,
+    );
+  }
+
   @Get(":id")
   findOne(
     @Param("id")
