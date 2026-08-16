@@ -151,21 +151,19 @@ export class OperationsService {
   }
 
   async create(dto: CreateOperationDto, request?: RequestLike) {
-    const currentUser = await this.resolveCurrentUser(dto, request);
+    /*
+      Mobile/Web production create path:
+      identity, role, and company must come from the authenticated JWT request.
+      Never trust requestedByUserId / requestedByRole / requestedByName / companyId
+      supplied by the client body for persisted operations.
+    */
+    const currentUser = await this.resolveAuthenticatedCurrentUser(request);
     const type = this.normalizeOperationType(dto.type);
 
     this.validateRoleCanCreateAnyOperation(currentUser);
     this.validateRoleCanCreateOperationType(currentUser, type);
     this.validateRequiredFieldsByType(type, dto);
     this.validateRequiredPhotosByType(type, dto.attachments);
-
-    /*
-      If you test with fake headers such as op-001/mgr-001, the user does not exist in DB.
-      v2 needs real User IDs because Operation.requestedByUserId is a FK.
-    */
-    if (!currentUser.existsInDatabase) {
-      return this.createDryRun(dto, currentUser, type);
-    }
 
     return this.createPersistedOperation(dto, currentUser, type);
   }
@@ -789,6 +787,105 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         notes: dto.notes || null,
         attachments: dto.attachments,
       },
+    };
+  }
+
+  private async resolveAuthenticatedCurrentUser(
+    request?: RequestLike,
+  ): Promise<CurrentUserContext> {
+    const requestUser = request?.user as any;
+
+    /*
+      JwtStrategy currently exposes userId from payload.sub.
+      id/sub fallbacks are accepted only from the already authenticated request
+      object so this method remains compatible if the strategy shape changes.
+    */
+    const userId = String(
+      requestUser?.userId || requestUser?.id || requestUser?.sub || '',
+    ).trim();
+
+    if (!userId) {
+      throw new UnauthorizedException(
+        'Authenticated user identity was not found in the JWT request.',
+      );
+    }
+
+    const dbUser = await (this.prisma as any).user.findUnique({
+      where: { id: userId },
+      include: {
+        company: { select: { multiProjectEnabled: true } },
+        role: true,
+        linkedEmployee: {
+          select: {
+            projectId: true,
+            employeeId: true,
+            name: true,
+            projectAssignments: {
+              where: { project: { is: { deletedAt: null, isActive: true } } },
+              select: { projectId: true },
+            },
+          },
+        },
+        managedProjects: {
+          where: { deletedAt: null, isActive: true },
+          select: { id: true },
+        },
+      },
+    });
+
+    if (!dbUser) {
+      throw new UnauthorizedException(
+        'Authenticated user does not exist in the database.',
+      );
+    }
+
+    if (dbUser.deletedAt) {
+      throw new UnauthorizedException(
+        'Authenticated user account is no longer available.',
+      );
+    }
+
+    if (dbUser.isActive === false) {
+      throw new UnauthorizedException(
+        'Authenticated user account is inactive.',
+      );
+    }
+
+    return {
+      id: dbUser.id,
+      fullName:
+        dbUser.fullName ||
+        dbUser.email ||
+        requestUser?.fullName ||
+        requestUser?.email ||
+        'User',
+      role: this.normalizeRole(
+        dbUser.role?.name ||
+          requestUser?.roleName ||
+          requestUser?.role ||
+          requestUser?.systemRole,
+      ),
+      companyId: dbUser.companyId,
+      existsInDatabase: true,
+      assignedProjectIds: Array.from(
+        new Set(
+          [
+            dbUser.linkedEmployee?.projectId || null,
+            ...(dbUser.company?.multiProjectEnabled
+              ? (dbUser.linkedEmployee?.projectAssignments || []).map(
+                  (assignment: any) => assignment.projectId,
+                )
+              : []),
+          ].filter(Boolean),
+        ),
+      ) as string[],
+      managedProjectIds: dbUser.managedProjects.map(
+        (project: any) => project.id,
+      ),
+      fuelerEmployeeId:
+        dbUser.linkedEmployee?.employeeId || dbUser.employeeId || null,
+      fuelerName:
+        dbUser.linkedEmployee?.name || dbUser.fullName || 'User',
     };
   }
 

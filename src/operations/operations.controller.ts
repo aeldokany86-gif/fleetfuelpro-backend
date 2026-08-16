@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 import { CreateOperationDto } from './dto/create-operation.dto';
 import { ReviewOperationDto } from './dto/review-operation.dto';
 import { OperationsService } from './operations.service';
@@ -8,6 +9,7 @@ export class OperationsController {
   constructor(private readonly operationsService: OperationsService) {}
 
   @Post()
+  @UseGuards(AuthGuard('jwt'))
   create(@Body() dto: CreateOperationDto, @Req() req: any) {
     return this.operationsService.create(dto, req);
   }
