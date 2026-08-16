@@ -5,15 +5,19 @@ import {
   Get,
   Post,
   Query,
+  Req,
   UploadedFile,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { UploadsService } from './uploads.service';
 import { UploadOperationPhotoDto } from './dto/upload-operation-photo.dto';
 
 @Controller('uploads')
+@UseGuards(AuthGuard('jwt'))
 export class UploadsController {
   constructor(private readonly uploadsService: UploadsService) {}
 
@@ -26,7 +30,10 @@ export class UploadsController {
       },
       fileFilter: (_req, file, callback) => {
         if (!String(file.mimetype || '').startsWith('image/')) {
-          return callback(new BadRequestException('Only image files are allowed.'), false);
+          return callback(
+            new BadRequestException('Only image files are allowed.'),
+            false,
+          );
         }
 
         return callback(null, true);
@@ -34,12 +41,13 @@ export class UploadsController {
     }),
   )
   uploadOperationPhoto(
+    @Req() req: any,
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: UploadOperationPhotoDto,
   ) {
     return this.uploadsService.uploadOperationPhoto({
       file,
-      companyId: dto.companyId,
+      authenticatedUserId: req.user?.userId,
       operationNo: dto.operationNo,
       ownerType: dto.ownerType || dto.entityType || '',
       ownerCode: dto.ownerCode || dto.entityCode || dto.ownerId || '',
@@ -49,9 +57,14 @@ export class UploadsController {
 
   @Get('signed-url')
   createSignedUrl(
+    @Req() req: any,
     @Query('path') path: string,
     @Query('expiresIn') expiresIn?: string,
   ) {
-    return this.uploadsService.createSignedUrl(path, Number(expiresIn) || 300);
+    return this.uploadsService.createSignedUrl({
+      authenticatedUserId: req.user?.userId,
+      path,
+      expiresIn: Number(expiresIn) || 300,
+    });
   }
 }

@@ -1,15 +1,30 @@
-import { BadRequestException, Injectable, InternalServerErrorException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  InternalServerErrorException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { extname } from 'path';
+import { PrismaService } from '../prisma/prisma.service';
 
-type OperationPhotoOwnerType = 'station' | 'asset' | 'supplier' | 'miscellaneous';
+type OperationPhotoOwnerType =
+  | 'station'
+  | 'asset'
+  | 'supplier'
+  | 'miscellaneous';
+
+type AuthenticatedUploadUser = {
+  id: string;
+  companyId: string;
+};
 
 @Injectable()
 export class UploadsService {
   private readonly supabase: SupabaseClient;
   private readonly bucket: string;
 
-  constructor() {
+  constructor(private readonly prisma: PrismaService) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     this.bucket = process.env.SUPABASE_STORAGE_BUCKET || 'fleetfuelpro';
@@ -30,20 +45,26 @@ export class UploadsService {
 
   async uploadOperationPhoto(args: {
     file: Express.Multer.File;
-    companyId: string;
+    authenticatedUserId: string;
     operationNo: string;
     ownerType: string;
     ownerCode: string;
     photoType: string;
   }) {
-    const { file, companyId, operationNo, ownerType, ownerCode, photoType } = args;
+    const {
+      file,
+      authenticatedUserId,
+      operationNo,
+      ownerType,
+      ownerCode,
+      photoType,
+    } = args;
+
+    const authenticatedUser =
+      await this.resolveAuthenticatedUploadUser(authenticatedUserId);
 
     if (!file) {
       throw new BadRequestException('Photo file is required.');
-    }
-
-    if (!companyId) {
-      throw new BadRequestException('companyId is required.');
     }
 
     if (!operationNo) {
@@ -71,7 +92,7 @@ export class UploadsService {
       throw new BadRequestException('Photo size must not exceed 8 MB.');
     }
 
-    const safeCompanyId = this.safePathSegment(companyId);
+    const safeCompanyId = this.safePathSegment(authenticatedUser.companyId);
     const normalizedOwnerType = this.normalizeOwnerType(ownerType);
     const ownerFolder = this.getOwnerFolder(normalizedOwnerType);
     const safeOwnerCode = this.safePathSegment(ownerCode).toUpperCase();
@@ -109,16 +130,38 @@ export class UploadsService {
     };
   }
 
-  async createSignedUrl(path: string, expiresIn = 300) {
+  async createSignedUrl(args: {
+    authenticatedUserId: string;
+    path: string;
+    expiresIn?: number;
+  }) {
+    const { authenticatedUserId, path, expiresIn = 300 } = args;
+
+    const authenticatedUser =
+      await this.resolveAuthenticatedUploadUser(authenticatedUserId);
+
     if (!path) {
       throw new BadRequestException('path is required.');
     }
 
-    const safeExpiresIn = Math.min(Math.max(Number(expiresIn) || 300, 60), 3600);
+    const safeCompanyId = this.safePathSegment(authenticatedUser.companyId);
+    const normalizedPath = String(path).trim().replace(/^\/+/, '');
+    const allowedPrefix = `operations/${safeCompanyId}/`;
+
+    if (!normalizedPath.startsWith(allowedPrefix)) {
+      throw new UnauthorizedException(
+        'Requested photo does not belong to the authenticated company.',
+      );
+    }
+
+    const safeExpiresIn = Math.min(
+      Math.max(Number(expiresIn) || 300, 60),
+      3600,
+    );
 
     const { data, error } = await this.supabase.storage
       .from(this.bucket)
-      .createSignedUrl(path, safeExpiresIn);
+      .createSignedUrl(normalizedPath, safeExpiresIn);
 
     if (error) {
       throw new InternalServerErrorException(error.message);
@@ -126,9 +169,48 @@ export class UploadsService {
 
     return {
       ok: true,
-      path,
+      path: normalizedPath,
       expiresIn: safeExpiresIn,
       signedUrl: data.signedUrl,
+    };
+  }
+
+  private async resolveAuthenticatedUploadUser(
+    userId: string,
+  ): Promise<AuthenticatedUploadUser> {
+    const normalizedUserId = String(userId || '').trim();
+
+    if (!normalizedUserId) {
+      throw new UnauthorizedException(
+        'Authenticated user identity was not found.',
+      );
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where: { id: normalizedUserId },
+      select: {
+        id: true,
+        companyId: true,
+        isActive: true,
+        deletedAt: true,
+      },
+    });
+
+    if (!user || user.deletedAt || user.isActive === false) {
+      throw new UnauthorizedException(
+        'Authenticated user account is not available.',
+      );
+    }
+
+    if (!user.companyId) {
+      throw new UnauthorizedException(
+        'Authenticated user is not assigned to a company.',
+      );
+    }
+
+    return {
+      id: user.id,
+      companyId: user.companyId,
     };
   }
 
@@ -139,11 +221,20 @@ export class UploadsService {
       .replace(/[\s_-]+/g, '-');
 
     if (['station', 'stations'].includes(normalized)) return 'station';
-    if (['asset', 'assets', 'equipment', 'equipments'].includes(normalized)) return 'asset';
-    if (['supplier', 'suppliers', 'external', 'external-supplier'].includes(normalized)) return 'supplier';
-    if (['misc', 'miscellaneous', 'other'].includes(normalized)) return 'miscellaneous';
+    if (['asset', 'assets', 'equipment', 'equipments'].includes(normalized))
+      return 'asset';
+    if (
+      ['supplier', 'suppliers', 'external', 'external-supplier'].includes(
+        normalized,
+      )
+    )
+      return 'supplier';
+    if (['misc', 'miscellaneous', 'other'].includes(normalized))
+      return 'miscellaneous';
 
-    throw new BadRequestException('ownerType must be station, asset, supplier, or miscellaneous.');
+    throw new BadRequestException(
+      'ownerType must be station, asset, supplier, or miscellaneous.',
+    );
   }
 
   private getOwnerFolder(ownerType: OperationPhotoOwnerType) {
