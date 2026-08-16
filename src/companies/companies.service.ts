@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 
+import { MobilePhotoSourcePolicy } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 import { CreateCompanyDto } from './dto/create-company.dto';
@@ -640,6 +641,134 @@ export class CompaniesService {
     });
   }
 
+
+  async getMobileApplicationSettings(companyId: string) {
+    if (!companyId) {
+      throw new BadRequestException('Authenticated company is required');
+    }
+
+    const company = await this.prisma.company.findFirst({
+      where: {
+        id: companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        mobilePhotoSourcePolicy: true,
+        saveCapturedPhotosToDeviceGallery: true,
+      },
+    });
+
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+
+    return {
+      mobilePhotoSourcePolicy: company.mobilePhotoSourcePolicy,
+      saveCapturedPhotosToDeviceGallery:
+        company.saveCapturedPhotosToDeviceGallery,
+      allowedPhotoSourcePolicies: [
+        MobilePhotoSourcePolicy.CAMERA_ONLY,
+        MobilePhotoSourcePolicy.CAMERA_AND_GALLERY,
+      ],
+    };
+  }
+
+  async updateMobileApplicationSettings(
+    companyId: string,
+    settings: {
+      mobilePhotoSourcePolicy?: string;
+      saveCapturedPhotosToDeviceGallery?: boolean;
+    },
+  ) {
+    if (!companyId) {
+      throw new BadRequestException('Authenticated company is required');
+    }
+
+    const currentCompany = await this.prisma.company.findFirst({
+      where: {
+        id: companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        mobilePhotoSourcePolicy: true,
+        saveCapturedPhotosToDeviceGallery: true,
+      },
+    });
+
+    if (!currentCompany) {
+      throw new NotFoundException('Company not found');
+    }
+
+    const data: {
+      mobilePhotoSourcePolicy?: MobilePhotoSourcePolicy;
+      saveCapturedPhotosToDeviceGallery?: boolean;
+    } = {};
+
+    if (settings.mobilePhotoSourcePolicy !== undefined) {
+      const normalizedPolicy = String(
+        settings.mobilePhotoSourcePolicy || '',
+      )
+        .trim()
+        .toUpperCase();
+
+      if (
+        ![
+          MobilePhotoSourcePolicy.CAMERA_ONLY,
+          MobilePhotoSourcePolicy.CAMERA_AND_GALLERY,
+        ].includes(normalizedPolicy as MobilePhotoSourcePolicy)
+      ) {
+        throw new BadRequestException(
+          'mobilePhotoSourcePolicy must be CAMERA_ONLY or CAMERA_AND_GALLERY',
+        );
+      }
+
+      data.mobilePhotoSourcePolicy =
+        normalizedPolicy as MobilePhotoSourcePolicy;
+    }
+
+    if (settings.saveCapturedPhotosToDeviceGallery !== undefined) {
+      if (
+        typeof settings.saveCapturedPhotosToDeviceGallery !== 'boolean'
+      ) {
+        throw new BadRequestException(
+          'saveCapturedPhotosToDeviceGallery must be true or false',
+        );
+      }
+
+      data.saveCapturedPhotosToDeviceGallery =
+        settings.saveCapturedPhotosToDeviceGallery;
+    }
+
+    if (!Object.keys(data).length) {
+      throw new BadRequestException(
+        'At least one mobile application setting must be provided',
+      );
+    }
+
+    const updated = await this.prisma.company.update({
+      where: {
+        id: currentCompany.id,
+      },
+      data,
+      select: {
+        id: true,
+        mobilePhotoSourcePolicy: true,
+        saveCapturedPhotosToDeviceGallery: true,
+      },
+    });
+
+    return {
+      mobilePhotoSourcePolicy: updated.mobilePhotoSourcePolicy,
+      saveCapturedPhotosToDeviceGallery:
+        updated.saveCapturedPhotosToDeviceGallery,
+      allowedPhotoSourcePolicies: [
+        MobilePhotoSourcePolicy.CAMERA_ONLY,
+        MobilePhotoSourcePolicy.CAMERA_AND_GALLERY,
+      ],
+    };
+  }
 
   async getStationNegativeTolerance(companyId: string) {
     if (!companyId) {

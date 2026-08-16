@@ -106,6 +106,34 @@ export class CompaniesController {
 
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles('Admin')
+  @Get('settings/mobile-application')
+  async getMobileApplicationSettings(
+    @Request() req,
+  ) {
+    return this.companiesService.getMobileApplicationSettings(
+      req.user.companyId,
+    );
+  }
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin')
+  @Patch('settings/mobile-application')
+  async updateMobileApplicationSettings(
+    @Body()
+    body: {
+      mobilePhotoSourcePolicy?: 'CAMERA_ONLY' | 'CAMERA_AND_GALLERY';
+      saveCapturedPhotosToDeviceGallery?: boolean;
+    },
+    @Request() req,
+  ) {
+    return this.companiesService.updateMobileApplicationSettings(
+      req.user.companyId,
+      body,
+    );
+  }
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin')
   @Get('settings/station-negative-tolerance')
   async getStationNegativeTolerance(
     @Request() req,

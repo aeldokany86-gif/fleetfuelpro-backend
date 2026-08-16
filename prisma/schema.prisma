@@ -8,6 +8,11 @@ datasource db {
   directUrl = env("DIRECT_URL")
 }
 
+enum MobilePhotoSourcePolicy {
+  CAMERA_ONLY
+  CAMERA_AND_GALLERY
+}
+
 model Company {
   id                       String                     @id @default(cuid())
   name                     String
@@ -18,9 +23,11 @@ model Company {
   logoUrl                  String?
   subscriptionPlan         String                     @default("trial")
   isActive                 Boolean                    @default(true)
-  dataImportEnabled        Boolean                    @default(false)
-  multiProjectEnabled      Boolean                    @default(false)
-  stationNegativeTolerancePercent Float                 @default(2)
+  dataImportEnabled                   Boolean                    @default(false)
+  multiProjectEnabled                 Boolean                    @default(false)
+  mobilePhotoSourcePolicy             MobilePhotoSourcePolicy    @default(CAMERA_ONLY)
+  saveCapturedPhotosToDeviceGallery   Boolean                    @default(false)
+  stationNegativeTolerancePercent     Float                      @default(2)
   currency                 String                     @default("SAR")
   language                 String                     @default("EN-AR")
   createdAt                DateTime                   @default(now())
