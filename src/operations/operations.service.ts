@@ -219,6 +219,23 @@ export class OperationsService {
       },
     });
 
+    const companyMobileSettings = await (this.prisma as any).company.findFirst({
+      where: {
+        id: currentUser.companyId,
+        deletedAt: null,
+      },
+      select: {
+        mobilePhotoSourcePolicy: true,
+        saveCapturedPhotosToDeviceGallery: true,
+      },
+    });
+
+    if (!companyMobileSettings) {
+      throw new NotFoundException(
+        'Authenticated company was not found.',
+      );
+    }
+
     if (!project) {
       throw new NotFoundException(
         'Selected active project was not found.',
@@ -462,6 +479,13 @@ export class OperationsService {
       externalTransferDestinations,
       externalStationHistory,
       externalSupplierHistory,
+      mobileApplicationSettings: {
+        mobilePhotoSourcePolicy:
+          companyMobileSettings.mobilePhotoSourcePolicy || 'CAMERA_ONLY',
+        saveCapturedPhotosToDeviceGallery: Boolean(
+          companyMobileSettings.saveCapturedPhotosToDeviceGallery,
+        ),
+      },
     };
   }
 
