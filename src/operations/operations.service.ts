@@ -169,6 +169,250 @@ export class OperationsService {
   }
 
 
+  async getMobileFormContext(
+    projectId: string,
+    request?: RequestLike,
+  ) {
+    const currentUser = await this.resolveAuthenticatedCurrentUser(request);
+
+    this.validateRoleCanCreateAnyOperation(currentUser);
+
+    const selectedProjectId = String(projectId || '').trim();
+    if (!selectedProjectId) {
+      throw new BadRequestException(
+        'projectId is required for mobile operation context.',
+      );
+    }
+
+    if (!currentUser.companyId) {
+      throw new UnauthorizedException(
+        'Authenticated user company was not found.',
+      );
+    }
+
+    if (currentUser.role === 'Manager') {
+      if (!currentUser.managedProjectIds.includes(selectedProjectId)) {
+        throw new ForbiddenException(
+          'Manager can create operations for managed projects only.',
+        );
+      }
+    } else if (
+      ['Operator', 'Supervisor'].includes(currentUser.role) &&
+      !currentUser.assignedProjectIds.includes(selectedProjectId)
+    ) {
+      throw new ForbiddenException(
+        'Selected project is not assigned to this user.',
+      );
+    }
+
+    const project = await (this.prisma as any).project.findFirst({
+      where: {
+        id: selectedProjectId,
+        companyId: currentUser.companyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        code: true,
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException(
+        'Selected active project was not found.',
+      );
+    }
+
+    const [projectStationsRaw, projectAssetsRaw] = await Promise.all([
+      (this.prisma as any).station.findMany({
+        where: {
+          companyId: currentUser.companyId,
+          projectId: selectedProjectId,
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          stationId: true,
+          name: true,
+          status: true,
+          projectId: true,
+          currentStock: true,
+          currentCounter: true,
+          currentLifetimeCounter: true,
+          currentCounterCycle: true,
+          capacity: true,
+        },
+        orderBy: [{ stationId: 'asc' }, { name: 'asc' }],
+      }),
+      (this.prisma as any).asset.findMany({
+        where: {
+          companyId: currentUser.companyId,
+          projectId: selectedProjectId,
+          deletedAt: null,
+        },
+        select: {
+          id: true,
+          assetId: true,
+          type: true,
+          category: true,
+          status: true,
+          projectId: true,
+          currentOdometer: true,
+          currentLifetimeOdometer: true,
+          currentMeterCycle: true,
+          fuelTankCapacity: true,
+        },
+        orderBy: [{ assetId: 'asc' }],
+      }),
+    ]);
+
+    const isActiveStatus = (value: any) =>
+      String(value || '').trim().toLowerCase() === 'active';
+
+    const stations = projectStationsRaw
+      .filter((station: any) => isActiveStatus(station.status))
+      .map((station: any) => ({
+        id: station.id,
+        stationId: station.stationId,
+        name: station.name,
+        projectId: station.projectId,
+        projectName: project.name,
+        projectCode: project.code,
+        currentStock: Number(station.currentStock || 0),
+        currentCounter: Number(station.currentCounter || 0),
+        currentLifetimeCounter: Number(
+          station.currentLifetimeCounter || 0,
+        ),
+        currentCounterCycle: Number(station.currentCounterCycle || 1),
+        capacity:
+          station.capacity == null ? null : Number(station.capacity),
+      }));
+
+    const assets = projectAssetsRaw
+      .filter((asset: any) => isActiveStatus(asset.status))
+      .map((asset: any) => ({
+        id: asset.id,
+        assetId: asset.assetId,
+        type: asset.type,
+        category: asset.category,
+        projectId: asset.projectId,
+        projectName: project.name,
+        projectCode: project.code,
+        currentOdometer: Number(asset.currentOdometer || 0),
+        currentLifetimeOdometer: Number(
+          asset.currentLifetimeOdometer || 0,
+        ),
+        currentMeterCycle: Number(asset.currentMeterCycle || 1),
+        fuelTankCapacity:
+          asset.fuelTankCapacity == null
+            ? null
+            : Number(asset.fuelTankCapacity),
+      }));
+
+    let externalTransferDestinations: any[] = [];
+
+    if (['Supervisor', 'Manager'].includes(currentUser.role)) {
+      /*
+        External Transfer destination is intentionally outside the selected
+        source project. Supervisor/Manager may choose any active station from
+        another active project in the same company; approval rules protect the
+        destination project.
+      */
+      {
+        const destinationStationsRaw =
+          await (this.prisma as any).station.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              deletedAt: null,
+              projectId: { not: selectedProjectId },
+            },
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+              status: true,
+              projectId: true,
+              currentStock: true,
+              currentCounter: true,
+              currentLifetimeCounter: true,
+              currentCounterCycle: true,
+              capacity: true,
+              project: {
+                select: {
+                  id: true,
+                  name: true,
+                  code: true,
+                  isActive: true,
+                  deletedAt: true,
+                },
+              },
+            },
+            orderBy: [{ stationId: 'asc' }, { name: 'asc' }],
+          });
+
+        externalTransferDestinations = destinationStationsRaw
+          .filter(
+            (station: any) =>
+              isActiveStatus(station.status) &&
+              station.project?.isActive === true &&
+              !station.project?.deletedAt,
+          )
+          .map((station: any) => ({
+            id: station.id,
+            stationId: station.stationId,
+            name: station.name,
+            projectId: station.projectId,
+            projectName: station.project?.name || '',
+            projectCode: station.project?.code || '',
+            currentStock: Number(station.currentStock || 0),
+            currentCounter: Number(station.currentCounter || 0),
+            currentLifetimeCounter: Number(
+              station.currentLifetimeCounter || 0,
+            ),
+            currentCounterCycle: Number(
+              station.currentCounterCycle || 1,
+            ),
+            capacity:
+              station.capacity == null
+                ? null
+                : Number(station.capacity),
+          }));
+      }
+    }
+
+    const allowedTransactionTypes: NormalizedOperationType[] =
+      currentUser.role === 'Operator'
+        ? ['DIRECT_REFUEL']
+        : currentUser.role === 'Supervisor' ||
+            currentUser.role === 'Manager'
+          ? [
+              'DIRECT_REFUEL',
+              'EXTERNAL_DIRECT_REFUEL',
+              'INTERNAL_TRANSFER',
+              'EXTERNAL_SUPPLY',
+              'EXTERNAL_TRANSFER',
+            ]
+          : [];
+
+    return {
+      project,
+      user: {
+        id: currentUser.id,
+        name: currentUser.fullName,
+        role: currentUser.role,
+        fuelerEmployeeId: currentUser.fuelerEmployeeId,
+        fuelerName: currentUser.fuelerName,
+      },
+      allowedTransactionTypes,
+      stations,
+      assets,
+      externalTransferDestinations,
+    };
+  }
+
+
   async review(operationId: string, dto: ReviewOperationDto, request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(
       { type: 'DIRECT_REFUEL' as any, quantity: 1 } as CreateOperationDto,
@@ -1043,8 +1287,13 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     } else if (type === 'INTERNAL_TRANSFER') {
       if (entities.sourceProjectId) requiredProjectIds.add(entities.sourceProjectId);
     } else if (type === 'EXTERNAL_TRANSFER') {
+      /*
+        External Transfer is initiated from the user's current/source project.
+        The destination may be any other active project in the same company.
+        Approval routing protects the destination side; the initiator does not
+        need to be assigned to the destination project.
+      */
       if (entities.sourceProjectId) requiredProjectIds.add(entities.sourceProjectId);
-      if (entities.destinationProjectId) requiredProjectIds.add(entities.destinationProjectId);
     }
 
     if (user.role === 'Manager') {
@@ -1078,7 +1327,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
       External Transfer is the intentional exception to "all entities must be
       inside the selected project": the selected context is the SOURCE project,
-      while the destination may be another assigned project.
+      while the destination may be any other active project in the same company.
     */
     const selectedProjectId = String(dto.currentProjectId || '').trim();
 

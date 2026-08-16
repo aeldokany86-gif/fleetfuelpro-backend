@@ -14,6 +14,15 @@ export class OperationsController {
     return this.operationsService.create(dto, req);
   }
 
+  @Get('mobile-form-context')
+  @UseGuards(AuthGuard('jwt'))
+  getMobileFormContext(
+    @Query('projectId') projectId: string,
+    @Req() req: any,
+  ) {
+    return this.operationsService.getMobileFormContext(projectId, req);
+  }
+
 @Get()
 findAll(@Req() req: any) {
   return this.operationsService.findAll(req);
