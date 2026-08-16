@@ -225,7 +225,11 @@ export class OperationsService {
       );
     }
 
-    const [projectStationsRaw, projectAssetsRaw] = await Promise.all([
+    const [
+      projectStationsRaw,
+      projectAssetsRaw,
+      externalSourceHistoryRaw,
+    ] = await Promise.all([
       (this.prisma as any).station.findMany({
         where: {
           companyId: currentUser.companyId,
@@ -266,10 +270,57 @@ export class OperationsService {
         },
         orderBy: [{ assetId: 'asc' }],
       }),
+      (this.prisma as any).operation.findMany({
+        where: {
+          companyId: currentUser.companyId,
+          type: {
+            in: ['EXTERNAL_DIRECT_REFUEL', 'EXTERNAL_SUPPLY'],
+          },
+          externalStationName: {
+            not: null,
+          },
+        },
+        select: {
+          type: true,
+          externalStationName: true,
+        },
+        orderBy: [{ createdAt: 'desc' }],
+      }),
     ]);
 
     const isActiveStatus = (value: any) =>
       String(value || '').trim().toLowerCase() === 'active';
+
+    const buildExternalSourceHistory = (
+      operationType: 'EXTERNAL_DIRECT_REFUEL' | 'EXTERNAL_SUPPLY',
+    ) => {
+      const seen = new Set<string>();
+
+      return externalSourceHistoryRaw
+        .filter(
+          (operation: any) =>
+            this.normalizeOperationType(operation.type) === operationType,
+        )
+        .map((operation: any) =>
+          String(operation.externalStationName || '').trim(),
+        )
+        .filter((name: string) => {
+          if (!name) return false;
+
+          const key = name.toLowerCase();
+          if (seen.has(key)) return false;
+
+          seen.add(key);
+          return true;
+        })
+        .sort((a: string, b: string) => a.localeCompare(b));
+    };
+
+    const externalStationHistory = buildExternalSourceHistory(
+      'EXTERNAL_DIRECT_REFUEL',
+    );
+    const externalSupplierHistory =
+      buildExternalSourceHistory('EXTERNAL_SUPPLY');
 
     const stations = projectStationsRaw
       .filter((station: any) => isActiveStatus(station.status))
@@ -409,6 +460,8 @@ export class OperationsService {
       stations,
       assets,
       externalTransferDestinations,
+      externalStationHistory,
+      externalSupplierHistory,
     };
   }
 
@@ -2377,7 +2430,14 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         dto.destinationStationId,
         'destinationStationId is required for External Supply.',
       );
-      this.require(dto.invoiceNumber, 'invoiceNumber is required for External Supply.');
+      this.require(
+        dto.externalStationName,
+        'externalStationName is required for External Supply.',
+      );
+      this.require(
+        dto.invoiceNumber,
+        'invoiceNumber is required for External Supply.',
+      );
       return;
     }
 
