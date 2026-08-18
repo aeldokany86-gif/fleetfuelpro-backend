@@ -13,6 +13,17 @@ enum MobilePhotoSourcePolicy {
   CAMERA_AND_GALLERY
 }
 
+enum OperationPhotoDraftStatus {
+  PENDING
+  CONSUMED
+}
+
+enum OperationPhotoCaptureSource {
+  WEB
+  CAMERA
+  GALLERY
+}
+
 model Company {
   id                       String                     @id @default(cuid())
   name                     String
@@ -43,6 +54,7 @@ model Company {
   employeeTransferRequests EmployeeTransferRequest[]
   operations               Operation[]
   operationCorrections     OperationCorrection[]
+  operationPhotoDrafts     OperationPhotoDraft[]
   projects                 Project[]
   projectFuelPriceHistory  ProjectFuelPriceHistory[]
   roles                    Role[]
@@ -258,6 +270,7 @@ model User {
   employeeTransferApprovals     EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
   requestedEmployeeTransfers    EmployeeTransferRequest[]  @relation("EmployeeTransferRequestedBy")
   requestedOperations           Operation[]                @relation("OperationRequestedBy")
+  operationPhotoDrafts           OperationPhotoDraft[]      @relation("OperationPhotoDraftUploadedBy")
   operationApprovals            OperationApproval[]        @relation("OperationApprover")
   requestedOperationCorrections OperationCorrection[]      @relation("OperationCorrectionRequestedBy")
   reviewedOperationCorrections  OperationCorrection[]      @relation("OperationCorrectionReviewedBy")
@@ -734,6 +747,7 @@ model Operation {
   sourceStation                     Station?                 @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
   approvals                         OperationApproval[]
   corrections                       OperationCorrection[]
+  photoDrafts                        OperationPhotoDraft[]
 
   @@unique([companyId, operationNo])
   @@index([companyId])
@@ -750,6 +764,34 @@ model Operation {
   @@index([destinationProjectIdAtOperation])
   @@index([createdAt])
   @@index([companyId, createdAt])
+  @@index([companyId, status, createdAt])
+}
+
+model OperationPhotoDraft {
+  id             String                      @id @default(cuid())
+  companyId      String
+  uploadedByUserId String
+  operationId    String?
+  status         OperationPhotoDraftStatus   @default(PENDING)
+  bucket         String
+  path           String                      @unique
+  fileName       String
+  photoType      String
+  ownerType      String
+  ownerCode      String
+  captureSource  OperationPhotoCaptureSource @default(WEB)
+  mimeType       String
+  sizeBytes      Int
+  createdAt      DateTime                    @default(now())
+  consumedAt     DateTime?
+  company        Company                     @relation(fields: [companyId], references: [id])
+  uploadedBy     User                        @relation("OperationPhotoDraftUploadedBy", fields: [uploadedByUserId], references: [id])
+  operation      Operation?                  @relation(fields: [operationId], references: [id])
+
+  @@index([companyId])
+  @@index([uploadedByUserId])
+  @@index([operationId])
+  @@index([status, createdAt])
   @@index([companyId, status, createdAt])
 }
 

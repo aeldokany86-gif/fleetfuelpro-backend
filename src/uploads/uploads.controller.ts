@@ -2,7 +2,9 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
+  Param,
   Post,
   Query,
   Req,
@@ -48,10 +50,22 @@ export class UploadsController {
     return this.uploadsService.uploadOperationPhoto({
       file,
       authenticatedUserId: req.user?.userId,
-      operationNo: dto.operationNo,
       ownerType: dto.ownerType || dto.entityType || '',
       ownerCode: dto.ownerCode || dto.entityCode || dto.ownerId || '',
       photoType: dto.photoType,
+      captureSource: dto.captureSource || 'WEB',
+    });
+  }
+
+
+  @Delete('operation-draft/:draftId')
+  deleteOperationPhotoDraft(
+    @Req() req: any,
+    @Param('draftId') draftId: string,
+  ) {
+    return this.uploadsService.deletePendingOperationPhotoDraft({
+      authenticatedUserId: req.user?.userId,
+      draftId,
     });
   }
 

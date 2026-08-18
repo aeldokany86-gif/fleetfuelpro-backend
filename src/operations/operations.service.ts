@@ -908,6 +908,17 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       type,
     );
 
+    const pendingPhotoDrafts = await this.loadAndValidatePendingPhotoDrafts(
+      dto.attachments,
+      currentUser,
+      type,
+    );
+
+    const securedAttachments = this.buildConsumedOperationAttachments(
+      dto.attachments,
+      pendingPhotoDrafts,
+    );
+
     const approvalPlan = await this.buildApprovalPlan(
       this.prisma as any,
       currentUser,
@@ -972,7 +983,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
               externalStationName: dto.externalStationName || null,
               invoiceNumber: dto.invoiceNumber || null,
               notes: dto.notes || null,
-              attachments: dto.attachments,
+              attachments: securedAttachments,
               fuelPriceHistoryId: costSnapshot.fuelPriceHistoryId,
               pricePerLiterAtOperation: costSnapshot.pricePerLiterAtOperation,
               totalCostAtOperation: costSnapshot.totalCostAtOperation,
@@ -1009,6 +1020,13 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
                   : null,
             },
           });
+
+          await this.consumeOperationPhotoDrafts(
+            tx,
+            pendingPhotoDrafts,
+            currentUser,
+            operation.id,
+          );
 
           if (approvalPlan.length) {
             await (tx as any).operationApproval.createMany({
@@ -2327,6 +2345,140 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     if (user.role === 'Supervisor') return;
     if (user.role === 'Manager') return;
+  }
+
+  private async loadAndValidatePendingPhotoDrafts(
+    attachments: unknown,
+    currentUser: CurrentUserContext,
+    type: NormalizedOperationType,
+  ) {
+    if (!currentUser.companyId) {
+      throw new UnauthorizedException(
+        'Authenticated user company was not found.',
+      );
+    }
+
+    if (!Array.isArray(attachments) || attachments.length !== 3) {
+      throw new BadRequestException(
+        'Exactly three required operation photos must be uploaded before saving the operation.',
+      );
+    }
+
+    const paths = attachments.map((attachment: any) =>
+      String(attachment?.path || '').trim(),
+    );
+
+    if (paths.some((path) => !path) || new Set(paths).size !== paths.length) {
+      throw new BadRequestException(
+        'Operation photo attachments must contain three unique uploaded storage paths.',
+      );
+    }
+
+    const drafts = await (this.prisma as any).operationPhotoDraft.findMany({
+      where: {
+        companyId: currentUser.companyId,
+        uploadedByUserId: currentUser.id,
+        status: 'PENDING',
+        operationId: null,
+        path: { in: paths },
+      },
+    });
+
+    if (drafts.length !== paths.length) {
+      throw new BadRequestException(
+        'One or more operation photos are invalid, already used, or do not belong to the authenticated user.',
+      );
+    }
+
+    const draftsByPath = new Map(
+      drafts.map((draft: any) => [String(draft.path), draft]),
+    );
+    const orderedDrafts = paths.map((path) => draftsByPath.get(path));
+
+    if (orderedDrafts.some((draft) => !draft)) {
+      throw new BadRequestException(
+        'One or more operation photo drafts could not be resolved.',
+      );
+    }
+
+    // Re-validate the required photo package using authoritative DB draft metadata,
+    // not photoType values supplied by the client.
+    this.validateRequiredPhotosByType(
+      type,
+      orderedDrafts.map((draft: any) => ({
+        photoType: draft.photoType,
+        path: draft.path,
+      })),
+    );
+
+    return orderedDrafts;
+  }
+
+  private buildConsumedOperationAttachments(
+    submittedAttachments: unknown,
+    drafts: any[],
+  ) {
+    const submitted = Array.isArray(submittedAttachments)
+      ? submittedAttachments
+      : [];
+
+    return drafts.map((draft: any, index: number) => {
+      const displayMetadata = submitted[index] as any;
+
+      return {
+        key: displayMetadata?.key || draft.photoType,
+        label: displayMetadata?.label || draft.photoType,
+        draftId: draft.id,
+        draftStatus: 'CONSUMED',
+        fileName: draft.fileName,
+        path: draft.path,
+        bucket: draft.bucket,
+        photoType: draft.photoType,
+        ownerType: draft.ownerType,
+        ownerCode: draft.ownerCode,
+        captureSource: draft.captureSource,
+        mimeType: draft.mimeType,
+        size: draft.sizeBytes,
+        sizeBytes: draft.sizeBytes,
+      };
+    });
+  }
+
+  private async consumeOperationPhotoDrafts(
+    tx: any,
+    drafts: any[],
+    currentUser: CurrentUserContext,
+    operationId: string,
+  ) {
+    if (!currentUser.companyId) {
+      throw new UnauthorizedException(
+        'Authenticated user company was not found.',
+      );
+    }
+
+    const draftIds = drafts.map((draft: any) => draft.id);
+    const consumedAt = new Date();
+
+    const consumed = await (tx as any).operationPhotoDraft.updateMany({
+      where: {
+        id: { in: draftIds },
+        companyId: currentUser.companyId,
+        uploadedByUserId: currentUser.id,
+        status: 'PENDING',
+        operationId: null,
+      },
+      data: {
+        status: 'CONSUMED',
+        operationId,
+        consumedAt,
+      },
+    });
+
+    if (consumed.count !== draftIds.length) {
+      throw new BadRequestException(
+        'One or more operation photos were already used or changed before the operation could be saved.',
+      );
+    }
   }
 
   private validateRequiredPhotosByType(

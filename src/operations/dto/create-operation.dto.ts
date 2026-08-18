@@ -34,6 +34,9 @@ export type OperationAttachmentDto = {
   mimeType?: string;
   size?: number | string;
   sizeBytes?: number | string;
+  draftId?: string;
+  draftStatus?: 'PENDING' | 'CONSUMED';
+  captureSource?: 'WEB' | 'CAMERA' | 'GALLERY';
 };
 
 export class CreateOperationDto {
