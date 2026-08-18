@@ -8,6 +8,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOperationDto } from './dto/create-operation.dto';
 import { ReviewOperationDto } from './dto/review-operation.dto';
+import { OperationsRealtimeService } from './operations-realtime.service';
 
 type NormalizedOperationType =
   | 'DIRECT_REFUEL'
@@ -82,7 +83,10 @@ type OperationProjectSnapshot = {
 
 @Injectable()
 export class OperationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly operationsRealtime: OperationsRealtimeService,
+  ) {}
 
   private buildOperationListInclude() {
     return {
@@ -147,6 +151,21 @@ export class OperationsService {
           fuelTankCapacity: true,
         },
       },
+    };
+  }
+
+  async getRealtimeAccessContext(request?: RequestLike) {
+    const currentUser = await this.resolveAuthenticatedCurrentUser(request);
+
+    if (!currentUser.companyId) {
+      throw new UnauthorizedException(
+        'Authenticated user company was not found.',
+      );
+    }
+
+    return {
+      userId: currentUser.id,
+      companyId: currentUser.companyId,
     };
   }
 
@@ -637,6 +656,26 @@ export class OperationsService {
       return { status: 'COMPLETED', completedNow: true, rejectedNow: false };
     }, { maxWait: 10000, timeout: 15000 });
 
+    this.operationsRealtime.publish({
+      type: 'operation.updated',
+      companyId: currentUser.companyId!,
+      actorUserId: currentUser.id,
+      operationId: operation.id,
+      operationNo: operation.operationNo,
+      operationType: operation.type,
+      status: result.status,
+      projectIds: Array.from(
+        new Set(
+          [
+            operation.projectIdAtOperation,
+            operation.sourceProjectIdAtOperation,
+            operation.destinationProjectIdAtOperation,
+          ].filter(Boolean),
+        ),
+      ) as string[],
+      occurredAt: new Date().toISOString(),
+    });
+
     return {
       ok: true,
       operationId: operation.id,
@@ -1062,6 +1101,26 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     }
 
     if (!result) throw lastError;
+
+    this.operationsRealtime.publish({
+      type: 'operation.created',
+      companyId: currentUser.companyId!,
+      actorUserId: currentUser.id,
+      operationId: result.operation.id,
+      operationNo: result.operation.operationNo,
+      operationType: type,
+      status: result.status,
+      projectIds: Array.from(
+        new Set(
+          [
+            result.operation.projectIdAtOperation,
+            result.operation.sourceProjectIdAtOperation,
+            result.operation.destinationProjectIdAtOperation,
+          ].filter(Boolean),
+        ),
+      ) as string[],
+      occurredAt: new Date().toISOString(),
+    });
 
     return {
       ok: true,
