@@ -759,6 +759,7 @@ export class OperationCorrectionsService {
             operationNo: true,
             type: true,
             status: true,
+            occurredAt: true,
             createdAt: true,
             completedAt: true,
             projectIdAtOperation: true,
@@ -974,7 +975,7 @@ export class OperationCorrectionsService {
         operationType: operation.type || '-',
         operationStatus: operation.status || '-',
         operationDate:
-          operation.completedAt ||
+          operation.occurredAt ||
           operation.createdAt ||
           null,
         projectId:
