@@ -1598,12 +1598,6 @@ export class OperationCorrectionsService {
       data: { sourceStationId: newStation.id },
     });
 
-    if (operation.stationCounter != null && this.counterUsesSourceStation(operation.type)) {
-      if (oldStation?.id) await this.rebuildStationLifetimeHistory(tx, oldStation.id);
-      if (newStation.id !== oldStation?.id) {
-        await this.rebuildStationLifetimeHistory(tx, newStation.id);
-      }
-    }
   }
 
   private async applyDestinationStationCorrection(tx: any, operation: any, newStationId: string, currentUser: CurrentUserContext) {
@@ -1664,8 +1658,15 @@ export class OperationCorrectionsService {
       data: { destinationStationId: newStation.id },
     });
 
-    if (operation.stationCounter != null && operation.type === 'EXTERNAL_SUPPLY') {
-      if (oldStation?.id) await this.rebuildStationLifetimeHistory(tx, oldStation.id);
+    if (
+      operation.stationCounter != null &&
+      ['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'].includes(
+        operation.type,
+      )
+    ) {
+      if (oldStation?.id) {
+        await this.rebuildStationLifetimeHistory(tx, oldStation.id);
+      }
       if (newStation.id !== oldStation?.id) {
         await this.rebuildStationLifetimeHistory(tx, newStation.id);
       }
@@ -2074,17 +2075,19 @@ export class OperationCorrectionsService {
     return storedLifetime;
   }
 
-  private counterUsesSourceStation(type: string) {
-    return ['DIRECT_REFUEL', 'INTERNAL_TRANSFER', 'EXTERNAL_TRANSFER'].includes(type);
-  }
-
   private getOperationCounterStationId(operation: any) {
-    if (this.counterUsesSourceStation(operation.type)) {
-      return operation.sourceStationId || operation.sourceStation?.id || null;
+    if (
+      ['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'].includes(
+        operation.type,
+      )
+    ) {
+      return (
+        operation.destinationStationId ||
+        operation.destinationStation?.id ||
+        null
+      );
     }
-    if (operation.type === 'EXTERNAL_SUPPLY') {
-      return operation.destinationStationId || operation.destinationStation?.id || null;
-    }
+
     return null;
   }
 
@@ -2504,6 +2507,15 @@ export class OperationCorrectionsService {
 
     if (fieldName === 'ODOMETER' && !['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type)) {
       throw new BadRequestException('odometer correction is allowed only for refuel operations.');
+    }
+
+    if (
+      fieldName === 'STATION_COUNTER' &&
+      !['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'].includes(type)
+    ) {
+      throw new BadRequestException(
+        'stationCounter correction is allowed only for station-receiving operations.',
+      );
     }
 
     if (fieldName === 'TOTAL_COST_AT_OPERATION' && type !== 'EXTERNAL_DIRECT_REFUEL') {

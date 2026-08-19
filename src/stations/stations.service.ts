@@ -618,18 +618,14 @@ export class StationsService {
   }
 
   private operationUsesStationCounter(operation: any, stationId: string) {
-    if (operation.type === 'DIRECT_REFUEL') {
-      return operation.sourceStationId === stationId;
-    }
-    if (operation.type === 'INTERNAL_TRANSFER') {
-      return operation.sourceStationId === stationId;
-    }
-    if (operation.type === 'EXTERNAL_SUPPLY') {
+    if (
+      ['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'].includes(
+        operation.type,
+      )
+    ) {
       return operation.destinationStationId === stationId;
     }
-    if (operation.type === 'EXTERNAL_TRANSFER') {
-      return operation.sourceStationId === stationId;
-    }
+
     return false;
   }
 

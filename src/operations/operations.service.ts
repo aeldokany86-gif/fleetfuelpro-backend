@@ -2045,13 +2045,11 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     }
 
     const counterStation =
-      type === 'DIRECT_REFUEL'
-        ? entities.sourceStation
-        : type === 'INTERNAL_TRANSFER' ||
-            type === 'EXTERNAL_SUPPLY' ||
-            type === 'EXTERNAL_TRANSFER'
-          ? entities.destinationStation
-          : null;
+      type === 'INTERNAL_TRANSFER' ||
+      type === 'EXTERNAL_SUPPLY' ||
+      type === 'EXTERNAL_TRANSFER'
+        ? entities.destinationStation
+        : null;
 
     if (
       counterStation &&
@@ -2095,7 +2093,6 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
   }
 
   private getOperationCounterStationId(operation: any) {
-    if (operation.type === 'DIRECT_REFUEL') return operation.sourceStationId || null;
     if (operation.type === 'INTERNAL_TRANSFER') return operation.destinationStationId || null;
     if (operation.type === 'EXTERNAL_SUPPLY') return operation.destinationStationId || null;
     if (operation.type === 'EXTERNAL_TRANSFER') return operation.destinationStationId || null;
