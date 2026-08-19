@@ -721,7 +721,7 @@ async findAll(request?: RequestLike) {
     include: this.buildOperationListInclude(),
 
     orderBy: {
-      createdAt: 'desc',
+      occurredAt: 'desc',
     },
 
     // Temporary safety cap until cursor pagination is added to the frontend.
@@ -779,7 +779,7 @@ async findPendingApprovals(request?: RequestLike) {
     include: this.buildOperationListInclude(),
 
     orderBy: {
-      createdAt: 'desc',
+      occurredAt: 'desc',
     },
 
     take: 100,
@@ -819,13 +819,13 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     throw new UnauthorizedException('Real database user is required.');
   }
 
-  const createdAt: Record<string, Date> = {};
+  const occurredAt: Record<string, Date> = {};
   if (filters.dateFrom) {
     const from = new Date(filters.dateFrom);
     if (Number.isNaN(from.getTime())) {
       throw new BadRequestException('dateFrom is invalid');
     }
-    createdAt.gte = from;
+    occurredAt.gte = from;
   }
   if (filters.dateTo) {
     const to = new Date(filters.dateTo);
@@ -833,7 +833,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       throw new BadRequestException('dateTo is invalid');
     }
     to.setHours(23, 59, 59, 999);
-    createdAt.lte = to;
+    occurredAt.lte = to;
   }
 
   const accessibleProjectIds =
@@ -864,7 +864,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       ...(filters.assetId ? { assetId: filters.assetId } : {}),
       ...(filters.type ? { type: filters.type } : {}),
       ...(filters.status ? { status: filters.status } : {}),
-      ...(Object.keys(createdAt).length ? { createdAt } : {}),
+      ...(Object.keys(occurredAt).length ? { occurredAt } : {}),
       ...(scopedProjectIds.length
         ? {
             OR: [
@@ -898,7 +898,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         : {}),
     },
     include: this.buildOperationListInclude(),
-    orderBy: { createdAt: 'desc' },
+    orderBy: { occurredAt: 'desc' },
     take: 5000,
   });
 
@@ -938,7 +938,14 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     currentUser: CurrentUserContext,
     type: NormalizedOperationType,
   ) {
-    const operationDate = new Date();
+    const serverOperationDate = new Date();
+    const occurredAt = dto.occurredAt
+      ? new Date(dto.occurredAt)
+      : serverOperationDate;
+
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new BadRequestException('occurredAt must be a valid ISO date-time.');
+    }
 
     const entities = await this.loadAndValidateEntities(
       this.prisma as any,
@@ -966,7 +973,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     );
 
     const status = this.getInitialOperationStatus(type, currentUser, approvalPlan);
-    const completedAt = status === 'COMPLETED' ? operationDate : null;
+    const completedAt = status === 'COMPLETED' ? serverOperationDate : null;
 
     const costSnapshot = await this.resolveOperationCostSnapshot(
       this.prisma as any,
@@ -974,7 +981,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         type,
         entities,
         quantity: Number(dto.quantity),
-        operationDate,
+        operationDate: occurredAt,
         externalInvoiceAmount: dto.externalInvoiceAmount,
       },
     );
@@ -1052,10 +1059,11 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
               requestedByUserId: currentUser.id,
               fuelerEmployeeIdAtOperation: currentUser.fuelerEmployeeId,
               fuelerNameAtOperation: currentUser.fuelerName,
+              occurredAt,
               completedAt,
               approvedAt:
                 status === 'COMPLETED' || status === 'PARTIALLY_APPROVED'
-                  ? operationDate
+                  ? serverOperationDate
                   : null,
             },
           });
@@ -1129,6 +1137,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       operationNo: result.operation.operationNo,
       operationType: type,
       status: result.status,
+      occurredAt: result.operation.occurredAt,
       requiresApproval: result.approvalPlan.some((item: ApprovalPlanItem) => item.status === 'PENDING'),
       createdBy: {
         id: currentUser.id,

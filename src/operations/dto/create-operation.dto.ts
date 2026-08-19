@@ -1,5 +1,6 @@
 import {
   IsArray,
+  IsDateString,
   IsEnum,
   IsNumber,
   IsOptional,
@@ -66,6 +67,16 @@ export class CreateOperationDto {
   @IsNumber()
   @IsPositive()
   quantity!: number;
+
+  /*
+    Real-world time when the operation actually happened.
+    Optional for backward compatibility with the existing web client.
+    Mobile sends this explicitly; the backend falls back to server time
+    when older clients omit it.
+  */
+  @IsOptional()
+  @IsDateString()
+  occurredAt?: string;
 
   @IsOptional()
   @IsNumber()

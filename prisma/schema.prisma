@@ -718,6 +718,7 @@ model Operation {
   approvedAt                        DateTime?
   rejectedAt                        DateTime?
   cancelledAt                       DateTime?
+  occurredAt                        DateTime                 @default(now())
   createdAt                         DateTime                 @default(now())
   updatedAt                         DateTime                 @updatedAt
   fuelPriceHistoryId                String?
@@ -762,6 +763,9 @@ model Operation {
   @@index([projectIdAtOperation])
   @@index([sourceProjectIdAtOperation])
   @@index([destinationProjectIdAtOperation])
+  @@index([occurredAt])
+  @@index([companyId, occurredAt])
+  @@index([companyId, status, occurredAt])
   @@index([createdAt])
   @@index([companyId, createdAt])
   @@index([companyId, status, createdAt])
