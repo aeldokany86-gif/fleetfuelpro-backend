@@ -1889,11 +1889,12 @@ export class OperationCorrectionsService {
           status: 'COMPLETED',
           odometer: { not: null },
         },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        orderBy: [{ occurredAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
         select: {
           id: true,
           operationNo: true,
           odometer: true,
+          occurredAt: true,
           createdAt: true,
         },
       }),
@@ -1914,7 +1915,7 @@ export class OperationCorrectionsService {
     const events = [
       ...operations.map((item: any) => ({
         kind: 'OPERATION' as const,
-        at: item.createdAt,
+        at: item.occurredAt,
         createdAt: item.createdAt,
         item,
       })),
@@ -2097,8 +2098,8 @@ export class OperationCorrectionsService {
     const [operations, resets] = await Promise.all([
       tx.operation.findMany({
         where: { assetId, status: 'COMPLETED', odometer: { not: null } },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        select: { id: true, odometer: true, createdAt: true },
+        orderBy: [{ occurredAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        select: { id: true, odometer: true, occurredAt: true, createdAt: true },
       }),
       tx.assetOdometerReset.findMany({
         where: { assetId },
@@ -2108,7 +2109,7 @@ export class OperationCorrectionsService {
     ]);
 
     const events = [
-      ...operations.map((item: any) => ({ kind: 'OPERATION' as const, at: item.createdAt, item })),
+      ...operations.map((item: any) => ({ kind: 'OPERATION' as const, at: item.occurredAt, item })),
       ...resets.map((item: any) => ({ kind: 'RESET' as const, at: item.effectiveAt, item })),
     ].sort((a, b) => {
       const diff = new Date(a.at).getTime() - new Date(b.at).getTime();
@@ -2201,13 +2202,14 @@ export class OperationCorrectionsService {
           stationCounter: { not: null },
           OR: [{ sourceStationId: stationId }, { destinationStationId: stationId }],
         },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        orderBy: [{ occurredAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
         select: {
           id: true,
           type: true,
           sourceStationId: true,
           destinationStationId: true,
           stationCounter: true,
+          occurredAt: true,
           createdAt: true,
         },
       }),
@@ -2222,7 +2224,7 @@ export class OperationCorrectionsService {
       this.operationUsesStationCounter(item, stationId),
     );
     const events = [
-      ...operations.map((item: any) => ({ kind: 'OPERATION' as const, at: item.createdAt, item })),
+      ...operations.map((item: any) => ({ kind: 'OPERATION' as const, at: item.occurredAt, item })),
       ...resets.map((item: any) => ({ kind: 'RESET' as const, at: item.effectiveAt, item })),
     ].sort((a, b) => {
       const diff = new Date(a.at).getTime() - new Date(b.at).getTime();
@@ -2324,7 +2326,7 @@ export class OperationCorrectionsService {
   }
 
   private getOperationEffectiveTime(operation: any): Date {
-    const value = operation.completedAt || operation.approvedAt || operation.createdAt;
+    const value = operation.occurredAt || operation.createdAt;
     const parsed = value ? new Date(value) : new Date();
 
     if (Number.isNaN(parsed.getTime())) {

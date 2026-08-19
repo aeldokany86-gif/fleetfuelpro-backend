@@ -634,7 +634,7 @@ export class StationsService {
   }
 
   private getOperationCounterDate(operation: any) {
-    return operation.completedAt || operation.createdAt;
+    return operation.occurredAt || operation.createdAt;
   }
 
   private async rebuildStationLifetimeHistory(tx: any, stationId: string) {
@@ -662,13 +662,14 @@ export class StationsService {
             { destinationStationId: stationId },
           ],
         },
-        orderBy: [{ completedAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        orderBy: [{ occurredAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
         select: {
           id: true,
           type: true,
           sourceStationId: true,
           destinationStationId: true,
           stationCounter: true,
+          occurredAt: true,
           completedAt: true,
           createdAt: true,
         },
@@ -932,6 +933,7 @@ export class StationsService {
               lifetimeCounter: true,
               stationCounterCycleNumber: true,
               notes: true,
+              occurredAt: true,
               completedAt: true,
               createdAt: true,
               requestedBy: {
@@ -1003,6 +1005,7 @@ export class StationsService {
                   stationCounter: true,
                   lifetimeCounter: true,
                   stationCounterCycleNumber: true,
+                  occurredAt: true,
                   completedAt: true,
                   createdAt: true,
                 },

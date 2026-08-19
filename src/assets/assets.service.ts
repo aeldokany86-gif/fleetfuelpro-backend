@@ -522,10 +522,11 @@ export class AssetsService {
           status: 'COMPLETED',
           odometer: { not: null },
         },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
         select: {
           id: true,
           operationNo: true,
+          occurredAt: true,
           createdAt: true,
         },
       }),
@@ -558,7 +559,7 @@ export class AssetsService {
     */
     if (
       latestCompletedOperation &&
-      effectiveAt.getTime() < latestCompletedOperation.createdAt.getTime()
+      effectiveAt.getTime() < latestCompletedOperation.occurredAt.getTime()
     ) {
       throw new BadRequestException(
         `Reset effective date cannot be earlier than the latest completed operation (${latestCompletedOperation.operationNo}). Use the historical correction workflow for a backdated reset.`,
@@ -721,17 +722,18 @@ export class AssetsService {
         status: 'COMPLETED',
         odometer: { not: null },
       },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
       select: {
         id: true,
         operationNo: true,
+        occurredAt: true,
         createdAt: true,
       },
     });
 
     if (
       latestCompletedOperation &&
-      effectiveAt.getTime() < latestCompletedOperation.createdAt.getTime()
+      effectiveAt.getTime() < latestCompletedOperation.occurredAt.getTime()
     ) {
       throw new BadRequestException(
         `Reset effective date cannot be earlier than the latest completed operation (${latestCompletedOperation.operationNo}). Use the historical correction workflow for a backdated reset.`,
@@ -1050,17 +1052,18 @@ export class AssetsService {
             status: 'COMPLETED',
             odometer: { not: null },
           },
-          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
           select: {
             id: true,
             operationNo: true,
+            occurredAt: true,
             createdAt: true,
           },
         });
 
         if (
           latestCompletedOperation &&
-          effectiveAt.getTime() < latestCompletedOperation.createdAt.getTime()
+          effectiveAt.getTime() < latestCompletedOperation.occurredAt.getTime()
         ) {
           throw new BadRequestException(
             `Reset effective date cannot be earlier than the latest completed operation (${latestCompletedOperation.operationNo}). Use the historical correction workflow for a backdated reset.`,
@@ -1192,10 +1195,11 @@ export class AssetsService {
           status: 'COMPLETED',
           odometer: { not: null },
         },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        orderBy: [{ occurredAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
         select: {
           id: true,
           odometer: true,
+          occurredAt: true,
           createdAt: true,
         },
       }),
@@ -1215,7 +1219,7 @@ export class AssetsService {
     const events = [
       ...operations.map((operation: any) => ({
         kind: 'OPERATION' as const,
-        at: operation.createdAt,
+        at: operation.occurredAt,
         createdAt: operation.createdAt,
         item: operation,
       })),
