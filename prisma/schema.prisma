@@ -560,8 +560,9 @@ model AssetActionRequest {
   actionType        AssetActionType
   status            AssetActionRequestStatus @default(PENDING)
   reason            String
-  requestedOdometer Float?
-  effectiveAt       DateTime?
+  requestedOdometer    Float?
+  requestedOldOdometer Float?
+  effectiveAt          DateTime?
   reviewedByUserId  String?
   reviewNote        String?
   reviewedAt        DateTime?

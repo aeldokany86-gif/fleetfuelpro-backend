@@ -137,6 +137,7 @@ export class AssetsController {
       requestedByUserId: string;
       reason: string;
       newOdometer?: number;
+      oldOdometer?: number;
       effectiveAt?: string;
     },
   ) {
@@ -151,6 +152,7 @@ export class AssetsController {
     @Body()
     body: {
       newOdometer: number;
+      oldOdometer?: number;
       reason: string;
       effectiveAt?: string;
       createdByUserId?: string;

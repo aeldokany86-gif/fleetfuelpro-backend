@@ -445,6 +445,7 @@ export class AssetsService {
     id: string,
     body: {
       newOdometer: number;
+      oldOdometer?: number;
       reason: string;
       effectiveAt?: string;
       createdByUserId?: string;
@@ -455,6 +456,21 @@ export class AssetsService {
     if (!Number.isFinite(newOdometer) || newOdometer < 0) {
       throw new BadRequestException(
         'New odometer must be a valid non-negative number',
+      );
+    }
+
+    const hasOldOdometerOverride =
+      body.oldOdometer !== undefined && body.oldOdometer !== null;
+    const requestedOldOdometer = hasOldOdometerOverride
+      ? Number(body.oldOdometer)
+      : null;
+
+    if (
+      hasOldOdometerOverride &&
+      (!Number.isFinite(requestedOldOdometer) || Number(requestedOldOdometer) < 0)
+    ) {
+      throw new BadRequestException(
+        'Old odometer before reset must be a valid non-negative number',
       );
     }
 
@@ -566,10 +582,21 @@ export class AssetsService {
       );
     }
 
-    const currentLifetime = this.getEffectiveAssetLifetime(asset);
+    const currentReading = Number(asset.currentOdometer || 0);
+    const oldOdometer = hasOldOdometerOverride
+      ? Number(requestedOldOdometer)
+      : currentReading;
+
+    if (oldOdometer < currentReading) {
+      throw new BadRequestException(
+        `Old odometer before reset cannot be lower than the current meter-cycle reading (${currentReading}). Use the odometer correction workflow if the previous recorded reading is wrong.`,
+      );
+    }
+
+    const currentLifetime =
+      this.getEffectiveAssetLifetime(asset) + (oldOdometer - currentReading);
     const oldMeterCycle = Number(asset.currentMeterCycle || 1);
     const newMeterCycle = oldMeterCycle + 1;
-    const oldOdometer = Number(asset.currentOdometer || 0);
 
     return this.prisma.$transaction(
       async (tx) => {
@@ -627,6 +654,7 @@ export class AssetsService {
       requestedByUserId: string;
       reason: string;
       newOdometer?: number;
+      oldOdometer?: number;
       effectiveAt?: string;
     },
   ) {
@@ -688,6 +716,31 @@ export class AssetsService {
     if (!Number.isFinite(requestedOdometer) || requestedOdometer < 0) {
       throw new BadRequestException(
         'New odometer must be a valid non-negative number',
+      );
+    }
+
+    const hasOldOdometerOverride =
+      body.oldOdometer !== undefined && body.oldOdometer !== null;
+    const requestedOldOdometer = hasOldOdometerOverride
+      ? Number(body.oldOdometer)
+      : null;
+
+    if (
+      hasOldOdometerOverride &&
+      (!Number.isFinite(requestedOldOdometer) || Number(requestedOldOdometer) < 0)
+    ) {
+      throw new BadRequestException(
+        'Old odometer before reset must be a valid non-negative number',
+      );
+    }
+
+    const currentReadingAtRequest = Number(asset.currentOdometer || 0);
+    if (
+      hasOldOdometerOverride &&
+      Number(requestedOldOdometer) < currentReadingAtRequest
+    ) {
+      throw new BadRequestException(
+        `Old odometer before reset cannot be lower than the current meter-cycle reading (${currentReadingAtRequest}). Use the odometer correction workflow if the previous recorded reading is wrong.`,
       );
     }
 
@@ -764,6 +817,9 @@ export class AssetsService {
         status: 'PENDING' as any,
         reason: body.reason.trim(),
         requestedOdometer,
+        requestedOldOdometer: hasOldOdometerOverride
+          ? Number(requestedOldOdometer)
+          : null,
         effectiveAt,
       },
       include: {
@@ -1070,10 +1126,37 @@ export class AssetsService {
           );
         }
 
-        const currentLifetime = this.getEffectiveAssetLifetime(asset);
+        const currentReading = Number(asset.currentOdometer || 0);
+        const requestedOldOdometer =
+          request.requestedOldOdometer == null
+            ? null
+            : Number(request.requestedOldOdometer);
+
+        if (
+          requestedOldOdometer !== null &&
+          (!Number.isFinite(requestedOldOdometer) || requestedOldOdometer < 0)
+        ) {
+          throw new BadRequestException(
+            'Requested old odometer before reset is invalid',
+          );
+        }
+
+        const oldOdometer =
+          requestedOldOdometer === null
+            ? currentReading
+            : requestedOldOdometer;
+
+        if (oldOdometer < currentReading) {
+          throw new BadRequestException(
+            `Old odometer before reset cannot be lower than the current meter-cycle reading (${currentReading}). The reset request is stale or the previous recorded reading must be corrected first.`,
+          );
+        }
+
+        const currentLifetime =
+          this.getEffectiveAssetLifetime(asset) +
+          (oldOdometer - currentReading);
         const oldMeterCycle = Number(asset.currentMeterCycle || 1);
         const newMeterCycle = oldMeterCycle + 1;
-        const oldOdometer = Number(asset.currentOdometer || 0);
 
         const resetRecord = await tx.assetOdometerReset.create({
           data: {
@@ -1264,8 +1347,17 @@ export class AssetsService {
         const oldReading = Number(reset.oldOdometer || 0);
         const newCycleStartReading = Number(reset.newOdometer || 0);
 
-        if (lifetimeOdometer === null) {
+        if (lifetimeOdometer === null || previousReading === null) {
           lifetimeOdometer = oldReading;
+        } else {
+          if (oldReading < previousReading) {
+            throw new BadRequestException(
+              `Reset old odometer (${oldReading}) cannot be lower than the previous reading (${previousReading}) in meter cycle ${cycleNumber}.`,
+            );
+          }
+
+          lifetimeOdometer =
+            Number(lifetimeOdometer || 0) + (oldReading - previousReading);
         }
 
         await tx.assetOdometerReset.update({

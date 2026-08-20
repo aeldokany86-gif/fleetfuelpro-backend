@@ -573,13 +573,25 @@ export class OperationsService {
         )
       : undefined;
 
+    const useHistoricalAssetMeterPath =
+      action === 'APPROVE' && entities
+        ? await this.shouldUseHistoricalAssetMeterPath(
+            this.prisma as any,
+            operation.type,
+            entities.asset?.id,
+            operation.occurredAt,
+          )
+        : false;
+
     const meterSnapshot =
       action === 'APPROVE' && entities
-        ? this.buildOperationMeterSnapshot(
-            operation.type,
-            operationDto,
-            entities,
-          )
+        ? useHistoricalAssetMeterPath
+          ? this.emptyOperationMeterSnapshot()
+          : this.buildOperationMeterSnapshot(
+              operation.type,
+              operationDto,
+              entities,
+            )
         : this.emptyOperationMeterSnapshot();
 
     const result = await this.prisma.$transaction(async (tx) => {
@@ -652,6 +664,7 @@ export class OperationsService {
         type: operation.type,
         currentUser,
         entities: entities!,
+        useHistoricalAssetMeterPath,
       });
       return { status: 'COMPLETED', completedNow: true, rejectedNow: false };
     }, { maxWait: 10000, timeout: 15000 });
@@ -991,11 +1004,29 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       entities,
     );
 
-    // Calculate meter snapshots before opening the interactive transaction.
-    // This keeps the transaction focused on writes and avoids Supabase pooler timeouts.
+    /*
+      Preserve the established current-state meter path for normal operations.
+      Historical handling is enabled only when this completed asset-meter
+      operation belongs before an already-existing completed asset meter event
+      or odometer reset on the real-world timeline.
+    */
+    const useHistoricalAssetMeterPath =
+      status === 'COMPLETED'
+        ? await this.shouldUseHistoricalAssetMeterPath(
+            this.prisma as any,
+            type,
+            entities.asset?.id,
+            occurredAt,
+          )
+        : false;
+
+    // Normal operations keep the exact existing snapshot logic. Historical
+    // asset snapshots are rebuilt inside the write transaction after creation.
     const meterSnapshot =
       status === 'COMPLETED'
-        ? this.buildOperationMeterSnapshot(type, dto, entities)
+        ? useHistoricalAssetMeterPath
+          ? this.emptyOperationMeterSnapshot()
+          : this.buildOperationMeterSnapshot(type, dto, entities)
         : this.emptyOperationMeterSnapshot();
 
     let result: any;
@@ -1096,6 +1127,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
               type,
               currentUser,
               entities,
+              useHistoricalAssetMeterPath,
             });
           }
 
@@ -1730,9 +1762,17 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       type: NormalizedOperationType;
       currentUser: CurrentUserContext;
       entities: LoadedOperationEntities;
+      useHistoricalAssetMeterPath?: boolean;
     },
   ) {
-    const { operation, dto, type, currentUser, entities } = args;
+    const {
+      operation,
+      dto,
+      type,
+      currentUser,
+      entities,
+      useHistoricalAssetMeterPath = false,
+    } = args;
 
     if (type === 'DIRECT_REFUEL') {
       await this.createStockMovement(tx, {
@@ -1744,22 +1784,36 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         currentUser,
       });
 
-      await this.updateAssetOdometerIfNeeded(
-        tx,
-        entities.asset,
-        dto.odometer,
-        operation.id,
-      );
+      if (useHistoricalAssetMeterPath) {
+        await this.rebuildAssetLifetimeHistoryForBackdatedOperation(
+          tx,
+          entities.asset?.id,
+        );
+      } else {
+        await this.updateAssetOdometerIfNeeded(
+          tx,
+          entities.asset,
+          dto.odometer,
+          operation.id,
+        );
+      }
       return;
     }
 
     if (type === 'EXTERNAL_DIRECT_REFUEL') {
-      await this.updateAssetOdometerIfNeeded(
-        tx,
-        entities.asset,
-        dto.odometer,
-        operation.id,
-      );
+      if (useHistoricalAssetMeterPath) {
+        await this.rebuildAssetLifetimeHistoryForBackdatedOperation(
+          tx,
+          entities.asset?.id,
+        );
+      } else {
+        await this.updateAssetOdometerIfNeeded(
+          tx,
+          entities.asset,
+          dto.odometer,
+          operation.id,
+        );
+      }
       return;
     }
 
@@ -1927,6 +1981,222 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         referenceId: operation.id,
         reason,
         createdByUserId: currentUser.id,
+      },
+    });
+  }
+
+  private isAssetMeterOperationType(type: NormalizedOperationType) {
+    return ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type);
+  }
+
+  private async shouldUseHistoricalAssetMeterPath(
+    tx: any,
+    type: NormalizedOperationType,
+    assetId: string | undefined,
+    occurredAtInput: Date | string | null | undefined,
+  ) {
+    if (!this.isAssetMeterOperationType(type) || !assetId || !occurredAtInput) {
+      return false;
+    }
+
+    const occurredAt = new Date(occurredAtInput);
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new BadRequestException('occurredAt must be a valid ISO date-time.');
+    }
+
+    /*
+      Do not compare occurredAt with server now: a normal web/mobile operation
+      is naturally captured milliseconds before persistence. Historical mode is
+      required only if a later completed meter event/reset already exists.
+    */
+    const [latestOperation, latestReset] = await Promise.all([
+      tx.operation.findFirst({
+        where: {
+          assetId,
+          status: 'COMPLETED',
+          odometer: { not: null },
+        },
+        orderBy: [{ occurredAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+        select: { occurredAt: true },
+      }),
+      tx.assetOdometerReset.findFirst({
+        where: { assetId },
+        orderBy: [{ effectiveAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+        select: { effectiveAt: true },
+      }),
+    ]);
+
+    const latestOperationTime = latestOperation?.occurredAt
+      ? new Date(latestOperation.occurredAt).getTime()
+      : Number.NEGATIVE_INFINITY;
+    const latestResetTime = latestReset?.effectiveAt
+      ? new Date(latestReset.effectiveAt).getTime()
+      : Number.NEGATIVE_INFINITY;
+
+    return occurredAt.getTime() < Math.max(latestOperationTime, latestResetTime);
+  }
+
+  private async rebuildAssetLifetimeHistoryForBackdatedOperation(
+    tx: any,
+    assetId: string | undefined,
+  ) {
+    if (!assetId) return;
+
+    const asset = await tx.asset.findUnique({
+      where: { id: assetId },
+      select: {
+        id: true,
+        currentOdometer: true,
+        currentLifetimeOdometer: true,
+        currentMeterCycle: true,
+      },
+    });
+
+    if (!asset) {
+      throw new NotFoundException('Asset was not found.');
+    }
+
+    const [operations, resets] = await Promise.all([
+      tx.operation.findMany({
+        where: {
+          assetId,
+          status: 'COMPLETED',
+          odometer: { not: null },
+        },
+        orderBy: [{ occurredAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          odometer: true,
+          occurredAt: true,
+          createdAt: true,
+        },
+      }),
+      tx.assetOdometerReset.findMany({
+        where: { assetId },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          oldOdometer: true,
+          newOdometer: true,
+          effectiveAt: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    const events = [
+      ...operations.map((operation: any) => ({
+        kind: 'OPERATION' as const,
+        at: operation.occurredAt,
+        createdAt: operation.createdAt,
+        item: operation,
+      })),
+      ...resets.map((reset: any) => ({
+        kind: 'RESET' as const,
+        at: reset.effectiveAt,
+        createdAt: reset.createdAt,
+        item: reset,
+      })),
+    ].sort((a, b) => {
+      const effectiveTime =
+        new Date(a.at).getTime() - new Date(b.at).getTime();
+      if (effectiveTime !== 0) return effectiveTime;
+
+      const createdTime =
+        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (createdTime !== 0) return createdTime;
+
+      return a.kind === 'RESET' ? -1 : 1;
+    });
+
+    let cycleNumber = 1;
+    let lifetimeOdometer: number | null = null;
+    let previousReading: number | null = null;
+    let latestReading = Number(asset.currentOdometer || 0);
+    let hasHistoricalEvent = false;
+
+    for (const event of events) {
+      hasHistoricalEvent = true;
+
+      if (event.kind === 'RESET') {
+        const reset = event.item;
+        const oldMeterCycle = cycleNumber;
+        const newMeterCycle = oldMeterCycle + 1;
+        const oldReading = Number(reset.oldOdometer || 0);
+        const newCycleStartReading = Number(reset.newOdometer || 0);
+
+        if (lifetimeOdometer === null || previousReading === null) {
+          lifetimeOdometer = oldReading;
+        } else {
+          if (oldReading < previousReading) {
+            throw new BadRequestException(
+              `Reset old odometer (${oldReading}) cannot be lower than the previous reading (${previousReading}) in meter cycle ${cycleNumber}.`,
+            );
+          }
+
+          lifetimeOdometer =
+            Number(lifetimeOdometer || 0) + (oldReading - previousReading);
+        }
+
+        await tx.assetOdometerReset.update({
+          where: { id: reset.id },
+          data: {
+            lifetimeAtReset: lifetimeOdometer,
+            oldMeterCycle,
+            newMeterCycle,
+          },
+        });
+
+        cycleNumber = newMeterCycle;
+        previousReading = newCycleStartReading;
+        latestReading = newCycleStartReading;
+        continue;
+      }
+
+      const reading = Number(event.item.odometer);
+      if (!Number.isFinite(reading) || reading < 0) {
+        throw new BadRequestException(
+          'Historical operation contains an invalid odometer reading.',
+        );
+      }
+
+      if (previousReading === null) {
+        lifetimeOdometer = reading;
+        previousReading = reading;
+      } else {
+        if (reading < previousReading) {
+          throw new BadRequestException(
+            `Operation odometer (${reading}) cannot be lower than the previous reading (${previousReading}) in meter cycle ${cycleNumber}.`,
+          );
+        }
+
+        lifetimeOdometer =
+          Number(lifetimeOdometer || 0) + (reading - previousReading);
+        previousReading = reading;
+      }
+
+      latestReading = reading;
+      await tx.operation.update({
+        where: { id: event.item.id },
+        data: {
+          lifetimeOdometer,
+          assetMeterCycleNumber: cycleNumber,
+        },
+      });
+    }
+
+    if (!hasHistoricalEvent) {
+      latestReading = Number(asset.currentOdometer || 0);
+      lifetimeOdometer = this.getEffectiveAssetLifetime(asset);
+      cycleNumber = Number(asset.currentMeterCycle || 1);
+    }
+
+    await tx.asset.update({
+      where: { id: assetId },
+      data: {
+        currentOdometer: latestReading,
+        currentLifetimeOdometer: Number(lifetimeOdometer || 0),
+        currentMeterCycle: cycleNumber,
       },
     });
   }

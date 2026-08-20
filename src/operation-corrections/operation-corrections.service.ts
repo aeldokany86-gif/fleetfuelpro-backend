@@ -2108,7 +2108,13 @@ export class OperationCorrectionsService {
       tx.assetOdometerReset.findMany({
         where: { assetId },
         orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }],
-        select: { id: true, newOdometer: true, effectiveAt: true, createdAt: true },
+        select: {
+          id: true,
+          oldOdometer: true,
+          newOdometer: true,
+          effectiveAt: true,
+          createdAt: true,
+        },
       }),
     ]);
 
@@ -2131,6 +2137,19 @@ export class OperationCorrectionsService {
     for (const event of events) {
       if (event.kind === 'RESET') {
         const oldCycle = cycle;
+        const oldReading = Number(event.item.oldOdometer || 0);
+
+        if (previousReadingInCycle === null) {
+          latestLifetime = oldReading;
+        } else {
+          if (oldReading < previousReadingInCycle) {
+            throw new BadRequestException(
+              `Reset old odometer (${oldReading}) cannot be lower than the previous reading (${previousReadingInCycle}) in meter cycle ${cycle}.`,
+            );
+          }
+          latestLifetime += oldReading - previousReadingInCycle;
+        }
+
         cycle += 1;
         await tx.assetOdometerReset.update({
           where: { id: event.item.id },
