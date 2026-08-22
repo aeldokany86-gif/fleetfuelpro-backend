@@ -700,6 +700,7 @@ model Operation {
   id                                String                   @id @default(cuid())
   companyId                         String
   operationNo                       String
+  clientOperationId                 String?
   type                              OperationType
   status                            OperationStatus          @default(COMPLETED)
   sourceStationId                   String?
@@ -752,6 +753,7 @@ model Operation {
   photoDrafts                        OperationPhotoDraft[]
 
   @@unique([companyId, operationNo])
+  @@unique([companyId, clientOperationId])
   @@index([companyId])
   @@index([type])
   @@index([status])

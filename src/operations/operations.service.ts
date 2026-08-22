@@ -181,6 +181,22 @@ export class OperationsService {
 
     this.validateRoleCanCreateAnyOperation(currentUser);
     this.validateRoleCanCreateOperationType(currentUser, type);
+
+    /*
+      Idempotency must be checked before photo-draft validation.
+      A retry may arrive after the first request already consumed the drafts,
+      so rerunning the normal create path would incorrectly fail.
+    */
+    const existingOperation = await this.findExistingIdempotentOperation(
+      dto,
+      currentUser,
+      type,
+    );
+
+    if (existingOperation) {
+      return this.buildIdempotentCreateResponse(existingOperation, currentUser);
+    }
+
     this.validateRequiredFieldsByType(type, dto);
     this.validateRequiredPhotosByType(type, dto.attachments);
 
@@ -1044,6 +1060,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
             data: {
               companyId: currentUser.companyId,
               operationNo,
+              clientOperationId: String(dto.clientOperationId || '').trim() || null,
               type,
               status,
               sourceStationId: dto.sourceStationId || null,
@@ -1136,13 +1153,41 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         break;
       } catch (error: any) {
         lastError = error;
+
+        /*
+          Two identical requests can pass the early lookup at the same time.
+          The database unique constraint is the final authority: the loser
+          fetches and returns the operation created by the winning request.
+        */
+        if (
+          dto.clientOperationId &&
+          this.isClientOperationIdConflict(error)
+        ) {
+          const existingOperation = await this.findExistingIdempotentOperation(
+            dto,
+            currentUser,
+            type,
+          );
+
+          if (existingOperation) {
+            result = {
+              operation: existingOperation,
+              status: existingOperation.status,
+              approvalPlan: existingOperation.approvals || [],
+              idempotentReplay: true,
+            };
+            break;
+          }
+        }
+
         if (!this.isOperationNoConflict(error) || attempt === 3) throw error;
       }
     }
 
     if (!result) throw lastError;
 
-    this.operationsRealtime.publish({
+    if (!result.idempotentReplay) {
+      this.operationsRealtime.publish({
       type: 'operation.created',
       companyId: currentUser.companyId!,
       actorUserId: currentUser.id,
@@ -1159,12 +1204,16 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
           ].filter(Boolean),
         ),
       ) as string[],
-      occurredAt: new Date().toISOString(),
-    });
+        occurredAt: new Date().toISOString(),
+      });
+    }
 
     return {
       ok: true,
-      message: this.getPersistedSuccessMessage(type, result.status),
+      idempotentReplay: Boolean(result.idempotentReplay),
+      message: result.idempotentReplay
+        ? 'Operation already exists. Returning the original operation.'
+        : this.getPersistedSuccessMessage(type, result.status),
       operationId: result.operation.id,
       operationNo: result.operation.operationNo,
       operationType: type,
@@ -1178,6 +1227,93 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       },
       approvals: result.approvalPlan,
     };
+  }
+
+  private async findExistingIdempotentOperation(
+    dto: CreateOperationDto,
+    currentUser: CurrentUserContext,
+    type: NormalizedOperationType,
+  ) {
+    const clientOperationId = String(dto.clientOperationId || '').trim();
+
+    if (!clientOperationId || !currentUser.companyId) {
+      return null;
+    }
+
+    const existing = await (this.prisma as any).operation.findFirst({
+      where: {
+        companyId: currentUser.companyId,
+        clientOperationId,
+      },
+      include: {
+        approvals: {
+          select: {
+            id: true,
+            approverUserId: true,
+            projectId: true,
+            approvalStage: true,
+            status: true,
+            note: true,
+            reviewedAt: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    if (!existing) {
+      return null;
+    }
+
+    if (existing.requestedByUserId !== currentUser.id) {
+      throw new ForbiddenException(
+        'clientOperationId is already used by another user.',
+      );
+    }
+
+    if (this.normalizeOperationType(existing.type) !== type) {
+      throw new BadRequestException(
+        'clientOperationId was already used for a different operation type.',
+      );
+    }
+
+    return existing;
+  }
+
+  private buildIdempotentCreateResponse(
+    operation: any,
+    currentUser: CurrentUserContext,
+  ) {
+    return {
+      ok: true,
+      idempotentReplay: true,
+      message: 'Operation already exists. Returning the original operation.',
+      operationId: operation.id,
+      operationNo: operation.operationNo,
+      operationType: operation.type,
+      status: operation.status,
+      occurredAt: operation.occurredAt,
+      requiresApproval: (operation.approvals || []).some(
+        (item: any) => item.status === 'PENDING',
+      ),
+      createdBy: {
+        id: currentUser.id,
+        name: currentUser.fullName,
+        role: currentUser.role,
+      },
+      approvals: operation.approvals || [],
+    };
+  }
+
+  private isClientOperationIdConflict(error: any) {
+    if (error?.code !== 'P2002') return false;
+
+    const target = error?.meta?.target;
+    const targetText = Array.isArray(target)
+      ? target.join(',')
+      : String(target || '');
+
+    return targetText.includes('clientOperationId');
   }
 
   private isOperationNoConflict(error: any) {
@@ -1217,6 +1353,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         destinationStationId: dto.destinationStationId || null,
         assetId: dto.assetId || null,
         currentProjectId: dto.currentProjectId || null,
+        clientOperationId: dto.clientOperationId || null,
         quantity: dto.quantity,
         odometer: dto.odometer ?? null,
         stationCounter: dto.stationCounter ?? null,

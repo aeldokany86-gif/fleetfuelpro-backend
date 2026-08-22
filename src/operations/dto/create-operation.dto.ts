@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  MaxLength,
 } from 'class-validator';
 
 export enum OperationTypeDto {
@@ -77,6 +78,16 @@ export class CreateOperationDto {
   @IsOptional()
   @IsDateString()
   occurredAt?: string;
+
+  /*
+    Client-generated idempotency key.
+    Mobile will generate this once for the operation and reuse the same value
+    for every retry of that same create request.
+  */
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  clientOperationId?: string;
 
   @IsOptional()
   @IsNumber()
