@@ -1491,7 +1491,6 @@ export class AssetsService {
         asset: {
           is: {
             companyId,
-            ...(projectId ? { projectId } : {}),
           },
         },
       },
@@ -1528,6 +1527,28 @@ export class AssetsService {
                 name: true,
               },
             },
+            assignmentHistory: {
+              orderBy: {
+                assignedAt: 'asc',
+              },
+              select: {
+                assignedAt: true,
+                fromProject: {
+                  select: {
+                    id: true,
+                    code: true,
+                    name: true,
+                  },
+                },
+                toProject: {
+                  select: {
+                    id: true,
+                    code: true,
+                    name: true,
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -1538,31 +1559,50 @@ export class AssetsService {
       ],
     });
 
-    return history.map((record) => ({
-      id: record.id,
-      eventType: 'RESET',
-      eventSource: 'ODOMETER_RESET',
-      eventDate: record.effectiveAt,
-      createdAt: record.createdAt,
-      companyId: record.companyId,
-      assetBackendId: record.asset.id,
-      assetId: record.asset.assetId,
-      assetType: record.asset.type,
-      category: record.asset.category,
-      projectId: record.asset.projectId,
-      projectCode: record.asset.project?.code || null,
-      projectName: record.asset.project?.name || null,
-      previousReading: Number(record.oldOdometer || 0),
-      currentReading: Number(record.newOdometer || 0),
-      lifetimeReading: Number(record.lifetimeAtReset || 0),
-      previousMeterCycle: Number(record.oldMeterCycle || 1),
-      meterCycle: Number(record.newMeterCycle || 1),
-      reason: record.reason,
-      reference: record.id,
-      performedByUserId: record.createdBy?.id || null,
-      performedBy: record.createdBy?.fullName || null,
-      performedByEmail: record.createdBy?.email || null,
-    }));
+    const rows = history.map((record) => {
+      const eventTime = new Date(record.effectiveAt).getTime();
+      const assignments = record.asset.assignmentHistory || [];
+
+      let historicalProject =
+        assignments.length > 0
+          ? assignments[0]?.fromProject || record.asset.project || null
+          : record.asset.project || null;
+
+      for (const assignment of assignments) {
+        if (new Date(assignment.assignedAt).getTime() > eventTime) break;
+        historicalProject = assignment.toProject || historicalProject;
+      }
+
+      return {
+        id: record.id,
+        eventType: 'RESET',
+        eventSource: 'ODOMETER_RESET',
+        eventDate: record.effectiveAt,
+        createdAt: record.createdAt,
+        companyId: record.companyId,
+        assetBackendId: record.asset.id,
+        assetId: record.asset.assetId,
+        assetType: record.asset.type,
+        category: record.asset.category,
+        projectId: historicalProject?.id || null,
+        projectCode: historicalProject?.code || null,
+        projectName: historicalProject?.name || null,
+        previousReading: Number(record.oldOdometer || 0),
+        currentReading: Number(record.newOdometer || 0),
+        lifetimeReading: Number(record.lifetimeAtReset || 0),
+        previousMeterCycle: Number(record.oldMeterCycle || 1),
+        meterCycle: Number(record.newMeterCycle || 1),
+        reason: record.reason,
+        reference: record.id,
+        performedByUserId: record.createdBy?.id || null,
+        performedBy: record.createdBy?.fullName || null,
+        performedByEmail: record.createdBy?.email || null,
+      };
+    });
+
+    return projectId
+      ? rows.filter((row) => row.projectId === projectId)
+      : rows;
   }
 
   // ✅ OPTIMIZATION: دمج الـ asset check مع الـ history في query واحدة

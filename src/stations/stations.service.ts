@@ -873,7 +873,6 @@ export class StationsService {
       where: {
         deletedAt: null,
         ...(filters.companyId ? { companyId: filters.companyId } : {}),
-        ...(filters.projectId ? { projectId: filters.projectId } : {}),
         ...(filters.stationId ? { id: filters.stationId } : {}),
       },
       select: {
@@ -889,6 +888,28 @@ export class StationsService {
             id: true,
             code: true,
             name: true,
+          },
+        },
+        assignmentHistory: {
+          orderBy: {
+            assignedAt: 'asc',
+          },
+          select: {
+            assignedAt: true,
+            fromProject: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+              },
+            },
+            toProject: {
+              select: {
+                id: true,
+                code: true,
+                name: true,
+              },
+            },
           },
         },
       },
@@ -929,6 +950,12 @@ export class StationsService {
               lifetimeCounter: true,
               stationCounterCycleNumber: true,
               notes: true,
+              projectIdAtOperation: true,
+              projectNameAtOperation: true,
+              sourceProjectIdAtOperation: true,
+              sourceProjectNameAtOperation: true,
+              destinationProjectIdAtOperation: true,
+              destinationProjectNameAtOperation: true,
               occurredAt: true,
               completedAt: true,
               createdAt: true,
@@ -1001,6 +1028,12 @@ export class StationsService {
                   stationCounter: true,
                   lifetimeCounter: true,
                   stationCounterCycleNumber: true,
+                  projectIdAtOperation: true,
+                  projectNameAtOperation: true,
+                  sourceProjectIdAtOperation: true,
+                  sourceProjectNameAtOperation: true,
+                  destinationProjectIdAtOperation: true,
+                  destinationProjectNameAtOperation: true,
                   occurredAt: true,
                   completedAt: true,
                   createdAt: true,
@@ -1027,6 +1060,52 @@ export class StationsService {
     const stationMap = new Map(
       stations.map((station) => [station.id, station]),
     );
+
+    const getStationProjectAt = (station: any, eventAt: Date | string) => {
+      const eventTime = new Date(eventAt).getTime();
+      const assignments = station?.assignmentHistory || [];
+
+      let historicalProject =
+        assignments.length > 0
+          ? assignments[0]?.fromProject || station?.project || null
+          : station?.project || null;
+
+      for (const assignment of assignments) {
+        if (new Date(assignment.assignedAt).getTime() > eventTime) break;
+        historicalProject = assignment.toProject || historicalProject;
+      }
+
+      return historicalProject;
+    };
+
+    const getOperationStationProject = (
+      operation: any,
+      station: any,
+      eventAt: Date | string,
+    ) => {
+      const historicalFallback = getStationProjectAt(station, eventAt);
+
+      const projectId =
+        operation?.destinationProjectIdAtOperation ||
+        operation?.projectIdAtOperation ||
+        historicalFallback?.id ||
+        null;
+
+      const projectName =
+        operation?.destinationProjectNameAtOperation ||
+        operation?.projectNameAtOperation ||
+        historicalFallback?.name ||
+        null;
+
+      const projectCode =
+        historicalFallback?.id === projectId
+          ? historicalFallback?.code || null
+          : null;
+
+      return projectId || projectName
+        ? { id: projectId, name: projectName, code: projectCode }
+        : historicalFallback;
+    };
 
     const eventsByStation = new Map<string, any[]>();
     for (const station of stations) {
@@ -1167,7 +1246,7 @@ export class StationsService {
                 stationId: station.stationId,
                 name: station.name,
                 companyId: station.companyId,
-                project: station.project,
+                project: getStationProjectAt(station, event.at),
               },
               counterBefore: storedOldCounter,
               counterAfter: newCounter,
@@ -1208,7 +1287,11 @@ export class StationsService {
                 stationId: station.stationId,
                 name: station.name,
                 companyId: station.companyId,
-                project: station.project,
+                project: getOperationStationProject(
+                  operation,
+                  station,
+                  operation?.occurredAt || operation?.createdAt,
+                ),
               },
               counterBefore: Number.isFinite(counterBefore) ? counterBefore : null,
               counterAfter: Number.isFinite(counterAfter) ? counterAfter : null,
@@ -1305,7 +1388,11 @@ export class StationsService {
               stationId: station.stationId,
               name: station.name,
               companyId: station.companyId,
-              project: station.project,
+              project: getOperationStationProject(
+                operation,
+                station,
+                operation?.occurredAt || operation?.createdAt,
+              ),
             },
             counterBefore:
               previousCounter === reading ? reading - deltaCounter : null,
@@ -1325,7 +1412,11 @@ export class StationsService {
       }
     }
 
-    return rows.sort((a, b) => {
+    const projectScopedRows = filters.projectId
+      ? rows.filter((row) => row?.station?.project?.id === filters.projectId)
+      : rows;
+
+    return projectScopedRows.sort((a, b) => {
       const dateDiff =
         new Date(a.eventDate).getTime() - new Date(b.eventDate).getTime();
       if (dateDiff !== 0) return dateDiff;
