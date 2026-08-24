@@ -262,6 +262,7 @@ export class OperationsService {
       select: {
         mobilePhotoSourcePolicy: true,
         saveCapturedPhotosToDeviceGallery: true,
+        stationNegativeTolerancePercent: true,
       },
     });
 
@@ -519,6 +520,9 @@ export class OperationsService {
           companyMobileSettings.mobilePhotoSourcePolicy || 'CAMERA_ONLY',
         saveCapturedPhotosToDeviceGallery: Boolean(
           companyMobileSettings.saveCapturedPhotosToDeviceGallery,
+        ),
+        stationNegativeTolerancePercent: Number(
+          companyMobileSettings.stationNegativeTolerancePercent ?? 2,
         ),
       },
     };
