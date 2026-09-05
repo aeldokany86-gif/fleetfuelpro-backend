@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
   UnauthorizedException,
+  UnprocessableEntityException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOperationDto } from './dto/create-operation.dto';
@@ -55,6 +56,9 @@ type LoadedOperationEntities = {
   sourceProjectId?: string | null;
   destinationProjectId?: string | null;
   assetProjectId?: string | null;
+  sourceProjectAtOperation?: any;
+  destinationProjectAtOperation?: any;
+  assetProjectAtOperation?: any;
 };
 
 type ApprovalPlanItem = {
@@ -590,6 +594,7 @@ export class OperationsService {
           operationDto,
           currentUser,
           operation.type,
+          new Date(operation.occurredAt),
         )
       : undefined;
 
@@ -985,6 +990,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       dto,
       currentUser,
       type,
+      occurredAt,
     );
 
     const pendingPhotoDrafts = await this.loadAndValidatePendingPhotoDrafts(
@@ -1544,11 +1550,206 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     };
   }
 
+  private async resolveEntityProjectAt(
+    tx: any,
+    entityType: 'asset' | 'station',
+    entity: any,
+    occurredAt: Date,
+  ): Promise<{ projectId: string | null; project: any | null }> {
+    if (!entity) return { projectId: null, project: null };
+
+    if (entity.createdAt && new Date(entity.createdAt).getTime() > occurredAt.getTime()) {
+      throw new UnprocessableEntityException(
+        `OFFLINE_ENTITY_CONFLICT: ${entityType === 'asset' ? 'Asset' : 'Station'} did not exist at the operation occurrence time.`,
+      );
+    }
+
+    const historyModel =
+      entityType === 'asset'
+        ? tx.assetAssignmentHistory
+        : tx.stationAssignmentHistory;
+    const entityKey = entityType === 'asset' ? 'assetId' : 'stationId';
+
+    const [latestBeforeOrAt, earliestHistory] = await Promise.all([
+      historyModel.findFirst({
+        where: {
+          [entityKey]: entity.id,
+          assignedAt: { lte: occurredAt },
+        },
+        orderBy: { assignedAt: 'desc' },
+        include: { toProject: true },
+      }),
+      historyModel.findFirst({
+        where: { [entityKey]: entity.id },
+        orderBy: { assignedAt: 'asc' },
+        include: { fromProject: true },
+      }),
+    ]);
+
+    if (latestBeforeOrAt) {
+      return {
+        projectId: latestBeforeOrAt.toProjectId || null,
+        project: latestBeforeOrAt.toProject || null,
+      };
+    }
+
+    if (
+      earliestHistory &&
+      new Date(earliestHistory.assignedAt).getTime() > occurredAt.getTime()
+    ) {
+      return {
+        projectId: earliestHistory.fromProjectId || null,
+        project: earliestHistory.fromProject || null,
+      };
+    }
+
+    return {
+      projectId: entity.projectId || null,
+      project: entity.project || null,
+    };
+  }
+
+  private async wasUserAssignedToProjectAt(
+    tx: any,
+    user: CurrentUserContext,
+    projectId: string,
+    occurredAt: Date,
+  ) {
+    if (!user.companyId || !projectId) return false;
+
+    const employee = await tx.employee.findFirst({
+      where: {
+        linkedUserId: user.id,
+        companyId: user.companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        projectId: true,
+        projectAssignments: {
+          select: { projectId: true, assignedAt: true },
+        },
+      },
+    });
+
+    if (!employee) return false;
+
+    const transfers = await tx.employeeTransferRequest.findMany({
+      where: {
+        employeeId: employee.id,
+        companyId: user.companyId,
+        status: 'APPROVED',
+        appliedAt: { not: null },
+      },
+      orderBy: { appliedAt: 'asc' },
+      select: {
+        fromProjectId: true,
+        toProjectId: true,
+        appliedAt: true,
+      },
+    });
+
+    let primaryProjectId =
+      transfers.length > 0 ? transfers[0].fromProjectId : employee.projectId;
+
+    for (const transfer of transfers) {
+      if (!transfer.appliedAt) continue;
+      if (new Date(transfer.appliedAt).getTime() > occurredAt.getTime()) break;
+      primaryProjectId = transfer.toProjectId;
+    }
+
+    if (primaryProjectId === projectId) return true;
+
+    if (
+      employee.projectAssignments.some(
+        (assignment: any) =>
+          assignment.projectId === projectId &&
+          new Date(assignment.assignedAt).getTime() <= occurredAt.getTime(),
+      )
+    ) {
+      return true;
+    }
+
+    // Approved removal requests prove that this linked project existed before
+    // the removal review time, even though the live assignment row is deleted.
+    const laterApprovedRemoval = await tx.employeeProjectRemovalRequest.findFirst({
+      where: {
+        employeeId: employee.id,
+        companyId: user.companyId,
+        projectId,
+        status: 'APPROVED',
+        reviewedAt: { gt: occurredAt },
+      },
+      select: { id: true },
+    });
+
+    return Boolean(laterApprovedRemoval);
+  }
+
+  private validateSelectedProjectAgainstHistoricalEntities(
+    type: NormalizedOperationType,
+    entities: LoadedOperationEntities,
+    dto: CreateOperationDto,
+  ) {
+    const selectedProjectId = String(dto.currentProjectId || '').trim();
+    if (!selectedProjectId) return;
+
+    const conflict = (message: string) => {
+      throw new UnprocessableEntityException(
+        `OFFLINE_ENTITY_CONFLICT: ${message}`,
+      );
+    };
+
+    if (type === 'DIRECT_REFUEL') {
+      if (
+        entities.sourceProjectId !== selectedProjectId ||
+        entities.assetProjectId !== selectedProjectId
+      ) {
+        conflict('The source station or asset was not assigned to the selected project at the operation occurrence time.');
+      }
+      return;
+    }
+
+    if (type === 'EXTERNAL_DIRECT_REFUEL') {
+      if (entities.assetProjectId !== selectedProjectId) {
+        conflict('The asset was not assigned to the selected project at the operation occurrence time.');
+      }
+      return;
+    }
+
+    if (type === 'INTERNAL_TRANSFER') {
+      if (
+        entities.sourceProjectId !== selectedProjectId ||
+        entities.destinationProjectId !== selectedProjectId
+      ) {
+        conflict('One or both stations were not assigned to the selected project at the operation occurrence time.');
+      }
+      return;
+    }
+
+    if (type === 'EXTERNAL_SUPPLY') {
+      if (entities.destinationProjectId !== selectedProjectId) {
+        conflict('The destination station was not assigned to the selected project at the operation occurrence time.');
+      }
+      return;
+    }
+
+    if (type === 'EXTERNAL_TRANSFER') {
+      if (entities.sourceProjectId !== selectedProjectId) {
+        conflict('The source station was not assigned to the selected project at the operation occurrence time.');
+      }
+      if (entities.destinationProjectId === selectedProjectId) {
+        conflict('The destination station belonged to the selected source project at the operation occurrence time.');
+      }
+    }
+  }
+
   private async loadAndValidateEntities(
     tx: any,
     dto: CreateOperationDto,
     user: CurrentUserContext,
     type: NormalizedOperationType,
+    occurredAt: Date,
   ): Promise<LoadedOperationEntities> {
     if (!user.companyId) throw new BadRequestException('User companyId is required.');
 
@@ -1577,18 +1778,28 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     if (dto.destinationStationId && !destinationStation) throw new NotFoundException('Destination station was not found.');
     if (dto.assetId && !asset) throw new NotFoundException('Asset was not found.');
 
+    const [sourceAt, destinationAt, assetAt] = await Promise.all([
+      this.resolveEntityProjectAt(tx, 'station', sourceStation, occurredAt),
+      this.resolveEntityProjectAt(tx, 'station', destinationStation, occurredAt),
+      this.resolveEntityProjectAt(tx, 'asset', asset, occurredAt),
+    ]);
+
     const entities: LoadedOperationEntities = {
       sourceStation,
       destinationStation,
       asset,
-      sourceProjectId: sourceStation?.projectId || null,
-      destinationProjectId: destinationStation?.projectId || null,
-      assetProjectId: asset?.projectId || null,
+      sourceProjectId: sourceAt.projectId,
+      destinationProjectId: destinationAt.projectId,
+      assetProjectId: assetAt.projectId,
+      sourceProjectAtOperation: sourceAt.project,
+      destinationProjectAtOperation: destinationAt.project,
+      assetProjectAtOperation: assetAt.project,
     };
 
+    this.validateSelectedProjectAgainstHistoricalEntities(type, entities, dto);
     this.validateProjectRules(type, entities);
     this.validateTankCapacity(type, entities, Number(dto.quantity));
-    this.validateUserProjectAccess(user, type, entities, dto);
+    await this.validateUserProjectAccess(tx, user, type, entities, dto, occurredAt);
     return entities;
   }
 
@@ -1604,11 +1815,13 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     }
   }
 
-  private validateUserProjectAccess(
+  private async validateUserProjectAccess(
+    tx: any,
     user: CurrentUserContext,
     type: NormalizedOperationType,
     entities: LoadedOperationEntities,
     dto: CreateOperationDto,
+    occurredAt: Date,
   ) {
     if (!['Officer', 'Operator', 'Supervisor', 'Manager'].includes(user.role)) return;
 
@@ -1623,12 +1836,6 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     } else if (type === 'INTERNAL_TRANSFER') {
       if (entities.sourceProjectId) requiredProjectIds.add(entities.sourceProjectId);
     } else if (type === 'EXTERNAL_TRANSFER') {
-      /*
-        External Transfer is initiated from the user's current/source project.
-        The destination may be any other active project in the same company.
-        Approval routing protects the destination side; the initiator does not
-        need to be assigned to the destination project.
-      */
       if (entities.sourceProjectId) requiredProjectIds.add(entities.sourceProjectId);
     }
 
@@ -1644,27 +1851,20 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       return;
     }
 
-    const hasAllRequiredProjects = [...requiredProjectIds].every((id) =>
-      user.assignedProjectIds.includes(id),
+    const accessChecks = await Promise.all(
+      [...requiredProjectIds].map(async (id) =>
+        user.assignedProjectIds.includes(id)
+          ? true
+          : this.wasUserAssignedToProjectAt(tx, user, id, occurredAt),
+      ),
     );
 
-    if (!user.assignedProjectIds.length || !hasAllRequiredProjects) {
-      throw new ForbiddenException(
-        'User can create operations for assigned projects only.',
+    if (accessChecks.some((allowed) => !allowed)) {
+      throw new UnprocessableEntityException(
+        'OFFLINE_ENTITY_CONFLICT: User was not assigned to the operation project at the operation occurrence time.',
       );
     }
 
-    /*
-      Selected Project Context enforcement for lower operational roles.
-
-      Single-project employees keep the current behavior and do not need to
-      send currentProjectId. Multi-project employees must explicitly send the
-      project currently selected in the User Project Card.
-
-      External Transfer is the intentional exception to "all entities must be
-      inside the selected project": the selected context is the SOURCE project,
-      while the destination may be any other active project in the same company.
-    */
     const selectedProjectId = String(dto.currentProjectId || '').trim();
 
     if (user.assignedProjectIds.length > 1 && !selectedProjectId) {
@@ -1674,15 +1874,27 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     }
 
     const effectiveSelectedProjectId =
-      selectedProjectId || user.assignedProjectIds[0] || '';
+      selectedProjectId ||
+      user.assignedProjectIds[0] ||
+      [...requiredProjectIds][0] ||
+      '';
 
     if (
       effectiveSelectedProjectId &&
       !user.assignedProjectIds.includes(effectiveSelectedProjectId)
     ) {
-      throw new ForbiddenException(
-        'Selected project is not assigned to this user.',
+      const hadHistoricalAccess = await this.wasUserAssignedToProjectAt(
+        tx,
+        user,
+        effectiveSelectedProjectId,
+        occurredAt,
       );
+
+      if (!hadHistoricalAccess) {
+        throw new UnprocessableEntityException(
+          'OFFLINE_ENTITY_CONFLICT: Selected project was not assigned to this user at the operation occurrence time.',
+        );
+      }
     }
 
     const operationContextProjectId =
@@ -1693,8 +1905,8 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       operationContextProjectId &&
       operationContextProjectId !== effectiveSelectedProjectId
     ) {
-      throw new ForbiddenException(
-        'Operation must be created inside the currently selected project.',
+      throw new UnprocessableEntityException(
+        'OFFLINE_ENTITY_CONFLICT: Operation entities did not belong to the selected project at the operation occurrence time.',
       );
     }
   }
@@ -2517,18 +2729,24 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
   ): OperationProjectSnapshot {
     const sourceProjectId = entities.sourceProjectId || null;
     const sourceProjectName =
+      entities.sourceProjectAtOperation?.name ||
+      entities.sourceProjectAtOperation?.code ||
       entities.sourceStation?.project?.name ||
       entities.sourceStation?.project?.code ||
       null;
 
     const destinationProjectId = entities.destinationProjectId || null;
     const destinationProjectName =
+      entities.destinationProjectAtOperation?.name ||
+      entities.destinationProjectAtOperation?.code ||
       entities.destinationStation?.project?.name ||
       entities.destinationStation?.project?.code ||
       null;
 
     const assetProjectId = entities.assetProjectId || null;
     const assetProjectName =
+      entities.assetProjectAtOperation?.name ||
+      entities.assetProjectAtOperation?.code ||
       entities.asset?.project?.name ||
       entities.asset?.project?.code ||
       null;
