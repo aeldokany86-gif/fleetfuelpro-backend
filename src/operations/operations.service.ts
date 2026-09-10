@@ -533,6 +533,301 @@ export class OperationsService {
   }
 
 
+  async getMobileRecoveryContext(
+    projectId: string,
+    occurredAtInput: string,
+    request?: RequestLike,
+  ) {
+    /*
+      Mobile Recovery only.
+
+      IMPORTANT:
+      - This method is intentionally separate from getMobileFormContext().
+      - It does not change the normal Add Operation context used by Mobile.
+      - It does not change create(), resolveEntityProjectAt(), or any Web flow.
+      - Its only purpose is to expose the entities that belonged to the selected
+        project at the original operation occurredAt.
+    */
+    const currentUser = await this.resolveAuthenticatedCurrentUser(request);
+
+    this.validateRoleCanCreateAnyOperation(currentUser);
+
+    const selectedProjectId = String(projectId || '').trim();
+    if (!selectedProjectId) {
+      throw new BadRequestException(
+        'projectId is required for mobile recovery context.',
+      );
+    }
+
+    const occurredAtText = String(occurredAtInput || '').trim();
+    if (!occurredAtText) {
+      throw new BadRequestException(
+        'occurredAt is required for mobile recovery context.',
+      );
+    }
+
+    const occurredAt = new Date(occurredAtText);
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new BadRequestException(
+        'occurredAt must be a valid ISO date-time for mobile recovery context.',
+      );
+    }
+
+    if (occurredAt.getTime() > Date.now()) {
+      throw new BadRequestException(
+        'occurredAt cannot be in the future for mobile recovery context.',
+      );
+    }
+
+    if (!currentUser.companyId) {
+      throw new UnauthorizedException(
+        'Authenticated user company was not found.',
+      );
+    }
+
+    /*
+      Keep the same CURRENT access boundary as the normal mobile form context.
+      The recovery endpoint must not broaden project access.
+    */
+    if (currentUser.role === 'Manager') {
+      if (!currentUser.managedProjectIds.includes(selectedProjectId)) {
+        throw new ForbiddenException(
+          'Manager can create operations for managed projects only.',
+        );
+      }
+    } else if (
+      ['Operator', 'Supervisor'].includes(currentUser.role) &&
+      !currentUser.assignedProjectIds.includes(selectedProjectId)
+    ) {
+      throw new ForbiddenException(
+        'Selected project is not assigned to this user.',
+      );
+    }
+
+    const project = await (this.prisma as any).project.findFirst({
+      where: {
+        id: selectedProjectId,
+        companyId: currentUser.companyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        code: true,
+      },
+    });
+
+    if (!project) {
+      throw new NotFoundException(
+        'Selected active project was not found.',
+      );
+    }
+
+    /*
+      Candidate entities are company-scoped, still active, not deleted, and
+      already existed by occurredAt. We intentionally do NOT filter by their
+      current projectId because Recovery needs entities that may have moved
+      away from this project after the offline operation happened.
+    */
+    const [candidateAssets, candidateStations] = await Promise.all([
+      (this.prisma as any).asset.findMany({
+        where: {
+          companyId: currentUser.companyId,
+          deletedAt: null,
+          status: 'ACTIVE',
+          createdAt: { lte: occurredAt },
+        },
+        select: {
+          id: true,
+          assetId: true,
+          type: true,
+          category: true,
+          status: true,
+          projectId: true,
+          currentOdometer: true,
+          currentLifetimeOdometer: true,
+          currentMeterCycle: true,
+          fuelTankCapacity: true,
+          createdAt: true,
+        },
+        orderBy: [{ assetId: 'asc' }],
+      }),
+      (this.prisma as any).station.findMany({
+        where: {
+          companyId: currentUser.companyId,
+          deletedAt: null,
+          status: 'ACTIVE',
+          createdAt: { lte: occurredAt },
+        },
+        select: {
+          id: true,
+          stationId: true,
+          name: true,
+          status: true,
+          projectId: true,
+          currentStock: true,
+          currentCounter: true,
+          currentLifetimeCounter: true,
+          currentCounterCycle: true,
+          capacity: true,
+          createdAt: true,
+        },
+        orderBy: [{ stationId: 'asc' }, { name: 'asc' }],
+      }),
+    ]);
+
+    const assetIds = candidateAssets.map((asset: any) => asset.id);
+    const stationIds = candidateStations.map((station: any) => station.id);
+
+    /*
+      Load assignment history in two batched queries. This keeps Recovery
+      efficient without touching the existing create-path resolver.
+    */
+    const [assetHistory, stationHistory] = await Promise.all([
+      assetIds.length
+        ? (this.prisma as any).assetAssignmentHistory.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              assetId: { in: assetIds },
+            },
+            select: {
+              assetId: true,
+              fromProjectId: true,
+              toProjectId: true,
+              assignedAt: true,
+            },
+            orderBy: [{ assetId: 'asc' }, { assignedAt: 'asc' }],
+          })
+        : Promise.resolve([]),
+      stationIds.length
+        ? (this.prisma as any).stationAssignmentHistory.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              stationId: { in: stationIds },
+            },
+            select: {
+              stationId: true,
+              fromProjectId: true,
+              toProjectId: true,
+              assignedAt: true,
+            },
+            orderBy: [{ stationId: 'asc' }, { assignedAt: 'asc' }],
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const assetHistoryById = new Map<string, any[]>();
+    for (const item of assetHistory) {
+      const list = assetHistoryById.get(item.assetId) || [];
+      list.push(item);
+      assetHistoryById.set(item.assetId, list);
+    }
+
+    const stationHistoryById = new Map<string, any[]>();
+    for (const item of stationHistory) {
+      const list = stationHistoryById.get(item.stationId) || [];
+      list.push(item);
+      stationHistoryById.set(item.stationId, list);
+    }
+
+    /*
+      Mirror the established resolveEntityProjectAt() semantics without
+      changing that existing helper:
+      1) latest assignment at/before occurredAt -> its toProjectId
+      2) if all history is after occurredAt -> earliest fromProjectId
+      3) no usable history -> current entity projectId
+    */
+    const resolveHistoricalProjectId = (
+      entity: any,
+      history: any[],
+    ): string | null => {
+      let latestBeforeOrAt: any | null = null;
+
+      for (const item of history) {
+        if (new Date(item.assignedAt).getTime() <= occurredAt.getTime()) {
+          latestBeforeOrAt = item;
+        } else {
+          break;
+        }
+      }
+
+      if (latestBeforeOrAt) {
+        return latestBeforeOrAt.toProjectId || null;
+      }
+
+      const earliestHistory = history[0];
+      if (
+        earliestHistory &&
+        new Date(earliestHistory.assignedAt).getTime() > occurredAt.getTime()
+      ) {
+        return earliestHistory.fromProjectId || null;
+      }
+
+      return entity.projectId || null;
+    };
+
+    const assets = candidateAssets
+      .filter(
+        (asset: any) =>
+          resolveHistoricalProjectId(
+            asset,
+            assetHistoryById.get(asset.id) || [],
+          ) === selectedProjectId,
+      )
+      .map((asset: any) => ({
+        id: asset.id,
+        assetId: asset.assetId,
+        type: asset.type,
+        category: asset.category,
+        projectId: selectedProjectId,
+        projectName: project.name,
+        projectCode: project.code,
+        currentOdometer: Number(asset.currentOdometer || 0),
+        currentLifetimeOdometer: Number(
+          asset.currentLifetimeOdometer || 0,
+        ),
+        currentMeterCycle: Number(asset.currentMeterCycle || 1),
+        fuelTankCapacity:
+          asset.fuelTankCapacity == null
+            ? null
+            : Number(asset.fuelTankCapacity),
+      }));
+
+    const stations = candidateStations
+      .filter(
+        (station: any) =>
+          resolveHistoricalProjectId(
+            station,
+            stationHistoryById.get(station.id) || [],
+          ) === selectedProjectId,
+      )
+      .map((station: any) => ({
+        id: station.id,
+        stationId: station.stationId,
+        name: station.name,
+        projectId: selectedProjectId,
+        projectName: project.name,
+        projectCode: project.code,
+        currentStock: Number(station.currentStock || 0),
+        currentCounter: Number(station.currentCounter || 0),
+        currentLifetimeCounter: Number(
+          station.currentLifetimeCounter || 0,
+        ),
+        currentCounterCycle: Number(station.currentCounterCycle || 1),
+        capacity:
+          station.capacity == null ? null : Number(station.capacity),
+      }));
+
+    return {
+      project,
+      occurredAt: occurredAt.toISOString(),
+      stations,
+      assets,
+    };
+  }
+
+
   async review(operationId: string, dto: ReviewOperationDto, request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(
       { type: 'DIRECT_REFUEL' as any, quantity: 1 } as CreateOperationDto,

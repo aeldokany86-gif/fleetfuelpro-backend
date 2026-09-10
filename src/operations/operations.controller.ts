@@ -28,6 +28,20 @@ export class OperationsController {
     return this.operationsService.getMobileFormContext(projectId, req);
   }
 
+  @Get('mobile-recovery-context')
+  @UseGuards(AuthGuard('jwt'))
+  getMobileRecoveryContext(
+    @Query('projectId') projectId: string,
+    @Query('occurredAt') occurredAt: string,
+    @Req() req: any,
+  ) {
+    return this.operationsService.getMobileRecoveryContext(
+      projectId,
+      occurredAt,
+      req,
+    );
+  }
+
   @Get('events/stream')
   @UseGuards(AuthGuard('jwt'))
   async streamOperationEvents(@Req() req: any, @Res() res: Response) {
