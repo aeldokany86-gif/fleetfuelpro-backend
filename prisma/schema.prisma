@@ -25,46 +25,47 @@ enum OperationPhotoCaptureSource {
 }
 
 model Company {
-  id                       String                     @id @default(cuid())
-  name                     String
-  code                     String                     @unique
-  country                  String?
-  city                     String?
-  timezone                 String                     @default("Asia/Riyadh")
-  logoUrl                  String?
-  subscriptionPlan         String                     @default("trial")
-  isActive                 Boolean                    @default(true)
-  dataImportEnabled                   Boolean                    @default(false)
-  multiProjectEnabled                 Boolean                    @default(false)
-  mobilePhotoSourcePolicy             MobilePhotoSourcePolicy    @default(CAMERA_ONLY)
-  saveCapturedPhotosToDeviceGallery   Boolean                    @default(false)
-  stationNegativeTolerancePercent     Float                      @default(2)
-  currency                 String                     @default("SAR")
-  language                 String                     @default("EN-AR")
-  createdAt                DateTime                   @default(now())
-  updatedAt                DateTime                   @updatedAt
-  deletedAt                DateTime?
-  assets                   Asset[]
-  assetActionRequests      AssetActionRequest[]
-  assetAssignmentHistory   AssetAssignmentHistory[]
-  assetTransferRequests    AssetTransferRequest[]
-  employees                Employee[]
-  employeeProjectAssignments EmployeeProjectAssignment[]
-  employeeProjectRemovalRequests EmployeeProjectRemovalRequest[]
-  employeeTransferRequests EmployeeTransferRequest[]
-  operations               Operation[]
-  operationCorrections     OperationCorrection[]
-  operationPhotoDrafts     OperationPhotoDraft[]
-  projects                 Project[]
-  projectFuelPriceHistory  ProjectFuelPriceHistory[]
-  roles                    Role[]
-  stations                 Station[]
-  stationAssignmentHistory StationAssignmentHistory[]
-  stationStockMovements    StationStockMovement[]
-  stationTransferRequests  StationTransferRequest[]
-  stationActionRequests    StationActionRequest[]
-  users                    User[]
-  importBatches            ImportBatch[]
+  id                                String                          @id @default(cuid())
+  name                              String
+  code                              String                          @unique
+  country                           String?
+  city                              String?
+  timezone                          String                          @default("Asia/Riyadh")
+  logoUrl                           String?
+  subscriptionPlan                  String                          @default("trial")
+  isActive                          Boolean                         @default(true)
+  dataImportEnabled                 Boolean                         @default(false)
+  multiProjectEnabled               Boolean                         @default(false)
+  mobilePhotoSourcePolicy           MobilePhotoSourcePolicy         @default(CAMERA_ONLY)
+  saveCapturedPhotosToDeviceGallery Boolean                         @default(false)
+  stationNegativeTolerancePercent   Float                           @default(2)
+  currency                          String                          @default("SAR")
+  language                          String                          @default("EN-AR")
+  createdAt                         DateTime                        @default(now())
+  updatedAt                         DateTime                        @updatedAt
+  deletedAt                         DateTime?
+  assets                            Asset[]
+  assetActionRequests               AssetActionRequest[]
+  assetAssignmentHistory            AssetAssignmentHistory[]
+  assetTransferRequests             AssetTransferRequest[]
+  employees                         Employee[]
+  employeeProjectAssignments        EmployeeProjectAssignment[]
+  employeeProjectRemovalRequests    EmployeeProjectRemovalRequest[]
+  employeeTransferRequests          EmployeeTransferRequest[]
+  operations                        Operation[]
+  operationCorrections              OperationCorrection[]
+  operationPhotoDrafts              OperationPhotoDraft[]
+  projects                          Project[]
+  projectFuelPriceHistory           ProjectFuelPriceHistory[]
+  roles                             Role[]
+  stations                          Station[]
+  stationAssignmentHistory          StationAssignmentHistory[]
+  stationStockMovements             StationStockMovement[]
+  stationTransferRequests           StationTransferRequest[]
+  stationActionRequests             StationActionRequest[]
+  users                             User[]
+  importBatches                     ImportBatch[]
+  mobilePushTokens                  MobilePushToken[]
 }
 
 enum ImportType {
@@ -92,37 +93,37 @@ enum ImportExecutionMode {
 }
 
 model ImportBatch {
-  id                  String              @id @default(cuid())
-  companyId           String
-  importType          ImportType
-  schemaVersion       Int
-  validationVersion   Int                 @default(1)
-  templateLanguage    String?
-  originalFileName    String
-  fileSizeBytes       Int
-  fileHash            String
-  status              ImportBatchStatus   @default(UPLOADED)
-  executionMode       ImportExecutionMode @default(ALL_OR_NOTHING)
-  totalRows           Int                 @default(0)
-  validRows           Int                 @default(0)
-  invalidRows         Int                 @default(0)
-  warningRows         Int                 @default(0)
-  importedRows        Int                 @default(0)
-  failedRows          Int                 @default(0)
-  uploadedByUserId    String
-  confirmedByUserId   String?
-  uploadedAt          DateTime            @default(now())
-  validatedAt         DateTime?
-  confirmedAt         DateTime?
-  startedAt           DateTime?
-  completedAt         DateTime?
-  failedAt            DateTime?
-  failureCode         String?
-  failureMessage      String?
-  company             Company             @relation(fields: [companyId], references: [id])
-  uploadedBy          User                @relation("ImportBatchUploadedBy", fields: [uploadedByUserId], references: [id])
-  confirmedBy         User?               @relation("ImportBatchConfirmedBy", fields: [confirmedByUserId], references: [id])
-  rows                 ImportRow[]
+  id                String              @id @default(cuid())
+  companyId         String
+  importType        ImportType
+  schemaVersion     Int
+  validationVersion Int                 @default(1)
+  templateLanguage  String?
+  originalFileName  String
+  fileSizeBytes     Int
+  fileHash          String
+  status            ImportBatchStatus   @default(UPLOADED)
+  executionMode     ImportExecutionMode @default(ALL_OR_NOTHING)
+  totalRows         Int                 @default(0)
+  validRows         Int                 @default(0)
+  invalidRows       Int                 @default(0)
+  warningRows       Int                 @default(0)
+  importedRows      Int                 @default(0)
+  failedRows        Int                 @default(0)
+  uploadedByUserId  String
+  confirmedByUserId String?
+  uploadedAt        DateTime            @default(now())
+  validatedAt       DateTime?
+  confirmedAt       DateTime?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  failedAt          DateTime?
+  failureCode       String?
+  failureMessage    String?
+  company           Company             @relation(fields: [companyId], references: [id])
+  uploadedBy        User                @relation("ImportBatchUploadedBy", fields: [uploadedByUserId], references: [id])
+  confirmedBy       User?               @relation("ImportBatchConfirmedBy", fields: [confirmedByUserId], references: [id])
+  rows              ImportRow[]
 
   @@index([companyId])
   @@index([importType])
@@ -151,50 +152,50 @@ model ImportRow {
 }
 
 model Project {
-  id                           String                     @id @default(cuid())
-  companyId                    String
-  code                         String
-  name                         String
-  location                     String?
-  description                  String?
-  isActive                     Boolean                    @default(true)
-  createdById                  String?
-  createdAt                    DateTime                   @default(now())
-  updatedAt                    DateTime                   @updatedAt
-  deletedAt                    DateTime?
-  projectManagerId             String?
-  currentFuelPrice             Float                      @default(0)
-  currentBaseFuelPrice         Float?
-  currentTransportCostPerLiter Float?
-  currentVatRate               Float?
-  currentGrossFuelPrice        Float?
-  fuelPriceCurrency            String                     @default("SAR")
-  fuelPriceEffectiveFrom       DateTime?
-  assets                       Asset[]
-  assetActionRequests          AssetActionRequest[]
-  assetAssignmentHistoryFrom   AssetAssignmentHistory[]   @relation("AssetAssignmentFromProject")
-  assetAssignmentHistoryTo     AssetAssignmentHistory[]   @relation("AssetAssignmentToProject")
-  assetTransferApprovals       AssetTransferApproval[]    @relation("AssetTransferApprovalProject")
-  assetTransferRequestsFrom    AssetTransferRequest[]     @relation("AssetTransferFromProject")
-  assetTransferRequestsTo      AssetTransferRequest[]     @relation("AssetTransferToProject")
-  employees                    Employee[]
-  employeeProjectAssignments  EmployeeProjectAssignment[]
+  id                             String                          @id @default(cuid())
+  companyId                      String
+  code                           String
+  name                           String
+  location                       String?
+  description                    String?
+  isActive                       Boolean                         @default(true)
+  createdById                    String?
+  createdAt                      DateTime                        @default(now())
+  updatedAt                      DateTime                        @updatedAt
+  deletedAt                      DateTime?
+  projectManagerId               String?
+  currentFuelPrice               Float                           @default(0)
+  currentBaseFuelPrice           Float?
+  currentTransportCostPerLiter   Float?
+  currentVatRate                 Float?
+  currentGrossFuelPrice          Float?
+  fuelPriceCurrency              String                          @default("SAR")
+  fuelPriceEffectiveFrom         DateTime?
+  assets                         Asset[]
+  assetActionRequests            AssetActionRequest[]
+  assetAssignmentHistoryFrom     AssetAssignmentHistory[]        @relation("AssetAssignmentFromProject")
+  assetAssignmentHistoryTo       AssetAssignmentHistory[]        @relation("AssetAssignmentToProject")
+  assetTransferApprovals         AssetTransferApproval[]         @relation("AssetTransferApprovalProject")
+  assetTransferRequestsFrom      AssetTransferRequest[]          @relation("AssetTransferFromProject")
+  assetTransferRequestsTo        AssetTransferRequest[]          @relation("AssetTransferToProject")
+  employees                      Employee[]
+  employeeProjectAssignments     EmployeeProjectAssignment[]
   employeeProjectRemovalRequests EmployeeProjectRemovalRequest[]
-  employeeTransferApprovals    EmployeeTransferApproval[] @relation("EmployeeTransferApprovalProject")
-  employeeTransferRequestsFrom EmployeeTransferRequest[]  @relation("EmployeeTransferFromProject")
-  employeeTransferRequestsTo   EmployeeTransferRequest[]  @relation("EmployeeTransferToProject")
-  operationApprovals           OperationApproval[]        @relation("OperationApprovalProject")
-  company                      Company                    @relation(fields: [companyId], references: [id])
-  createdBy                    User?                      @relation("ProjectCreatedBy", fields: [createdById], references: [id])
-  projectManager               User?                      @relation("ProjectManager", fields: [projectManagerId], references: [id])
-  fuelPriceHistory             ProjectFuelPriceHistory[]
-  stations                     Station[]
-  stationAssignmentHistoryFrom StationAssignmentHistory[] @relation("StationAssignmentFromProject")
-  stationAssignmentHistoryTo   StationAssignmentHistory[] @relation("StationAssignmentToProject")
-  stationTransferApprovals     StationTransferApproval[]  @relation("StationTransferApprovalProject")
-  stationTransferRequestsFrom  StationTransferRequest[]   @relation("StationTransferFromProject")
-  stationTransferRequestsTo    StationTransferRequest[]   @relation("StationTransferToProject")
-  stationActionRequests        StationActionRequest[]
+  employeeTransferApprovals      EmployeeTransferApproval[]      @relation("EmployeeTransferApprovalProject")
+  employeeTransferRequestsFrom   EmployeeTransferRequest[]       @relation("EmployeeTransferFromProject")
+  employeeTransferRequestsTo     EmployeeTransferRequest[]       @relation("EmployeeTransferToProject")
+  operationApprovals             OperationApproval[]             @relation("OperationApprovalProject")
+  company                        Company                         @relation(fields: [companyId], references: [id])
+  createdBy                      User?                           @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+  projectManager                 User?                           @relation("ProjectManager", fields: [projectManagerId], references: [id])
+  fuelPriceHistory               ProjectFuelPriceHistory[]
+  stations                       Station[]
+  stationAssignmentHistoryFrom   StationAssignmentHistory[]      @relation("StationAssignmentFromProject")
+  stationAssignmentHistoryTo     StationAssignmentHistory[]      @relation("StationAssignmentToProject")
+  stationTransferApprovals       StationTransferApproval[]       @relation("StationTransferApprovalProject")
+  stationTransferRequestsFrom    StationTransferRequest[]        @relation("StationTransferFromProject")
+  stationTransferRequestsTo      StationTransferRequest[]        @relation("StationTransferToProject")
+  stationActionRequests          StationActionRequest[]
 
   @@unique([companyId, code])
   @@index([companyId])
@@ -237,61 +238,62 @@ model RolePermission {
 }
 
 model User {
-  id                            String                     @id @default(cuid())
-  companyId                     String
-  roleId                        String
-  fullName                      String
-  email                         String?                    @unique
-  phone                         String?
-  passwordHash                  String
-  isActive                      Boolean                    @default(true)
-  mustChangePassword            Boolean                    @default(false)
-  preferredLanguage             String                     @default("en")
-  lastLoginAt                   DateTime?
-  createdById                   String?
-  createdAt                     DateTime                   @default(now())
-  updatedAt                     DateTime                   @updatedAt
-  deletedAt                     DateTime?
-  employeeId                    String?
-  username                      String?                    @unique
-  createdAssets                 Asset[]                    @relation("AssetCreatedBy")
-  assetAssignmentHistory        AssetAssignmentHistory[]   @relation("AssetAssignmentAssignedBy")
-  assetOdometerResets           AssetOdometerReset[]
-  requestedAssetActions         AssetActionRequest[]       @relation("AssetActionRequestedBy")
-  reviewedAssetActions          AssetActionRequest[]       @relation("AssetActionReviewedBy")
-  assetTransferApprovals        AssetTransferApproval[]    @relation("AssetTransferApprover")
-  requestedAssetTransfers       AssetTransferRequest[]     @relation("AssetTransferRequestedBy")
-  createdEmployees              Employee[]                 @relation("EmployeeCreatedBy")
-  assignedEmployeeProjects      EmployeeProjectAssignment[] @relation("EmployeeProjectAssignmentAssignedBy")
+  id                               String                          @id @default(cuid())
+  companyId                        String
+  roleId                           String
+  fullName                         String
+  email                            String?                         @unique
+  phone                            String?
+  passwordHash                     String
+  isActive                         Boolean                         @default(true)
+  mustChangePassword               Boolean                         @default(false)
+  preferredLanguage                String                          @default("en")
+  lastLoginAt                      DateTime?
+  createdById                      String?
+  createdAt                        DateTime                        @default(now())
+  updatedAt                        DateTime                        @updatedAt
+  deletedAt                        DateTime?
+  employeeId                       String?
+  username                         String?                         @unique
+  createdAssets                    Asset[]                         @relation("AssetCreatedBy")
+  assetAssignmentHistory           AssetAssignmentHistory[]        @relation("AssetAssignmentAssignedBy")
+  assetOdometerResets              AssetOdometerReset[]
+  requestedAssetActions            AssetActionRequest[]            @relation("AssetActionRequestedBy")
+  reviewedAssetActions             AssetActionRequest[]            @relation("AssetActionReviewedBy")
+  assetTransferApprovals           AssetTransferApproval[]         @relation("AssetTransferApprover")
+  requestedAssetTransfers          AssetTransferRequest[]          @relation("AssetTransferRequestedBy")
+  createdEmployees                 Employee[]                      @relation("EmployeeCreatedBy")
+  assignedEmployeeProjects         EmployeeProjectAssignment[]     @relation("EmployeeProjectAssignmentAssignedBy")
   requestedEmployeeProjectRemovals EmployeeProjectRemovalRequest[] @relation("EmployeeProjectRemovalRequestedBy")
   approvedEmployeeProjectRemovals  EmployeeProjectRemovalRequest[] @relation("EmployeeProjectRemovalApprover")
   reviewedEmployeeProjectRemovals  EmployeeProjectRemovalRequest[] @relation("EmployeeProjectRemovalReviewedBy")
-  linkedEmployee                Employee?                  @relation("EmployeeLinkedUser")
-  employeeTransferApprovals     EmployeeTransferApproval[] @relation("EmployeeTransferApprover")
-  requestedEmployeeTransfers    EmployeeTransferRequest[]  @relation("EmployeeTransferRequestedBy")
-  requestedOperations           Operation[]                @relation("OperationRequestedBy")
-  operationPhotoDrafts           OperationPhotoDraft[]      @relation("OperationPhotoDraftUploadedBy")
-  operationApprovals            OperationApproval[]        @relation("OperationApprover")
-  requestedOperationCorrections OperationCorrection[]      @relation("OperationCorrectionRequestedBy")
-  reviewedOperationCorrections  OperationCorrection[]      @relation("OperationCorrectionReviewedBy")
-  createdProjects               Project[]                  @relation("ProjectCreatedBy")
-  managedProjects               Project[]                  @relation("ProjectManager")
-  projectFuelPriceHistory       ProjectFuelPriceHistory[]
-  refreshTokens                 RefreshToken[]
-  createdStations               Station[]                  @relation("StationCreatedBy")
-  stationAssignmentHistory      StationAssignmentHistory[] @relation("StationAssignmentAssignedBy")
-  stationCounterResets          StationCounterReset[]
-  stationStockMovements         StationStockMovement[]
-  stationTransferApprovals      StationTransferApproval[]  @relation("StationTransferApprover")
-  requestedStationTransfers     StationTransferRequest[]   @relation("StationTransferRequestedBy")
-  requestedStationActions       StationActionRequest[]     @relation("StationActionRequestedBy")
-  reviewedStationActions        StationActionRequest[]     @relation("StationActionReviewedBy")
-  uploadedImportBatches         ImportBatch[]               @relation("ImportBatchUploadedBy")
-  confirmedImportBatches        ImportBatch[]               @relation("ImportBatchConfirmedBy")
-  company                       Company                    @relation(fields: [companyId], references: [id])
-  createdBy                     User?                      @relation("UserCreatedBy", fields: [createdById], references: [id])
-  createdUsers                  User[]                     @relation("UserCreatedBy")
-  role                          Role                       @relation(fields: [roleId], references: [id])
+  linkedEmployee                   Employee?                       @relation("EmployeeLinkedUser")
+  employeeTransferApprovals        EmployeeTransferApproval[]      @relation("EmployeeTransferApprover")
+  requestedEmployeeTransfers       EmployeeTransferRequest[]       @relation("EmployeeTransferRequestedBy")
+  requestedOperations              Operation[]                     @relation("OperationRequestedBy")
+  operationPhotoDrafts             OperationPhotoDraft[]           @relation("OperationPhotoDraftUploadedBy")
+  operationApprovals               OperationApproval[]             @relation("OperationApprover")
+  requestedOperationCorrections    OperationCorrection[]           @relation("OperationCorrectionRequestedBy")
+  reviewedOperationCorrections     OperationCorrection[]           @relation("OperationCorrectionReviewedBy")
+  createdProjects                  Project[]                       @relation("ProjectCreatedBy")
+  managedProjects                  Project[]                       @relation("ProjectManager")
+  projectFuelPriceHistory          ProjectFuelPriceHistory[]
+  refreshTokens                    RefreshToken[]
+  createdStations                  Station[]                       @relation("StationCreatedBy")
+  stationAssignmentHistory         StationAssignmentHistory[]      @relation("StationAssignmentAssignedBy")
+  stationCounterResets             StationCounterReset[]
+  stationStockMovements            StationStockMovement[]
+  stationTransferApprovals         StationTransferApproval[]       @relation("StationTransferApprover")
+  requestedStationTransfers        StationTransferRequest[]        @relation("StationTransferRequestedBy")
+  requestedStationActions          StationActionRequest[]          @relation("StationActionRequestedBy")
+  reviewedStationActions           StationActionRequest[]          @relation("StationActionReviewedBy")
+  uploadedImportBatches            ImportBatch[]                   @relation("ImportBatchUploadedBy")
+  confirmedImportBatches           ImportBatch[]                   @relation("ImportBatchConfirmedBy")
+  mobilePushTokens                 MobilePushToken[]
+  company                          Company                         @relation(fields: [companyId], references: [id])
+  createdBy                        User?                           @relation("UserCreatedBy", fields: [createdById], references: [id])
+  createdUsers                     User[]                          @relation("UserCreatedBy")
+  role                             Role                            @relation(fields: [roleId], references: [id])
 
   @@unique([companyId, employeeId])
   @@index([companyId])
@@ -300,27 +302,50 @@ model User {
   @@index([username])
 }
 
-model Employee {
-  id               String                    @id @default(cuid())
+model MobilePushToken {
+  id               String    @id @default(cuid())
+  userId           String
   companyId        String
-  employeeId       String
-  name             String
-  phone            String?
-  email            String?
-  jobTitle         String                    @default("Operator")
-  status           EmployeeStatus            @default(ON_DUTY)
-  projectId        String?
-  linkedUserId     String?                   @unique
-  createdById      String?
-  createdAt        DateTime                  @default(now())
-  updatedAt        DateTime                  @updatedAt
-  deletedAt        DateTime?
-  company          Company                   @relation(fields: [companyId], references: [id])
-  createdBy        User?                     @relation("EmployeeCreatedBy", fields: [createdById], references: [id])
-  linkedUser       User?                     @relation("EmployeeLinkedUser", fields: [linkedUserId], references: [id])
-  project          Project?                  @relation(fields: [projectId], references: [id])
-  transferRequests EmployeeTransferRequest[]
-  projectAssignments EmployeeProjectAssignment[]
+  installationId   String    @unique
+  expoPushToken    String    @unique
+  platform         String
+  deviceName       String?
+  appVersion       String?
+  isActive         Boolean   @default(true)
+  lastRegisteredAt DateTime  @default(now())
+  lastDeliveryAt   DateTime?
+  lastError        String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  user             User      @relation(fields: [userId], references: [id])
+  company          Company   @relation(fields: [companyId], references: [id])
+
+  @@index([userId])
+  @@index([companyId])
+  @@index([isActive])
+}
+
+model Employee {
+  id                     String                          @id @default(cuid())
+  companyId              String
+  employeeId             String
+  name                   String
+  phone                  String?
+  email                  String?
+  jobTitle               String                          @default("Operator")
+  status                 EmployeeStatus                  @default(ON_DUTY)
+  projectId              String?
+  linkedUserId           String?                         @unique
+  createdById            String?
+  createdAt              DateTime                        @default(now())
+  updatedAt              DateTime                        @updatedAt
+  deletedAt              DateTime?
+  company                Company                         @relation(fields: [companyId], references: [id])
+  createdBy              User?                           @relation("EmployeeCreatedBy", fields: [createdById], references: [id])
+  linkedUser             User?                           @relation("EmployeeLinkedUser", fields: [linkedUserId], references: [id])
+  project                Project?                        @relation(fields: [projectId], references: [id])
+  transferRequests       EmployeeTransferRequest[]
+  projectAssignments     EmployeeProjectAssignment[]
   projectRemovalRequests EmployeeProjectRemovalRequest[]
 
   @@unique([companyId, employeeId])
@@ -349,7 +374,7 @@ model EmployeeProjectAssignment {
 }
 
 model EmployeeTransferRequest {
-  id                     String                     @id @default(cuid())
+  id                     String                          @id @default(cuid())
   companyId              String
   employeeId             String
   fromProjectId          String
@@ -358,24 +383,24 @@ model EmployeeTransferRequest {
   transferBatchId        String?
   employeeCodeAtTransfer String?
   employeeNameAtTransfer String?
-  status                 EmployeeTransferStatus     @default(PENDING)
+  status                 EmployeeTransferStatus          @default(PENDING)
   reason                 String?
   rejectionReason        String?
   approvedAt             DateTime?
   rejectedAt             DateTime?
   cancelledAt            DateTime?
   appliedAt              DateTime?
-  createdAt              DateTime                   @default(now())
-  updatedAt              DateTime                   @updatedAt
+  createdAt              DateTime                        @default(now())
+  updatedAt              DateTime                        @updatedAt
   effectiveDate          DateTime?
-  keepLinkedProjects     Boolean                    @default(true)
+  keepLinkedProjects     Boolean                         @default(true)
   approvals              EmployeeTransferApproval[]
   projectRemovalRequests EmployeeProjectRemovalRequest[]
-  company                Company                    @relation(fields: [companyId], references: [id])
-  employee               Employee                   @relation(fields: [employeeId], references: [id])
-  fromProject            Project                    @relation("EmployeeTransferFromProject", fields: [fromProjectId], references: [id])
-  requestedBy            User                       @relation("EmployeeTransferRequestedBy", fields: [requestedByUserId], references: [id])
-  toProject              Project                    @relation("EmployeeTransferToProject", fields: [toProjectId], references: [id])
+  company                Company                         @relation(fields: [companyId], references: [id])
+  employee               Employee                        @relation(fields: [employeeId], references: [id])
+  fromProject            Project                         @relation("EmployeeTransferFromProject", fields: [fromProjectId], references: [id])
+  requestedBy            User                            @relation("EmployeeTransferRequestedBy", fields: [requestedByUserId], references: [id])
+  toProject              Project                         @relation("EmployeeTransferToProject", fields: [toProjectId], references: [id])
 
   @@index([companyId])
   @@index([employeeId])
@@ -552,30 +577,30 @@ model AssetTransferApproval {
 }
 
 model AssetActionRequest {
-  id                String                   @id @default(cuid())
-  companyId         String
-  assetId           String
-  projectId         String?
-  requestedByUserId String
-  actionType        AssetActionType
-  status            AssetActionRequestStatus @default(PENDING)
-  reason            String
+  id                   String                   @id @default(cuid())
+  companyId            String
+  assetId              String
+  projectId            String?
+  requestedByUserId    String
+  actionType           AssetActionType
+  status               AssetActionRequestStatus @default(PENDING)
+  reason               String
   requestedOdometer    Float?
   requestedOldOdometer Float?
   effectiveAt          DateTime?
-  reviewedByUserId  String?
-  reviewNote        String?
-  reviewedAt        DateTime?
-  approvedAt        DateTime?
-  rejectedAt        DateTime?
-  appliedAt         DateTime?
-  createdAt         DateTime                 @default(now())
-  updatedAt         DateTime                 @updatedAt
-  company           Company                  @relation(fields: [companyId], references: [id])
-  asset             Asset                    @relation(fields: [assetId], references: [id])
-  project           Project?                 @relation(fields: [projectId], references: [id])
-  requestedBy       User                     @relation("AssetActionRequestedBy", fields: [requestedByUserId], references: [id])
-  reviewedBy        User?                    @relation("AssetActionReviewedBy", fields: [reviewedByUserId], references: [id])
+  reviewedByUserId     String?
+  reviewNote           String?
+  reviewedAt           DateTime?
+  approvedAt           DateTime?
+  rejectedAt           DateTime?
+  appliedAt            DateTime?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  company              Company                  @relation(fields: [companyId], references: [id])
+  asset                Asset                    @relation(fields: [assetId], references: [id])
+  project              Project?                 @relation(fields: [projectId], references: [id])
+  requestedBy          User                     @relation("AssetActionRequestedBy", fields: [requestedByUserId], references: [id])
+  reviewedBy           User?                    @relation("AssetActionReviewedBy", fields: [reviewedByUserId], references: [id])
 
   @@index([companyId])
   @@index([assetId])
@@ -750,7 +775,7 @@ model Operation {
   sourceStation                     Station?                 @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
   approvals                         OperationApproval[]
   corrections                       OperationCorrection[]
-  photoDrafts                        OperationPhotoDraft[]
+  photoDrafts                       OperationPhotoDraft[]
 
   @@unique([companyId, operationNo])
   @@unique([companyId, clientOperationId])
@@ -775,25 +800,25 @@ model Operation {
 }
 
 model OperationPhotoDraft {
-  id             String                      @id @default(cuid())
-  companyId      String
+  id               String                      @id @default(cuid())
+  companyId        String
   uploadedByUserId String
-  operationId    String?
-  status         OperationPhotoDraftStatus   @default(PENDING)
-  bucket         String
-  path           String                      @unique
-  fileName       String
-  photoType      String
-  ownerType      String
-  ownerCode      String
-  captureSource  OperationPhotoCaptureSource @default(WEB)
-  mimeType       String
-  sizeBytes      Int
-  createdAt      DateTime                    @default(now())
-  consumedAt     DateTime?
-  company        Company                     @relation(fields: [companyId], references: [id])
-  uploadedBy     User                        @relation("OperationPhotoDraftUploadedBy", fields: [uploadedByUserId], references: [id])
-  operation      Operation?                  @relation(fields: [operationId], references: [id])
+  operationId      String?
+  status           OperationPhotoDraftStatus   @default(PENDING)
+  bucket           String
+  path             String                      @unique
+  fileName         String
+  photoType        String
+  ownerType        String
+  ownerCode        String
+  captureSource    OperationPhotoCaptureSource @default(WEB)
+  mimeType         String
+  sizeBytes        Int
+  createdAt        DateTime                    @default(now())
+  consumedAt       DateTime?
+  company          Company                     @relation(fields: [companyId], references: [id])
+  uploadedBy       User                        @relation("OperationPhotoDraftUploadedBy", fields: [uploadedByUserId], references: [id])
+  operation        Operation?                  @relation(fields: [operationId], references: [id])
 
   @@index([companyId])
   @@index([uploadedByUserId])
