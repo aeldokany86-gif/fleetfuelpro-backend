@@ -892,6 +892,16 @@ export class OperationsService {
           currentUser,
           operation.type,
           new Date(operation.occurredAt),
+          {
+            /*
+              Review authorization is already enforced by the PENDING
+              OperationApproval row for the current manager. Do not re-run the
+              operation-creation project-access rule here, because an external
+              transfer destination manager may legitimately approve an operation
+              whose source project they do not manage.
+            */
+            skipUserProjectAccess: true,
+          },
         )
       : undefined;
 
@@ -2176,6 +2186,9 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     user: CurrentUserContext,
     type: NormalizedOperationType,
     occurredAt: Date,
+    options?: {
+      skipUserProjectAccess?: boolean;
+    },
   ): Promise<LoadedOperationEntities> {
     if (!user.companyId) throw new BadRequestException('User companyId is required.');
 
@@ -2225,7 +2238,18 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     this.validateSelectedProjectAgainstHistoricalEntities(type, entities, dto);
     this.validateProjectRules(type, entities);
     this.validateTankCapacity(type, entities, Number(dto.quantity));
-    await this.validateUserProjectAccess(tx, user, type, entities, dto, occurredAt);
+
+    if (!options?.skipUserProjectAccess) {
+      await this.validateUserProjectAccess(
+        tx,
+        user,
+        type,
+        entities,
+        dto,
+        occurredAt,
+      );
+    }
+
     return entities;
   }
 
