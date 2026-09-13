@@ -10,7 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateOperationDto } from './dto/create-operation.dto';
 import { ReviewOperationDto } from './dto/review-operation.dto';
 import { OperationsRealtimeService } from './operations-realtime.service';
-import { MobileNotificationsService } from '../mobile-notifications/mobile-notifications.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 type NormalizedOperationType =
   | 'DIRECT_REFUEL'
@@ -91,7 +91,7 @@ export class OperationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly operationsRealtime: OperationsRealtimeService,
-    private readonly mobileNotificationsService: MobileNotificationsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   private buildOperationListInclude() {
@@ -1035,6 +1035,16 @@ export class OperationsService {
       return { status: 'COMPLETED', completedNow: true, rejectedNow: false };
     }, { maxWait: 10000, timeout: 15000 });
 
+    // Keep the persistent approval notification in sync with the decision.
+    // This is best-effort and must never affect the already-committed review.
+    await Promise.allSettled([
+      this.notificationsService.closeOperationApprovalRequired({
+        operationId: operation.id,
+        userId: currentUser.id,
+        status: result.rejectedNow ? 'REJECTED' : 'APPROVED',
+      }),
+    ]);
+
     this.operationsRealtime.publish({
       type: 'operation.updated',
       companyId: currentUser.companyId!,
@@ -1056,7 +1066,7 @@ export class OperationsService {
     });
 
     if (result.completedNow || result.rejectedNow) {
-      await this.sendFinalExternalTransferResultPushesBestEffort({
+      await this.sendFinalExternalTransferResultNotificationsBestEffort({
         operation,
         status: result.rejectedNow ? 'REJECTED' : 'COMPLETED',
       });
@@ -1326,7 +1336,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
   };
 }
 
-  private async sendPendingOperationApprovalPushesBestEffort(params: {
+  private async sendPendingOperationApprovalNotificationsBestEffort(params: {
     operation: any;
     type: NormalizedOperationType;
     currentUser: CurrentUserContext;
@@ -1345,7 +1355,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     */
     await Promise.allSettled(
       pendingApprovals.map((approval) =>
-        this.mobileNotificationsService.sendOperationApprovalRequired({
+        this.notificationsService.sendOperationApprovalRequired({
           approverUserId: approval.approverUserId,
           operationId: params.operation.id,
           operationNo: params.operation.operationNo,
@@ -1357,7 +1367,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     );
   }
 
-  private async sendFinalExternalTransferResultPushesBestEffort(params: {
+  private async sendFinalExternalTransferResultNotificationsBestEffort(params: {
     operation: any;
     status: 'COMPLETED' | 'REJECTED';
   }) {
@@ -1389,7 +1399,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     */
     await Promise.allSettled(
       recipientUserIds.map((recipientUserId) =>
-        this.mobileNotificationsService.sendOperationApprovalResult({
+        this.notificationsService.sendOperationApprovalResult({
           recipientUserId,
           operationId: params.operation.id,
           operationNo: params.operation.operationNo,
@@ -1646,7 +1656,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         occurredAt: new Date().toISOString(),
       });
 
-      await this.sendPendingOperationApprovalPushesBestEffort({
+      await this.sendPendingOperationApprovalNotificationsBestEffort({
         operation: result.operation,
         type,
         currentUser,

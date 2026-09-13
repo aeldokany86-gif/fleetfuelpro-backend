@@ -8,7 +8,7 @@ import {
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 
-import { MobileNotificationsService } from './mobile-notifications.service';
+import { MobilePushService } from './mobile-push.service';
 
 type JwtRequestUser = {
   userId?: string;
@@ -35,17 +35,15 @@ type UnregisterDeviceBody = {
 
 @Controller('mobile/notifications')
 @UseGuards(AuthGuard('jwt'))
-export class MobileNotificationsController {
-  constructor(
-    private readonly mobileNotificationsService: MobileNotificationsService,
-  ) {}
+export class MobilePushController {
+  constructor(private readonly mobilePushService: MobilePushService) {}
 
   @Post('devices')
   async registerDevice(
     @Body() body: RegisterDeviceBody,
     @Req() request: JwtRequest,
   ) {
-    return this.mobileNotificationsService.registerDevice(body, request.user);
+    return this.mobilePushService.registerDevice(body, request.user);
   }
 
   @Delete('devices')
@@ -53,11 +51,11 @@ export class MobileNotificationsController {
     @Body() body: UnregisterDeviceBody,
     @Req() request: JwtRequest,
   ) {
-    return this.mobileNotificationsService.unregisterDevice(body, request.user);
+    return this.mobilePushService.unregisterDevice(body, request.user);
   }
 
   @Post('test')
   async sendTestPush(@Req() request: JwtRequest) {
-    return this.mobileNotificationsService.sendTestPush(request.user);
+    return this.mobilePushService.sendTestPush(request.user);
   }
 }

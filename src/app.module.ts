@@ -18,7 +18,7 @@ import { OperationCorrectionsModule } from './operation-corrections/operation-co
 import { UploadsModule } from './uploads/uploads.module';
 import { ImportsModule } from './imports/imports.module';
 import { MobileApprovalsModule } from './mobile-approvals/mobile-approvals.module';
-import { MobileNotificationsModule } from './mobile-notifications/mobile-notifications.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -37,7 +37,7 @@ import { MobileNotificationsModule } from './mobile-notifications/mobile-notific
     UploadsModule,
     ImportsModule,
     MobileApprovalsModule,
-    MobileNotificationsModule,
+    NotificationsModule,
   ],
   controllers: [AppController, EmployeesController],
   providers: [AppService, EmployeesService],

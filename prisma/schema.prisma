@@ -66,6 +66,7 @@ model Company {
   users                             User[]
   importBatches                     ImportBatch[]
   mobilePushTokens                  MobilePushToken[]
+  notifications                     Notification[]
 }
 
 enum ImportType {
@@ -290,6 +291,7 @@ model User {
   uploadedImportBatches            ImportBatch[]                   @relation("ImportBatchUploadedBy")
   confirmedImportBatches           ImportBatch[]                   @relation("ImportBatchConfirmedBy")
   mobilePushTokens                 MobilePushToken[]
+  notifications                    Notification[]
   company                          Company                         @relation(fields: [companyId], references: [id])
   createdBy                        User?                           @relation("UserCreatedBy", fields: [createdById], references: [id])
   createdUsers                     User[]                          @relation("UserCreatedBy")
@@ -300,6 +302,36 @@ model User {
   @@index([roleId])
   @@index([employeeId])
   @@index([username])
+}
+
+model Notification {
+  id            String    @id @default(cuid())
+  companyId     String
+  userId        String
+  type          String
+  category      String?
+  titleKey      String
+  messageKey    String
+  titleParams   Json?
+  messageParams Json?
+  priority      String    @default("NORMAL")
+  route         String?
+  entityType    String?
+  entityId      String?
+  status        String?
+  actionable    Boolean   @default(false)
+  metadata      Json?
+  dedupeKey     String?   @unique
+  readAt        DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company       Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@index([companyId, createdAt])
+  @@index([type])
+  @@index([entityType, entityId])
 }
 
 model MobilePushToken {

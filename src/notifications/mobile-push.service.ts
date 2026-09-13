@@ -7,10 +7,8 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import {
   getMobilePushTestMessage,
-  getOperationApprovalRequiredMessage,
-  getOperationApprovalResultMessage,
-  normalizeMobileNotificationLanguage,
-} from './mobile-notification-messages';
+  normalizeNotificationLanguage,
+} from './notification-messages';
 
 type JwtRequestUser = {
   userId?: string;
@@ -31,29 +29,11 @@ type UnregisterDeviceInput = {
   installationId?: string;
 };
 
-type PushMessage = {
+export type PushMessage = {
   title: string;
   body: string;
   data?: Record<string, unknown>;
   sound?: 'default' | null;
-};
-
-
-type OperationApprovalPushInput = {
-  approverUserId: string;
-  operationId: string;
-  operationNo: string;
-  operationType: string;
-  approvalStage?: string | null;
-  requestedByName?: string | null;
-};
-
-type OperationApprovalResultPushInput = {
-  recipientUserId: string;
-  operationId: string;
-  operationNo: string;
-  operationType: string;
-  status: 'COMPLETED' | 'REJECTED';
 };
 
 type ExpoPushResponseItem = {
@@ -66,7 +46,7 @@ type ExpoPushResponseItem = {
 };
 
 @Injectable()
-export class MobileNotificationsService {
+export class MobilePushService {
   private readonly expoPushUrl = 'https://exp.host/--/api/v2/push/send';
 
   constructor(private readonly prisma: PrismaService) {}
@@ -117,8 +97,14 @@ export class MobileNotificationsService {
   private normalizeInstallationId(value?: string) {
     const installationId = String(value || '').trim();
 
-    if (!installationId || installationId.length < 12 || installationId.length > 200) {
-      throw new BadRequestException('A valid mobile installation ID is required.');
+    if (
+      !installationId ||
+      installationId.length < 12 ||
+      installationId.length > 200
+    ) {
+      throw new BadRequestException(
+        'A valid mobile installation ID is required.',
+      );
     }
 
     return installationId;
@@ -128,7 +114,9 @@ export class MobileNotificationsService {
     const platform = String(value || '').trim().toLowerCase();
 
     if (!['android', 'ios'].includes(platform)) {
-      throw new BadRequestException('Mobile platform must be android or ios.');
+      throw new BadRequestException(
+        'Mobile platform must be android or ios.',
+      );
     }
 
     return platform;
@@ -139,12 +127,12 @@ export class MobileNotificationsService {
     const installationId = this.normalizeInstallationId(input.installationId);
     const expoPushToken = this.normalizeExpoPushToken(input.expoPushToken);
     const platform = this.normalizePlatform(input.platform);
-    const deviceName = String(input.deviceName || '').trim().slice(0, 200) || null;
-    const appVersion = String(input.appVersion || '').trim().slice(0, 50) || null;
+    const deviceName =
+      String(input.deviceName || '').trim().slice(0, 200) || null;
+    const appVersion =
+      String(input.appVersion || '').trim().slice(0, 50) || null;
 
     const registration = await this.prisma.$transaction(async (tx) => {
-      // A push token belongs to only one current app installation. Remove a
-      // stale token row first so a re-install/account switch cannot conflict.
       await tx.mobilePushToken.deleteMany({
         where: {
           expoPushToken,
@@ -214,7 +202,7 @@ export class MobileNotificationsService {
 
   async sendTestPush(jwtUser?: JwtRequestUser) {
     const user = await this.resolveCurrentUser(jwtUser);
-    const language = normalizeMobileNotificationLanguage(user.preferredLanguage);
+    const language = normalizeNotificationLanguage(user.preferredLanguage);
     const message = getMobilePushTestMessage(language);
 
     const result = await this.sendToUser(user.id, {
@@ -222,7 +210,7 @@ export class MobileNotificationsService {
       body: message.body,
       data: {
         type: 'TEST_NOTIFICATION',
-        screen: 'approvals',
+        screen: 'notifications',
       },
       sound: 'default',
     });
@@ -231,130 +219,6 @@ export class MobileNotificationsService {
       ok: true,
       ...result,
     };
-  }
-
-  async sendOperationApprovalRequired(input: OperationApprovalPushInput) {
-    const approverUserId = String(input.approverUserId || '').trim();
-
-    if (!approverUserId) {
-      return {
-        registeredDevices: 0,
-        accepted: 0,
-        failed: 0,
-        skipped: true,
-        reason: 'APPROVER_USER_ID_MISSING',
-      };
-    }
-
-    const approver = await this.prisma.user.findFirst({
-      where: {
-        id: approverUserId,
-        deletedAt: null,
-        isActive: true,
-      },
-      select: {
-        id: true,
-        preferredLanguage: true,
-      },
-    });
-
-    if (!approver) {
-      return {
-        registeredDevices: 0,
-        accepted: 0,
-        failed: 0,
-        skipped: true,
-        reason: 'APPROVER_NOT_ACTIVE',
-      };
-    }
-
-    const language = normalizeMobileNotificationLanguage(
-      approver.preferredLanguage,
-    );
-
-    const operationNo = String(input.operationNo || '').trim();
-    const message = getOperationApprovalRequiredMessage({
-      language,
-      operationType: input.operationType,
-      operationNo,
-    });
-
-    return this.sendToUser(approver.id, {
-      title: message.title,
-      body: message.body,
-      data: {
-        type: 'OPERATION_APPROVAL_REQUIRED',
-        screen: 'approvals',
-        operationId: input.operationId,
-        operationNo,
-        operationType: input.operationType,
-        approvalStage: input.approvalStage || null,
-      },
-      sound: 'default',
-    });
-  }
-
-
-  async sendOperationApprovalResult(input: OperationApprovalResultPushInput) {
-    const recipientUserId = String(input.recipientUserId || '').trim();
-
-    if (!recipientUserId) {
-      return {
-        registeredDevices: 0,
-        accepted: 0,
-        failed: 0,
-        skipped: true,
-        reason: 'RECIPIENT_USER_ID_MISSING',
-      };
-    }
-
-    const recipient = await this.prisma.user.findFirst({
-      where: {
-        id: recipientUserId,
-        deletedAt: null,
-        isActive: true,
-      },
-      select: {
-        id: true,
-        preferredLanguage: true,
-      },
-    });
-
-    if (!recipient) {
-      return {
-        registeredDevices: 0,
-        accepted: 0,
-        failed: 0,
-        skipped: true,
-        reason: 'RECIPIENT_NOT_ACTIVE',
-      };
-    }
-
-    const language = normalizeMobileNotificationLanguage(
-      recipient.preferredLanguage,
-    );
-
-    const operationNo = String(input.operationNo || '').trim();
-    const message = getOperationApprovalResultMessage({
-      language,
-      operationType: input.operationType,
-      operationNo,
-      status: input.status,
-    });
-
-    return this.sendToUser(recipient.id, {
-      title: message.title,
-      body: message.body,
-      data: {
-        type: 'OPERATION_APPROVAL_RESULT',
-        screen: 'approvals',
-        operationId: input.operationId,
-        operationNo,
-        operationType: input.operationType,
-        status: input.status,
-      },
-      sound: 'default',
-    });
   }
 
   async sendToUser(userId: string, message: PushMessage) {
@@ -412,7 +276,9 @@ export class MobileNotificationsService {
     let responseBody: { data?: ExpoPushResponseItem[] } | null = null;
 
     try {
-      responseBody = (await response.json()) as { data?: ExpoPushResponseItem[] };
+      responseBody = (await response.json()) as {
+        data?: ExpoPushResponseItem[];
+      };
     } catch {
       responseBody = null;
     }
@@ -446,7 +312,9 @@ export class MobileNotificationsService {
 
       failed += 1;
       const expoError = String(
-        ticket?.details?.error || ticket?.message || 'UNKNOWN_EXPO_PUSH_ERROR',
+        ticket?.details?.error ||
+          ticket?.message ||
+          'UNKNOWN_EXPO_PUSH_ERROR',
       );
       const deviceNotRegistered = expoError === 'DeviceNotRegistered';
 

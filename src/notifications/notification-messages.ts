@@ -1,13 +1,13 @@
-export type MobileNotificationLanguage = 'ar' | 'en';
+export type NotificationLanguage = 'ar' | 'en';
 
 export type OperationApprovalNotificationMessageInput = {
-  language: MobileNotificationLanguage;
+  language: NotificationLanguage;
   operationType: string;
   operationNo: string;
 };
 
 export type OperationApprovalResultMessageInput = {
-  language: MobileNotificationLanguage;
+  language: NotificationLanguage;
   operationType: string;
   operationNo: string;
   status: 'COMPLETED' | 'REJECTED';
@@ -31,15 +31,15 @@ const OPERATION_TYPE_LABELS: Record<
   },
 };
 
-export function normalizeMobileNotificationLanguage(
+export function normalizeNotificationLanguage(
   value: unknown,
-): MobileNotificationLanguage {
+): NotificationLanguage {
   return String(value || '').trim().toLowerCase() === 'ar' ? 'ar' : 'en';
 }
 
 export function getOperationTypeNotificationLabel(
   operationType: string,
-  language: MobileNotificationLanguage,
+  language: NotificationLanguage,
 ) {
   const normalized = String(operationType || '').trim().toUpperCase();
   const label = OPERATION_TYPE_LABELS[normalized];
@@ -71,7 +71,6 @@ export function getOperationApprovalRequiredMessage(
     body: `${operationTypeLabel} - Operation No: ${input.operationNo}`,
   };
 }
-
 
 export function getOperationApprovalResultMessage(
   input: OperationApprovalResultMessageInput,
@@ -108,7 +107,7 @@ export function getOperationApprovalResultMessage(
   };
 }
 
-export function getMobilePushTestMessage(language: MobileNotificationLanguage) {
+export function getMobilePushTestMessage(language: NotificationLanguage) {
   if (language === 'ar') {
     return {
       title: 'Fleet Fuel PRO',
