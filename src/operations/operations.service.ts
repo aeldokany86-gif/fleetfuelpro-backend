@@ -1066,7 +1066,7 @@ export class OperationsService {
     });
 
     if (result.completedNow || result.rejectedNow) {
-      await this.sendFinalExternalTransferResultNotificationsBestEffort({
+      await this.sendFinalOperationApprovalResultNotificationsBestEffort({
         operation,
         status: result.rejectedNow ? 'REJECTED' : 'COMPLETED',
       });
@@ -1367,16 +1367,10 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     );
   }
 
-  private async sendFinalExternalTransferResultNotificationsBestEffort(params: {
+  private async sendFinalOperationApprovalResultNotificationsBestEffort(params: {
     operation: any;
     status: 'COMPLETED' | 'REJECTED';
   }) {
-    if (
-      this.normalizeOperationType(params.operation.type) !== 'EXTERNAL_TRANSFER'
-    ) {
-      return;
-    }
-
     const recipientUserIds = Array.from(
       new Set(
         [
@@ -1391,11 +1385,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     if (recipientUserIds.length === 0) return;
 
     /*
-      Final-result pushes are informational and must never affect the review
-      transaction. Both project managers and the original requester receive the
-      same terminal result: COMPLETED after all required approvals, or REJECTED
-      after any rejection. Set-based deduplication prevents duplicate pushes
-      when the requester is also one of the approvers.
+      Final approval-result notifications are informational and must never affect
+      the review transaction. Every approver plus the original requester receives
+      the terminal result for any operation that went through the approval flow.
+      This intentionally covers EXTERNAL_DIRECT_REFUEL, EXTERNAL_SUPPLY, and
+      EXTERNAL_TRANSFER. Set-based deduplication prevents duplicates when the
+      requester is also one of the approvers.
     */
     await Promise.allSettled(
       recipientUserIds.map((recipientUserId) =>
