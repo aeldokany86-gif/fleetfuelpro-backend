@@ -930,14 +930,48 @@ export class OperationsService {
       }
 
       if (action === 'REJECT') {
+        const rejectedAt = new Date();
+
         const rejected = await (tx as any).operation.updateMany({
-          where: { id: operation.id, status: { in: ['PENDING', 'PARTIALLY_APPROVED'] } },
-          data: { status: 'REJECTED', rejectedAt: new Date() },
+          where: {
+            id: operation.id,
+            status: { in: ['PENDING', 'PARTIALLY_APPROVED'] },
+          },
+          data: {
+            status: 'REJECTED',
+            rejectedAt,
+          },
         });
+
         if (rejected.count !== 1) {
-          throw new BadRequestException('Operation status changed before this review was completed.');
+          throw new BadRequestException(
+            'Operation status changed before this review was completed.',
+          );
         }
-        return { status: 'REJECTED', completedNow: false, rejectedNow: true };
+
+        /*
+          One rejection closes the whole operation. Any other manager approvals
+          that are still PENDING must be closed as well; otherwise the rejected
+          operation remains visible in another manager's approval queue and can
+          never be reviewed because the operation itself is already terminal.
+        */
+        await (tx as any).operationApproval.updateMany({
+          where: {
+            operationId: operation.id,
+            status: 'PENDING',
+          },
+          data: {
+            status: 'REJECTED',
+            reviewedAt: rejectedAt,
+            note: 'Closed automatically because the operation was rejected by another approver.',
+          },
+        });
+
+        return {
+          status: 'REJECTED',
+          completedNow: false,
+          rejectedNow: true,
+        };
       }
 
       const pendingCount = await (tx as any).operationApproval.count({
@@ -1010,6 +1044,13 @@ export class OperationsService {
       ) as string[],
       occurredAt: new Date().toISOString(),
     });
+
+    if (result.completedNow || result.rejectedNow) {
+      await this.sendFinalExternalTransferResultPushesBestEffort({
+        operation,
+        status: result.rejectedNow ? 'REJECTED' : 'COMPLETED',
+      });
+    }
 
     return {
       ok: true,
@@ -1102,6 +1143,13 @@ async findPendingApprovals(request?: RequestLike) {
   const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
+
+      // Defensive filter for legacy/stale approval rows. A terminal operation
+      // must never remain visible in the active approvals queue even if an old
+      // approval row was left PENDING before this fix.
+      status: {
+        in: ['PENDING', 'PARTIALLY_APPROVED'],
+      },
 
       approvals: {
         some: {
@@ -1294,6 +1342,49 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
           operationType: params.type,
           approvalStage: approval.approvalStage,
           requestedByName: params.currentUser.fullName,
+        }),
+      ),
+    );
+  }
+
+  private async sendFinalExternalTransferResultPushesBestEffort(params: {
+    operation: any;
+    status: 'COMPLETED' | 'REJECTED';
+  }) {
+    if (
+      this.normalizeOperationType(params.operation.type) !== 'EXTERNAL_TRANSFER'
+    ) {
+      return;
+    }
+
+    const recipientUserIds = Array.from(
+      new Set(
+        [
+          ...(params.operation.approvals || []).map((approval: any) =>
+            String(approval.approverUserId || '').trim(),
+          ),
+          String(params.operation.requestedByUserId || '').trim(),
+        ].filter(Boolean),
+      ),
+    ) as string[];
+
+    if (recipientUserIds.length === 0) return;
+
+    /*
+      Final-result pushes are informational and must never affect the review
+      transaction. Both project managers and the original requester receive the
+      same terminal result: COMPLETED after all required approvals, or REJECTED
+      after any rejection. Set-based deduplication prevents duplicate pushes
+      when the requester is also one of the approvers.
+    */
+    await Promise.allSettled(
+      recipientUserIds.map((recipientUserId) =>
+        this.mobileNotificationsService.sendOperationApprovalResult({
+          recipientUserId,
+          operationId: params.operation.id,
+          operationNo: params.operation.operationNo,
+          operationType: params.operation.type,
+          status: params.status,
         }),
       ),
     );

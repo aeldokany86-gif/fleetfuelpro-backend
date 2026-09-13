@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   getMobilePushTestMessage,
   getOperationApprovalRequiredMessage,
+  getOperationApprovalResultMessage,
   normalizeMobileNotificationLanguage,
 } from './mobile-notification-messages';
 
@@ -45,6 +46,14 @@ type OperationApprovalPushInput = {
   operationType: string;
   approvalStage?: string | null;
   requestedByName?: string | null;
+};
+
+type OperationApprovalResultPushInput = {
+  recipientUserId: string;
+  operationId: string;
+  operationNo: string;
+  operationType: string;
+  status: 'COMPLETED' | 'REJECTED';
 };
 
 type ExpoPushResponseItem = {
@@ -280,6 +289,69 @@ export class MobileNotificationsService {
         operationNo,
         operationType: input.operationType,
         approvalStage: input.approvalStage || null,
+      },
+      sound: 'default',
+    });
+  }
+
+
+  async sendOperationApprovalResult(input: OperationApprovalResultPushInput) {
+    const recipientUserId = String(input.recipientUserId || '').trim();
+
+    if (!recipientUserId) {
+      return {
+        registeredDevices: 0,
+        accepted: 0,
+        failed: 0,
+        skipped: true,
+        reason: 'RECIPIENT_USER_ID_MISSING',
+      };
+    }
+
+    const recipient = await this.prisma.user.findFirst({
+      where: {
+        id: recipientUserId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        preferredLanguage: true,
+      },
+    });
+
+    if (!recipient) {
+      return {
+        registeredDevices: 0,
+        accepted: 0,
+        failed: 0,
+        skipped: true,
+        reason: 'RECIPIENT_NOT_ACTIVE',
+      };
+    }
+
+    const language = normalizeMobileNotificationLanguage(
+      recipient.preferredLanguage,
+    );
+
+    const operationNo = String(input.operationNo || '').trim();
+    const message = getOperationApprovalResultMessage({
+      language,
+      operationType: input.operationType,
+      operationNo,
+      status: input.status,
+    });
+
+    return this.sendToUser(recipient.id, {
+      title: message.title,
+      body: message.body,
+      data: {
+        type: 'OPERATION_APPROVAL_RESULT',
+        screen: 'approvals',
+        operationId: input.operationId,
+        operationNo,
+        operationType: input.operationType,
+        status: input.status,
       },
       sound: 'default',
     });

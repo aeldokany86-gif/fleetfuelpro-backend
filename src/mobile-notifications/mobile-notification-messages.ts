@@ -6,6 +6,13 @@ export type OperationApprovalNotificationMessageInput = {
   operationNo: string;
 };
 
+export type OperationApprovalResultMessageInput = {
+  language: MobileNotificationLanguage;
+  operationType: string;
+  operationNo: string;
+  status: 'COMPLETED' | 'REJECTED';
+};
+
 const OPERATION_TYPE_LABELS: Record<
   string,
   { ar: string; en: string }
@@ -61,6 +68,42 @@ export function getOperationApprovalRequiredMessage(
 
   return {
     title: 'New Approval Required',
+    body: `${operationTypeLabel} - Operation No: ${input.operationNo}`,
+  };
+}
+
+
+export function getOperationApprovalResultMessage(
+  input: OperationApprovalResultMessageInput,
+) {
+  const operationTypeLabel = getOperationTypeNotificationLabel(
+    input.operationType,
+    input.language,
+  );
+
+  if (input.language === 'ar') {
+    if (input.status === 'REJECTED') {
+      return {
+        title: 'تم رفض العملية',
+        body: `${operationTypeLabel} - رقم العملية: ${input.operationNo}`,
+      };
+    }
+
+    return {
+      title: 'تم اعتماد العملية',
+      body: `${operationTypeLabel} - رقم العملية: ${input.operationNo}`,
+    };
+  }
+
+  if (input.status === 'REJECTED') {
+    return {
+      title: 'Operation Rejected',
+      body: `${operationTypeLabel} - Operation No: ${input.operationNo}`,
+    };
+  }
+
+  return {
+    title: 'Operation Approved',
     body: `${operationTypeLabel} - Operation No: ${input.operationNo}`,
   };
 }
