@@ -5,6 +5,11 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  getMobilePushTestMessage,
+  getOperationApprovalRequiredMessage,
+  normalizeMobileNotificationLanguage,
+} from './mobile-notification-messages';
 
 type JwtRequestUser = {
   userId?: string;
@@ -30,6 +35,16 @@ type PushMessage = {
   body: string;
   data?: Record<string, unknown>;
   sound?: 'default' | null;
+};
+
+
+type OperationApprovalPushInput = {
+  approverUserId: string;
+  operationId: string;
+  operationNo: string;
+  operationType: string;
+  approvalStage?: string | null;
+  requestedByName?: string | null;
 };
 
 type ExpoPushResponseItem = {
@@ -190,13 +205,12 @@ export class MobileNotificationsService {
 
   async sendTestPush(jwtUser?: JwtRequestUser) {
     const user = await this.resolveCurrentUser(jwtUser);
-    const isArabic = String(user.preferredLanguage || '').toLowerCase() === 'ar';
+    const language = normalizeMobileNotificationLanguage(user.preferredLanguage);
+    const message = getMobilePushTestMessage(language);
 
     const result = await this.sendToUser(user.id, {
-      title: isArabic ? 'Fleet Fuel PRO' : 'Fleet Fuel PRO',
-      body: isArabic
-        ? 'تم تفعيل إشعارات الموبايل بنجاح.'
-        : 'Mobile push notifications are working successfully.',
+      title: message.title,
+      body: message.body,
       data: {
         type: 'TEST_NOTIFICATION',
         screen: 'approvals',
@@ -208,6 +222,67 @@ export class MobileNotificationsService {
       ok: true,
       ...result,
     };
+  }
+
+  async sendOperationApprovalRequired(input: OperationApprovalPushInput) {
+    const approverUserId = String(input.approverUserId || '').trim();
+
+    if (!approverUserId) {
+      return {
+        registeredDevices: 0,
+        accepted: 0,
+        failed: 0,
+        skipped: true,
+        reason: 'APPROVER_USER_ID_MISSING',
+      };
+    }
+
+    const approver = await this.prisma.user.findFirst({
+      where: {
+        id: approverUserId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        preferredLanguage: true,
+      },
+    });
+
+    if (!approver) {
+      return {
+        registeredDevices: 0,
+        accepted: 0,
+        failed: 0,
+        skipped: true,
+        reason: 'APPROVER_NOT_ACTIVE',
+      };
+    }
+
+    const language = normalizeMobileNotificationLanguage(
+      approver.preferredLanguage,
+    );
+
+    const operationNo = String(input.operationNo || '').trim();
+    const message = getOperationApprovalRequiredMessage({
+      language,
+      operationType: input.operationType,
+      operationNo,
+    });
+
+    return this.sendToUser(approver.id, {
+      title: message.title,
+      body: message.body,
+      data: {
+        type: 'OPERATION_APPROVAL_REQUIRED',
+        screen: 'approvals',
+        operationId: input.operationId,
+        operationNo,
+        operationType: input.operationType,
+        approvalStage: input.approvalStage || null,
+      },
+      sound: 'default',
+    });
   }
 
   async sendToUser(userId: string, message: PushMessage) {

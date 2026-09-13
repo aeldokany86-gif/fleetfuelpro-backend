@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateOperationDto } from './dto/create-operation.dto';
 import { ReviewOperationDto } from './dto/review-operation.dto';
 import { OperationsRealtimeService } from './operations-realtime.service';
+import { MobileNotificationsService } from '../mobile-notifications/mobile-notifications.service';
 
 type NormalizedOperationType =
   | 'DIRECT_REFUEL'
@@ -90,6 +91,7 @@ export class OperationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly operationsRealtime: OperationsRealtimeService,
+    private readonly mobileNotificationsService: MobileNotificationsService,
   ) {}
 
   private buildOperationListInclude() {
@@ -1266,6 +1268,37 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
   };
 }
 
+  private async sendPendingOperationApprovalPushesBestEffort(params: {
+    operation: any;
+    type: NormalizedOperationType;
+    currentUser: CurrentUserContext;
+    approvalPlan: ApprovalPlanItem[];
+  }) {
+    const pendingApprovals = params.approvalPlan.filter(
+      (item) => item.status === 'PENDING',
+    );
+
+    if (pendingApprovals.length === 0) return;
+
+    /*
+      Push delivery is intentionally outside the operation transaction and
+      best-effort only. A notification outage must never fail or roll back a
+      successfully-created fuel operation.
+    */
+    await Promise.allSettled(
+      pendingApprovals.map((approval) =>
+        this.mobileNotificationsService.sendOperationApprovalRequired({
+          approverUserId: approval.approverUserId,
+          operationId: params.operation.id,
+          operationNo: params.operation.operationNo,
+          operationType: params.type,
+          approvalStage: approval.approvalStage,
+          requestedByName: params.currentUser.fullName,
+        }),
+      ),
+    );
+  }
+
   private async createPersistedOperation(
     dto: CreateOperationDto,
     currentUser: CurrentUserContext,
@@ -1510,6 +1543,13 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         ),
       ) as string[],
         occurredAt: new Date().toISOString(),
+      });
+
+      await this.sendPendingOperationApprovalPushesBestEffort({
+        operation: result.operation,
+        type,
+        currentUser,
+        approvalPlan: result.approvalPlan,
       });
     }
 
