@@ -329,6 +329,11 @@ export class MobileApprovalsService {
         status: 'PENDING',
         operation: {
           companyId,
+          // Defensive filter for legacy/stale approval rows. A terminal operation
+          // must never remain visible in the mobile approval inbox.
+          status: {
+            in: ['PENDING', 'PARTIALLY_APPROVED'],
+          },
         },
       },
       include: {
