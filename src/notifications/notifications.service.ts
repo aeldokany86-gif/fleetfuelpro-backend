@@ -153,6 +153,39 @@ export class NotificationsService {
     );
   }
 
+  private buildWorkflowReference(input: {
+    language: 'ar' | 'en';
+    workflowType: string;
+    reference: string;
+    metadata?: Record<string, unknown> | null;
+  }) {
+    const reference = String(input.reference || '').trim();
+    const workflowType = String(input.workflowType || '').trim().toUpperCase();
+
+    if (workflowType !== 'STATION_TRANSFER') {
+      return reference;
+    }
+
+    const rawCurrentStock = input.metadata?.currentStock;
+    const currentStock = Number(rawCurrentStock);
+
+    if (!Number.isFinite(currentStock)) {
+      return reference;
+    }
+
+    const formattedStock = new Intl.NumberFormat(
+      input.language === 'ar' ? 'ar-SA' : 'en-US',
+      { maximumFractionDigits: 3 },
+    ).format(currentStock);
+
+    const stockText =
+      input.language === 'ar'
+        ? `الرصيد الحالي: ${formattedStock} لتر`
+        : `Current Stock: ${formattedStock} L`;
+
+    return reference ? `${reference} - ${stockText}` : stockText;
+  }
+
   private buildWorkflowPushMessage(input: {
     language: 'ar' | 'en';
     workflowType: string;
@@ -396,6 +429,13 @@ export class NotificationsService {
     }
 
     const workflowTypeDescriptor = this.workflowTypeDescriptor(workflowType);
+    const language = normalizeNotificationLanguage(recipient.preferredLanguage);
+    const displayReference = this.buildWorkflowReference({
+      language,
+      workflowType,
+      reference,
+      metadata: input.metadata || null,
+    });
 
     const notification = await this.createPersistentNotification({
       companyId: recipient.companyId,
@@ -406,7 +446,7 @@ export class NotificationsService {
       messageKey: 'notifications.workflowApproval.requiredMessage',
       messageParams: {
         workflowType: workflowTypeDescriptor,
-        reference,
+        reference: displayReference,
       },
       priority: 'HIGH',
       route: 'approvals',
@@ -425,11 +465,10 @@ export class NotificationsService {
         `workflow-approval-required:${entityType}:${entityId}:${recipient.id}:${approvalStage || 'default'}`,
     });
 
-    const language = normalizeNotificationLanguage(recipient.preferredLanguage);
     const message = this.buildWorkflowPushMessage({
       language,
       workflowType,
-      reference,
+      reference: displayReference,
     });
 
     let pushDelivery: Record<string, unknown>;
@@ -509,6 +548,13 @@ export class NotificationsService {
     });
 
     const workflowTypeDescriptor = this.workflowTypeDescriptor(workflowType);
+    const language = normalizeNotificationLanguage(recipient.preferredLanguage);
+    const displayReference = this.buildWorkflowReference({
+      language,
+      workflowType,
+      reference,
+      metadata: input.metadata || null,
+    });
 
     const notification = await this.createPersistentNotification({
       companyId: recipient.companyId,
@@ -525,7 +571,7 @@ export class NotificationsService {
           : 'notifications.workflowApproval.rejectedMessage',
       messageParams: {
         workflowType: workflowTypeDescriptor,
-        reference,
+        reference: displayReference,
       },
       priority: input.status === 'APPROVED' ? 'NORMAL' : 'HIGH',
       route: 'notifications',
@@ -542,11 +588,10 @@ export class NotificationsService {
         `workflow-approval-result:${entityType}:${entityId}:${recipient.id}:${input.status}`,
     });
 
-    const language = normalizeNotificationLanguage(recipient.preferredLanguage);
     const message = this.buildWorkflowPushMessage({
       language,
       workflowType,
-      reference,
+      reference: displayReference,
       status: input.status,
     });
 

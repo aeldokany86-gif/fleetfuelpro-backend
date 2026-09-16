@@ -2911,6 +2911,7 @@ export class StationsService {
             fromProjectName: station.project?.name || null,
             toProjectId: targetProject.id,
             toProjectName: targetProject.name || null,
+            currentStock: Number(station.currentStock ?? 0),
           },
         });
       }
@@ -3196,6 +3197,7 @@ export class StationsService {
           fromProjectName: request.fromProject?.name || null,
           toProjectId: request.toProjectId,
           toProjectName: request.toProject?.name || null,
+          currentStock: Number(request.stockAtTransfer ?? 0),
           rejectionReason: rejectionReason || 'Rejected',
         },
       });
@@ -3318,6 +3320,7 @@ export class StationsService {
         fromProjectName: request.fromProject?.name || null,
         toProjectId: request.toProjectId,
         toProjectName: request.toProject?.name || null,
+        currentStock: Number(request.stockAtTransfer ?? 0),
       },
     });
 
