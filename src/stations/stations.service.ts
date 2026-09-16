@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { StationCreationDomainService } from './station-creation-domain.service';
 
 @Injectable()
@@ -12,7 +13,65 @@ export class StationsService {
   constructor(
     private prisma: PrismaService,
     private readonly stationCreationDomainService: StationCreationDomainService,
+    private readonly notificationsService: NotificationsService,
   ) {}
+
+  private async sendWorkflowApprovalRequiredBestEffort(input: {
+    recipientUserId: string;
+    entityType: string;
+    entityId: string;
+    workflowType: string;
+    reference: string;
+    approvalStage?: string | null;
+    requestedByName?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }) {
+    try {
+      await this.notificationsService.sendWorkflowApprovalRequired(input);
+    } catch (error) {
+      console.warn(
+        '[notifications][stations][approval-required]',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  private async sendWorkflowApprovalResultsBestEffort(input: {
+    recipientUserIds: string[];
+    entityType: string;
+    entityId: string;
+    workflowType: string;
+    reference: string;
+    status: 'APPROVED' | 'REJECTED';
+    metadata?: Record<string, unknown> | null;
+  }) {
+    const recipientUserIds = Array.from(
+      new Set(
+        (input.recipientUserIds || [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    for (const recipientUserId of recipientUserIds) {
+      try {
+        await this.notificationsService.sendWorkflowApprovalResult({
+          recipientUserId,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          workflowType: input.workflowType,
+          reference: input.reference,
+          status: input.status,
+          metadata: input.metadata || null,
+        });
+      } catch (error) {
+        console.warn(
+          '[notifications][stations][approval-result]',
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  }
 
   private normalizeStationId(stationId: string) {
     return this.stationCreationDomainService.normalizeStationId(stationId);
@@ -2041,7 +2100,7 @@ export class StationsService {
       );
     }
 
-    return this.prisma.stationActionRequest.create({
+    const createdRequest = await this.prisma.stationActionRequest.create({
       data: {
         companyId: station.companyId,
         stationId: station.id,
@@ -2074,6 +2133,59 @@ export class StationsService {
         },
       },
     });
+
+    const workflowType = `STATION_${actionType}`;
+    const metadata = {
+      stationId: station.id,
+      stationCode: station.stationId,
+      projectId: station.projectId,
+      actionType,
+      requestedActualStock,
+      requestedCounter,
+      effectiveAt: effectiveAt?.toISOString() || null,
+      movementAt: movementAt?.toISOString() || null,
+    };
+
+    if (actionType === 'INVENTORY_ADJUSTMENT') {
+      const companyUsers = await this.prisma.user.findMany({
+        where: {
+          companyId: station.companyId,
+          deletedAt: null,
+          isActive: true,
+        },
+        include: {
+          role: true,
+        },
+      });
+
+      for (const approver of companyUsers.filter((user) =>
+        this.isAdminRole(user.role?.name || ''),
+      )) {
+        await this.sendWorkflowApprovalRequiredBestEffort({
+          recipientUserId: approver.id,
+          entityType: workflowType,
+          entityId: createdRequest.id,
+          workflowType,
+          reference: station.stationId,
+          approvalStage: 'Admin',
+          requestedByName: requester.fullName,
+          metadata,
+        });
+      }
+    } else {
+      await this.sendWorkflowApprovalRequiredBestEffort({
+        recipientUserId: station.project.projectManagerId,
+        entityType: workflowType,
+        entityId: createdRequest.id,
+        workflowType,
+        reference: station.stationId,
+        approvalStage: 'Project Manager',
+        requestedByName: requester.fullName,
+        metadata,
+      });
+    }
+
+    return createdRequest;
   }
 
   async getActionRequests(
@@ -2245,7 +2357,7 @@ export class StationsService {
     const reviewNote = String(body.reviewNote || '').trim();
 
     if (!body.approve) {
-      return this.prisma.$transaction(
+      const rejectedRequest = await this.prisma.$transaction(
         async (tx) => {
           const claimed = await tx.stationActionRequest.updateMany({
             where: {
@@ -2293,9 +2405,28 @@ export class StationsService {
         },
         { maxWait: 5000, timeout: 20000 },
       );
+
+      const workflowType = `STATION_${actionType}`;
+      await this.sendWorkflowApprovalResultsBestEffort({
+        recipientUserIds: [request.requestedByUserId, body.reviewerUserId],
+        entityType: workflowType,
+        entityId: request.id,
+        workflowType,
+        reference: request.station?.stationId || request.stationId,
+        status: 'REJECTED',
+        metadata: {
+          stationId: request.stationId,
+          stationCode: request.station?.stationId || null,
+          projectId: request.projectId,
+          actionType,
+          reviewNote: reviewNote || 'Rejected',
+        },
+      });
+
+      return rejectedRequest;
     }
 
-    return this.prisma.$transaction(
+    const approvedResult = await this.prisma.$transaction(
       async (tx) => {
         const claimed = await tx.stationActionRequest.updateMany({
           where: {
@@ -2528,6 +2659,24 @@ export class StationsService {
       },
       { maxWait: 5000, timeout: 20000 },
     );
+
+    const workflowType = `STATION_${actionType}`;
+    await this.sendWorkflowApprovalResultsBestEffort({
+      recipientUserIds: [request.requestedByUserId, body.reviewerUserId],
+      entityType: workflowType,
+      entityId: request.id,
+      workflowType,
+      reference: request.station?.stationId || request.stationId,
+      status: 'APPROVED',
+      metadata: {
+        stationId: request.stationId,
+        stationCode: request.station?.stationId || null,
+        projectId: request.projectId,
+        actionType,
+      },
+    });
+
+    return approvedResult;
   }
 
   async createTransferRequest(
@@ -2655,7 +2804,7 @@ export class StationsService {
       (approval) => approval.status === 'APPROVED',
     );
 
-    return this.prisma.$transaction(async (tx) => {
+    const transferResult = await this.prisma.$transaction(async (tx) => {
       const transferRequest = await tx.stationTransferRequest.create({
         data: {
           companyId: station.companyId,
@@ -2742,6 +2891,32 @@ export class StationsService {
       maxWait: 10000,
       timeout: 20000,
     });
+
+    if (!fullyApproved && transferResult) {
+      for (const approval of approvalsToCreate.filter(
+        (item) => item.status === 'PENDING',
+      )) {
+        await this.sendWorkflowApprovalRequiredBestEffort({
+          recipientUserId: approval.approverUserId,
+          entityType: 'STATION_TRANSFER',
+          entityId: transferResult.id,
+          workflowType: 'STATION_TRANSFER',
+          reference: station.stationId,
+          approvalStage: approval.approvalStage,
+          requestedByName: requester.fullName,
+          metadata: {
+            stationId: station.id,
+            stationCode: station.stationId,
+            fromProjectId: station.projectId,
+            fromProjectName: station.project?.name || null,
+            toProjectId: targetProject.id,
+            toProjectName: targetProject.name || null,
+          },
+        });
+      }
+    }
+
+    return transferResult;
   }
 
   async getTransferReport(filters: {
@@ -2946,9 +3121,7 @@ export class StationsService {
     rejectionReason?: string,
   ) {
     const request = await this.prisma.stationTransferRequest.findFirst({
-      where: {
-        id: transferId,
-      },
+      where: { id: transferId },
       include: {
         station: true,
         fromProject: true,
@@ -2966,7 +3139,6 @@ export class StationsService {
     }
 
     const now = new Date();
-
     const pendingApproval = request.approvals.find(
       (approval) =>
         approval.approverUserId === managerUserId &&
@@ -2978,70 +3150,145 @@ export class StationsService {
     }
 
     if (!approve) {
-      return this.prisma.$transaction(
+      const rejectedTransfer = await this.prisma.$transaction(
         async (tx) => {
           await tx.stationTransferApproval.update({
-          where: {
-            id: pendingApproval.id,
-          },
-          data: {
-            status: 'REJECTED',
-            note: rejectionReason || 'Rejected',
-            reviewedAt: now,
-          },
-        });
+            where: { id: pendingApproval.id },
+            data: {
+              status: 'REJECTED',
+              note: rejectionReason || 'Rejected',
+              reviewedAt: now,
+            },
+          });
 
-        return tx.stationTransferRequest.update({
-          where: {
-            id: transferId,
-          },
-          data: {
-            status: 'REJECTED',
-            rejectedAt: now,
-            rejectionReason: rejectionReason || 'Rejected',
-          },
-          include: {
-            station: true,
-            fromProject: true,
-            toProject: true,
-            approvals: true,
-          },
-        });
+          return tx.stationTransferRequest.update({
+            where: { id: transferId },
+            data: {
+              status: 'REJECTED',
+              rejectedAt: now,
+              rejectionReason: rejectionReason || 'Rejected',
+            },
+            include: {
+              station: true,
+              fromProject: true,
+              toProject: true,
+              approvals: true,
+            },
+          });
         },
         { timeout: 15000 },
       );
+
+      await this.sendWorkflowApprovalResultsBestEffort({
+        recipientUserIds: [
+          request.requestedByUserId,
+          ...request.approvals.map((approval) => approval.approverUserId),
+        ],
+        entityType: 'STATION_TRANSFER',
+        entityId: request.id,
+        workflowType: 'STATION_TRANSFER',
+        reference: request.station?.stationId || request.stationId,
+        status: 'REJECTED',
+        metadata: {
+          stationId: request.stationId,
+          stationCode: request.station?.stationId || null,
+          fromProjectId: request.fromProjectId,
+          fromProjectName: request.fromProject?.name || null,
+          toProjectId: request.toProjectId,
+          toProjectName: request.toProject?.name || null,
+          rejectionReason: rejectionReason || 'Rejected',
+        },
+      });
+
+      return rejectedTransfer;
     }
 
-    return this.prisma.$transaction(
-      async (tx) => {
-      await tx.stationTransferApproval.update({
-        where: {
-          id: pendingApproval.id,
-        },
-        data: {
-          status: 'APPROVED',
-          reviewedAt: new Date(),
-        },
-      });
+    const hasOtherPendingApprovals = request.approvals.some(
+      (approval) =>
+        approval.id !== pendingApproval.id &&
+        approval.status === 'PENDING',
+    );
 
-      const approvals = await tx.stationTransferApproval.findMany({
-        where: {
-          transferRequestId: transferId,
-        },
-      });
+    if (hasOtherPendingApprovals) {
+      const partiallyApprovedTransfer = await this.prisma.$transaction(
+        async (tx) => {
+          await tx.stationTransferApproval.update({
+            where: { id: pendingApproval.id },
+            data: {
+              status: 'APPROVED',
+              reviewedAt: now,
+            },
+          });
 
-      const fullyApproved = approvals.every(
-        (approval) => approval.status === 'APPROVED',
+          return tx.stationTransferRequest.update({
+            where: { id: transferId },
+            data: {
+              status: 'PARTIALLY_APPROVED',
+              reason: `First approval by manager ${managerUserId}`,
+            },
+            include: {
+              station: true,
+              fromProject: true,
+              toProject: true,
+              approvals: true,
+            },
+          });
+        },
+        { timeout: 15000 },
       );
 
-      if (!fullyApproved) {
-        return tx.stationTransferRequest.update({
-          where: {
-            id: transferId,
-          },
+      try {
+        await this.notificationsService.closeWorkflowApprovalRequired({
+          entityType: 'STATION_TRANSFER',
+          entityId: request.id,
+          userId: managerUserId,
+          status: 'APPROVED',
+        });
+      } catch (error) {
+        console.warn(
+          '[notifications][stations][partial-close]',
+          error instanceof Error ? error.message : error,
+        );
+      }
+
+      return partiallyApprovedTransfer;
+    }
+
+    const approvedTransfer = await this.prisma.$transaction(
+      async (tx) => {
+        await tx.stationTransferApproval.update({
+          where: { id: pendingApproval.id },
+          data: { status: 'APPROVED', reviewedAt: now },
+        });
+
+        await tx.station.update({
+          where: { id: request.stationId },
+          data: { projectId: request.toProjectId },
+        });
+
+        await tx.stationAssignmentHistory.create({
           data: {
-            status: 'PARTIALLY_APPROVED',
-            reason: `First approval by manager ${managerUserId}`,
+            companyId: request.companyId,
+            stationId: request.stationId,
+            fromProjectId: request.fromProjectId,
+            toProjectId: request.toProjectId,
+            transferRequestId: request.id,
+            assignmentType: 'TRANSFER' as any,
+            reason: 'Station transfer approved and applied',
+            assignedAt: now,
+            assignedByUserId: managerUserId,
+          },
+        });
+
+        return tx.stationTransferRequest.update({
+          where: { id: transferId },
+          data: {
+            status: 'APPROVED',
+            approvedAt: now,
+            appliedAt: now,
+            reason: request.reason
+              ? `${request.reason}; Final approval by manager ${managerUserId}`
+              : `Approved by manager ${managerUserId}`,
           },
           include: {
             station: true,
@@ -3050,53 +3297,31 @@ export class StationsService {
             approvals: true,
           },
         });
-      }
-
-      await tx.station.update({
-        where: {
-          id: request.stationId,
-        },
-        data: {
-          projectId: request.toProjectId,
-        },
-      });
-
-      await tx.stationAssignmentHistory.create({
-        data: {
-          companyId: request.companyId,
-          stationId: request.stationId,
-          fromProjectId: request.fromProjectId,
-          toProjectId: request.toProjectId,
-          transferRequestId: request.id,
-          assignmentType: 'TRANSFER' as any,
-          reason: 'Station transfer approved and applied',
-          assignedAt: now,
-          assignedByUserId: managerUserId,
-        },
-      });
-
-      return tx.stationTransferRequest.update({
-        where: {
-          id: transferId,
-        },
-        data: {
-          status: 'APPROVED',
-          approvedAt: now,
-          appliedAt: now,
-          reason: request.reason
-            ? `${request.reason}; Final approval by manager ${managerUserId}`
-            : `Approved by manager ${managerUserId}`,
-        },
-        include: {
-          station: true,
-          fromProject: true,
-          toProject: true,
-          approvals: true,
-        },
-      });
       },
       { timeout: 15000 },
     );
+
+    await this.sendWorkflowApprovalResultsBestEffort({
+      recipientUserIds: [
+        request.requestedByUserId,
+        ...request.approvals.map((approval) => approval.approverUserId),
+      ],
+      entityType: 'STATION_TRANSFER',
+      entityId: request.id,
+      workflowType: 'STATION_TRANSFER',
+      reference: request.station?.stationId || request.stationId,
+      status: 'APPROVED',
+      metadata: {
+        stationId: request.stationId,
+        stationCode: request.station?.stationId || null,
+        fromProjectId: request.fromProjectId,
+        fromProjectName: request.fromProject?.name || null,
+        toProjectId: request.toProjectId,
+        toProjectName: request.toProject?.name || null,
+      },
+    });
+
+    return approvedTransfer;
   }
 
   async hardDelete(id: string) {
