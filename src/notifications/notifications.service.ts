@@ -162,6 +162,35 @@ export class NotificationsService {
     const reference = String(input.reference || '').trim();
     const workflowType = String(input.workflowType || '').trim().toUpperCase();
 
+    if (workflowType === 'EMPLOYEE_PROJECT_REMOVAL') {
+      const employeeCode = String(input.metadata?.employeeCode || reference || '').trim();
+      const employeeName = String(input.metadata?.employeeName || '').trim();
+      const projectCode = String(input.metadata?.projectCode || '').trim();
+      const projectName = String(input.metadata?.projectName || '').trim();
+
+      const employeeParts = [employeeCode, employeeName].filter(Boolean);
+      const projectParts = [projectCode, projectName].filter(Boolean);
+
+      const employeeText = employeeParts.join(' • ');
+      const projectText = projectParts.join(' • ');
+
+      if (input.language === 'ar') {
+        const parts = [
+          employeeText ? `الموظف: ${employeeText}` : '',
+          projectText ? `المشروع: ${projectText}` : '',
+        ].filter(Boolean);
+
+        return parts.join(' - ') || reference;
+      }
+
+      const parts = [
+        employeeText ? `Employee: ${employeeText}` : '',
+        projectText ? `Project: ${projectText}` : '',
+      ].filter(Boolean);
+
+      return parts.join(' - ') || reference;
+    }
+
     if (workflowType !== 'STATION_TRANSFER') {
       return reference;
     }

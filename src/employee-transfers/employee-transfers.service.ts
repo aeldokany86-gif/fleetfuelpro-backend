@@ -151,10 +151,10 @@ export class EmployeeTransfersService {
             employeeName:
               request.employee?.name || null,
             projectId: request.projectId,
+            projectCode:
+              request.project?.code || null,
             projectName:
-              request.project?.name ||
-              request.project?.code ||
-              null,
+              request.project?.name || null,
             transferRequestId:
               request.transferRequestId || null,
           },
@@ -626,10 +626,10 @@ export class EmployeeTransfersService {
           employeeName:
             request.employee?.name || null,
           projectId: request.projectId,
+          projectCode:
+            request.project?.code || null,
           projectName:
-            request.project?.name ||
-            request.project?.code ||
-            null,
+            request.project?.name || null,
           transferRequestId:
             request.transferRequestId || null,
           rejectionReason:
