@@ -36,6 +36,27 @@ type OperationApprovalResultNotificationInput = {
   status: 'COMPLETED' | 'REJECTED';
 };
 
+type WorkflowApprovalRequiredNotificationInput = {
+  recipientUserId: string;
+  entityType: string;
+  entityId: string;
+  workflowType: string;
+  reference: string;
+  approvalStage?: string | null;
+  requestedByName?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+type WorkflowApprovalResultNotificationInput = {
+  recipientUserId: string;
+  entityType: string;
+  entityId: string;
+  workflowType: string;
+  reference: string;
+  status: 'APPROVED' | 'REJECTED';
+  metadata?: Record<string, unknown> | null;
+};
+
 type CreateNotificationInput = {
   companyId: string;
   userId: string;
@@ -97,6 +118,86 @@ export class NotificationsService {
       key: `approvals.types.${normalized}`,
       fallback: normalized.replace(/_/g, ' ') || 'Operation',
     };
+  }
+
+  private workflowTypeDescriptor(workflowType: string) {
+    const normalized = String(workflowType || '').trim().toUpperCase();
+    return {
+      key: `approvals.types.${normalized}`,
+      fallback: normalized.replace(/_/g, ' ') || 'Request',
+    };
+  }
+
+  private getWorkflowPushLabel(
+    workflowType: string,
+    language: 'ar' | 'en',
+  ) {
+    const normalized = String(workflowType || '').trim().toUpperCase();
+
+    const labels: Record<string, { ar: string; en: string }> = {
+      ASSET_TRANSFER: { ar: 'نقل معدة', en: 'Asset Transfer' },
+      ASSET_ODOMETER_RESET: { ar: 'إعادة ضبط عداد المعدة', en: 'Asset Odometer Reset' },
+      STATION_TRANSFER: { ar: 'نقل محطة', en: 'Station Transfer' },
+      STATION_ZERO_BALANCE: { ar: 'تصفير رصيد المحطة', en: 'Station Zero Balance' },
+      STATION_COUNTER_RESET: { ar: 'إعادة ضبط عداد المحطة', en: 'Station Counter Reset' },
+      STATION_INVENTORY_ADJUSTMENT: { ar: 'تسوية مخزون المحطة', en: 'Station Inventory Adjustment' },
+      EMPLOYEE_TRANSFER: { ar: 'نقل موظف', en: 'Employee Transfer' },
+      EMPLOYEE_PROJECT_REMOVAL: { ar: 'إزالة موظف من مشروع', en: 'Employee Project Removal' },
+      OPERATION_CORRECTION: { ar: 'تصحيح عملية', en: 'Operation Correction' },
+    };
+
+    return (
+      labels[normalized]?.[language] ||
+      normalized.replace(/_/g, ' ') ||
+      (language === 'ar' ? 'طلب' : 'Request')
+    );
+  }
+
+  private buildWorkflowPushMessage(input: {
+    language: 'ar' | 'en';
+    workflowType: string;
+    reference: string;
+    status?: 'APPROVED' | 'REJECTED';
+  }) {
+    const label = this.getWorkflowPushLabel(
+      input.workflowType,
+      input.language,
+    );
+    const reference = String(input.reference || '').trim();
+
+    if (!input.status) {
+      return input.language === 'ar'
+        ? {
+            title: 'طلب جديد يحتاج اعتمادك',
+            body: reference ? `${label} - المرجع: ${reference}` : label,
+          }
+        : {
+            title: 'New Approval Required',
+            body: reference ? `${label} - Reference: ${reference}` : label,
+          };
+    }
+
+    if (input.status === 'REJECTED') {
+      return input.language === 'ar'
+        ? {
+            title: 'تم رفض الطلب',
+            body: reference ? `${label} - المرجع: ${reference}` : label,
+          }
+        : {
+            title: 'Request Rejected',
+            body: reference ? `${label} - Reference: ${reference}` : label,
+          };
+    }
+
+    return input.language === 'ar'
+      ? {
+          title: 'تم اعتماد الطلب',
+          body: reference ? `${label} - المرجع: ${reference}` : label,
+        }
+      : {
+          title: 'Request Approved',
+          body: reference ? `${label} - Reference: ${reference}` : label,
+        };
   }
 
   private async createPersistentNotification(input: CreateNotificationInput) {
@@ -224,6 +325,263 @@ export class NotificationsService {
     };
   }
 
+
+
+  async closeWorkflowApprovalRequired(input: {
+    entityType: string;
+    entityId: string;
+    userId: string;
+    status: 'APPROVED' | 'REJECTED';
+  }) {
+    const entityType = String(input.entityType || '').trim().toUpperCase();
+    const entityId = String(input.entityId || '').trim();
+    const userId = String(input.userId || '').trim();
+
+    if (!entityType || !entityId || !userId) {
+      return { updated: 0 };
+    }
+
+    const result = await (this.prisma as any).notification.updateMany({
+      where: {
+        userId,
+        entityType,
+        entityId,
+        type: 'WORKFLOW_APPROVAL_REQUIRED',
+        actionable: true,
+      },
+      data: {
+        actionable: false,
+        status: input.status,
+      },
+    });
+
+    return { updated: result.count };
+  }
+
+  async sendWorkflowApprovalRequired(
+    input: WorkflowApprovalRequiredNotificationInput,
+  ) {
+    const recipientUserId = String(input.recipientUserId || '').trim();
+    const entityType = String(input.entityType || '').trim().toUpperCase();
+    const entityId = String(input.entityId || '').trim();
+    const workflowType = String(input.workflowType || '').trim().toUpperCase();
+    const reference = String(input.reference || '').trim();
+    const approvalStage = String(input.approvalStage || '').trim() || null;
+
+    if (!recipientUserId || !entityType || !entityId || !workflowType) {
+      return {
+        skipped: true,
+        reason: 'WORKFLOW_NOTIFICATION_CONTEXT_MISSING',
+      };
+    }
+
+    const recipient = await this.prisma.user.findFirst({
+      where: {
+        id: recipientUserId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        companyId: true,
+        preferredLanguage: true,
+      },
+    });
+
+    if (!recipient) {
+      return {
+        skipped: true,
+        reason: 'RECIPIENT_NOT_ACTIVE',
+      };
+    }
+
+    const workflowTypeDescriptor = this.workflowTypeDescriptor(workflowType);
+
+    const notification = await this.createPersistentNotification({
+      companyId: recipient.companyId,
+      userId: recipient.id,
+      type: 'WORKFLOW_APPROVAL_REQUIRED',
+      category: 'APPROVAL',
+      titleKey: 'notifications.workflowApproval.requiredTitle',
+      messageKey: 'notifications.workflowApproval.requiredMessage',
+      messageParams: {
+        workflowType: workflowTypeDescriptor,
+        reference,
+      },
+      priority: 'HIGH',
+      route: 'approvals',
+      entityType,
+      entityId,
+      status: 'PENDING',
+      actionable: true,
+      metadata: {
+        workflowType,
+        reference,
+        approvalStage,
+        requestedByName: input.requestedByName || null,
+        ...(input.metadata || {}),
+      },
+      dedupeKey:
+        `workflow-approval-required:${entityType}:${entityId}:${recipient.id}:${approvalStage || 'default'}`,
+    });
+
+    const language = normalizeNotificationLanguage(recipient.preferredLanguage);
+    const message = this.buildWorkflowPushMessage({
+      language,
+      workflowType,
+      reference,
+    });
+
+    let pushDelivery: Record<string, unknown>;
+    try {
+      pushDelivery = await this.mobilePushService.sendToUser(recipient.id, {
+        title: message.title,
+        body: message.body,
+        data: {
+          type: 'WORKFLOW_APPROVAL_REQUIRED',
+          screen: 'approvals',
+          notificationId: notification.id,
+          entityType,
+          entityId,
+          workflowType,
+          reference,
+          approvalStage,
+        },
+        sound: 'default',
+      });
+    } catch (error) {
+      pushDelivery = {
+        registeredDevices: 0,
+        accepted: 0,
+        failed: 0,
+        error: error instanceof Error ? error.message : 'Push delivery failed.',
+      };
+    }
+
+    return {
+      notificationId: notification.id,
+      persisted: true,
+      pushDelivery,
+    };
+  }
+
+  async sendWorkflowApprovalResult(
+    input: WorkflowApprovalResultNotificationInput,
+  ) {
+    const recipientUserId = String(input.recipientUserId || '').trim();
+    const entityType = String(input.entityType || '').trim().toUpperCase();
+    const entityId = String(input.entityId || '').trim();
+    const workflowType = String(input.workflowType || '').trim().toUpperCase();
+    const reference = String(input.reference || '').trim();
+
+    if (!recipientUserId || !entityType || !entityId || !workflowType) {
+      return {
+        skipped: true,
+        reason: 'WORKFLOW_NOTIFICATION_CONTEXT_MISSING',
+      };
+    }
+
+    const recipient = await this.prisma.user.findFirst({
+      where: {
+        id: recipientUserId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        companyId: true,
+        preferredLanguage: true,
+      },
+    });
+
+    if (!recipient) {
+      return {
+        skipped: true,
+        reason: 'RECIPIENT_NOT_ACTIVE',
+      };
+    }
+
+    await this.closeWorkflowApprovalRequired({
+      entityType,
+      entityId,
+      userId: recipient.id,
+      status: input.status,
+    });
+
+    const workflowTypeDescriptor = this.workflowTypeDescriptor(workflowType);
+
+    const notification = await this.createPersistentNotification({
+      companyId: recipient.companyId,
+      userId: recipient.id,
+      type: 'WORKFLOW_APPROVAL_RESULT',
+      category: 'APPROVAL_RESULT',
+      titleKey:
+        input.status === 'APPROVED'
+          ? 'notifications.workflowApproval.approvedTitle'
+          : 'notifications.workflowApproval.rejectedTitle',
+      messageKey:
+        input.status === 'APPROVED'
+          ? 'notifications.workflowApproval.approvedMessage'
+          : 'notifications.workflowApproval.rejectedMessage',
+      messageParams: {
+        workflowType: workflowTypeDescriptor,
+        reference,
+      },
+      priority: input.status === 'APPROVED' ? 'NORMAL' : 'HIGH',
+      route: 'notifications',
+      entityType,
+      entityId,
+      status: input.status,
+      actionable: false,
+      metadata: {
+        workflowType,
+        reference,
+        ...(input.metadata || {}),
+      },
+      dedupeKey:
+        `workflow-approval-result:${entityType}:${entityId}:${recipient.id}:${input.status}`,
+    });
+
+    const language = normalizeNotificationLanguage(recipient.preferredLanguage);
+    const message = this.buildWorkflowPushMessage({
+      language,
+      workflowType,
+      reference,
+      status: input.status,
+    });
+
+    let pushDelivery: Record<string, unknown>;
+    try {
+      pushDelivery = await this.mobilePushService.sendToUser(recipient.id, {
+        title: message.title,
+        body: message.body,
+        data: {
+          type: 'WORKFLOW_APPROVAL_RESULT',
+          screen: 'notifications',
+          notificationId: notification.id,
+          entityType,
+          entityId,
+          workflowType,
+          reference,
+          status: input.status,
+        },
+        sound: 'default',
+      });
+    } catch (error) {
+      pushDelivery = {
+        registeredDevices: 0,
+        accepted: 0,
+        failed: 0,
+        error: error instanceof Error ? error.message : 'Push delivery failed.',
+      };
+    }
+
+    return {
+      notificationId: notification.id,
+      persisted: true,
+      pushDelivery,
+    };
+  }
 
   async closeOperationApprovalRequired(input: {
     operationId: string;

@@ -7,6 +7,7 @@ import {
 import { randomUUID } from 'crypto';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AssetCreationDomainService } from './asset-creation-domain.service';
 
 @Injectable()
@@ -14,7 +15,105 @@ export class AssetsService {
   constructor(
     private prisma: PrismaService,
     private readonly assetCreationDomainService: AssetCreationDomainService,
+    private readonly notificationsService: NotificationsService,
   ) {}
+
+  private async sendWorkflowApprovalRequiredBestEffort(input: {
+    recipientUserId: string;
+    entityType: string;
+    entityId: string;
+    workflowType: string;
+    reference: string;
+    approvalStage?: string | null;
+    requestedByName?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }) {
+    try {
+      await this.notificationsService.sendWorkflowApprovalRequired(input);
+    } catch (error) {
+      console.warn(
+        '[notifications][assets][approval-required]',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  private async sendWorkflowApprovalResultsBestEffort(input: {
+    recipientUserIds: string[];
+    entityType: string;
+    entityId: string;
+    workflowType: string;
+    reference: string;
+    status: 'APPROVED' | 'REJECTED';
+    metadata?: Record<string, unknown> | null;
+  }) {
+    const recipientUserIds = Array.from(
+      new Set(
+        (input.recipientUserIds || [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    for (const recipientUserId of recipientUserIds) {
+      try {
+        await this.notificationsService.sendWorkflowApprovalResult({
+          recipientUserId,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          workflowType: input.workflowType,
+          reference: input.reference,
+          status: input.status,
+          metadata: input.metadata || null,
+        });
+      } catch (error) {
+        console.warn(
+          '[notifications][assets][approval-result]',
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  }
+
+  private async closeAssetTransferBatchApprovalIfDoneBestEffort(input: {
+    transferBatchId?: string | null;
+    approverUserId: string;
+    status: 'APPROVED' | 'REJECTED';
+  }) {
+    const transferBatchId = String(input.transferBatchId || '').trim();
+    const approverUserId = String(input.approverUserId || '').trim();
+
+    if (!transferBatchId || !approverUserId) return;
+
+    try {
+      const remaining = await this.prisma.assetTransferApproval.count({
+        where: {
+          approverUserId,
+          status: 'PENDING' as any,
+          transferRequest: {
+            transferBatchId,
+            status: {
+              in: ['PENDING', 'PARTIALLY_APPROVED'] as any,
+            },
+          },
+        },
+      });
+
+      if (remaining === 0) {
+        await this.notificationsService.closeWorkflowApprovalRequired({
+          entityType: 'ASSET_TRANSFER_BATCH',
+          entityId: transferBatchId,
+          userId: approverUserId,
+          status: input.status,
+        });
+      }
+    } catch (error) {
+      console.warn(
+        '[notifications][assets][batch-close]',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
 
   private normalizeAssetId(assetId: string) {
     return this.assetCreationDomainService.normalizeAssetId(assetId);
@@ -807,7 +906,7 @@ export class AssetsService {
       );
     }
 
-    return this.prisma.assetActionRequest.create({
+    const createdRequest = await this.prisma.assetActionRequest.create({
       data: {
         companyId: asset.companyId,
         assetId: asset.id,
@@ -841,6 +940,28 @@ export class AssetsService {
         },
       },
     });
+
+    await this.sendWorkflowApprovalRequiredBestEffort({
+      recipientUserId: asset.project.projectManagerId,
+      entityType: 'ASSET_ODOMETER_RESET',
+      entityId: createdRequest.id,
+      workflowType: 'ASSET_ODOMETER_RESET',
+      reference: asset.assetId,
+      approvalStage: 'Project Manager',
+      requestedByName: requester.fullName,
+      metadata: {
+        assetId: asset.id,
+        assetCode: asset.assetId,
+        projectId: asset.projectId,
+        requestedOdometer,
+        requestedOldOdometer: hasOldOdometerOverride
+          ? Number(requestedOldOdometer)
+          : null,
+        effectiveAt: effectiveAt.toISOString(),
+      },
+    });
+
+    return createdRequest;
   }
 
   async getActionRequests(
@@ -999,7 +1120,7 @@ export class AssetsService {
     const reviewNote = String(body.reviewNote || '').trim();
 
     if (!body.approve) {
-      return this.prisma.$transaction(
+      const rejectedRequest = await this.prisma.$transaction(
         async (tx) => {
           const claimed = await tx.assetActionRequest.updateMany({
             where: {
@@ -1047,9 +1168,28 @@ export class AssetsService {
         },
         { maxWait: 5000, timeout: 15000 },
       );
+
+      await this.sendWorkflowApprovalResultsBestEffort({
+        recipientUserIds: [
+          request.requestedByUserId,
+          body.reviewerUserId,
+        ],
+        entityType: 'ASSET_ODOMETER_RESET',
+        entityId: request.id,
+        workflowType: 'ASSET_ODOMETER_RESET',
+        reference: request.asset?.assetId || request.assetId,
+        status: 'REJECTED',
+        metadata: {
+          assetId: request.assetId,
+          projectId: request.projectId,
+          reviewNote: reviewNote || 'Rejected',
+        },
+      });
+
+      return rejectedRequest;
     }
 
-    return this.prisma.$transaction(
+    const approvedResult = await this.prisma.$transaction(
       async (tx) => {
         const claimed = await tx.assetActionRequest.updateMany({
           where: {
@@ -1240,6 +1380,25 @@ export class AssetsService {
       },
       { maxWait: 5000, timeout: 15000 },
     );
+
+    await this.sendWorkflowApprovalResultsBestEffort({
+      recipientUserIds: [
+        request.requestedByUserId,
+        body.reviewerUserId,
+      ],
+      entityType: 'ASSET_ODOMETER_RESET',
+      entityId: request.id,
+      workflowType: 'ASSET_ODOMETER_RESET',
+      reference: request.asset?.assetId || request.assetId,
+      status: 'APPROVED',
+      metadata: {
+        assetId: request.assetId,
+        projectId: request.projectId,
+        reviewNote: reviewNote || 'Approved',
+      },
+    });
+
+    return approvedResult;
   }
 
   private getEffectiveAssetLifetime(asset: any) {
@@ -1688,6 +1847,7 @@ export class AssetsService {
     requestedByUserId: string,
     _effectiveDateInput?: string,
     transferBatchId?: string | null,
+    suppressNotifications = false,
   ) {
     /*
       Shared source of truth for both single and bulk asset transfers.
@@ -1884,6 +2044,31 @@ export class AssetsService {
     });
 
     if (!fullyApproved) {
+      if (!suppressNotifications) {
+        for (const approval of approvalsToCreate.filter(
+          (item) => item.status === 'PENDING',
+        )) {
+          await this.sendWorkflowApprovalRequiredBestEffort({
+            recipientUserId: approval.approverUserId,
+            entityType: 'ASSET_TRANSFER',
+            entityId: transferRequest.id,
+            workflowType: 'ASSET_TRANSFER',
+            reference: asset.assetId,
+            approvalStage: approval.approvalStage,
+            requestedByName: requester.fullName,
+            metadata: {
+              assetId: asset.id,
+              assetCode: asset.assetId,
+              fromProjectId: asset.projectId,
+              fromProjectName: asset.project?.name || null,
+              toProjectId: targetProject.id,
+              toProjectName: targetProject.name || null,
+              transferBatchId: transferBatchId || null,
+            },
+          });
+        }
+      }
+
       return transferRequest;
     }
 
@@ -1993,8 +2178,59 @@ export class AssetsService {
           requestedByUserId,
           undefined,
           transferBatchId,
+          true,
         ),
       );
+    }
+
+    const pendingApprovers = new Map<
+      string,
+      { approvalStage: string; transferIds: string[] }
+    >();
+
+    for (const transfer of transfers) {
+      for (const approval of transfer?.approvals || []) {
+        if (approval.status !== 'PENDING') continue;
+
+        const current: { approvalStage: string; transferIds: string[] } =
+          pendingApprovers.get(approval.approverUserId) || {
+            approvalStage: String(approval.approvalStage || ''),
+            transferIds: [],
+          };
+
+        current.transferIds.push(transfer.id);
+        pendingApprovers.set(approval.approverUserId, current);
+      }
+    }
+
+    const requester = transfers[0]?.requestedByUserId
+      ? await this.prisma.user.findFirst({
+          where: {
+            id: transfers[0].requestedByUserId,
+            deletedAt: null,
+            isActive: true,
+          },
+          select: {
+            fullName: true,
+          },
+        })
+      : null;
+
+    for (const [approverUserId, context] of pendingApprovers.entries()) {
+      await this.sendWorkflowApprovalRequiredBestEffort({
+        recipientUserId: approverUserId,
+        entityType: 'ASSET_TRANSFER_BATCH',
+        entityId: transferBatchId,
+        workflowType: 'ASSET_TRANSFER',
+        reference: transferBatchId,
+        approvalStage: context.approvalStage,
+        requestedByName: requester?.fullName || null,
+        metadata: {
+          transferBatchId,
+          requestedCount: uniqueAssetIds.length,
+          transferIds: context.transferIds,
+        },
+      });
     }
 
     return {
@@ -2136,7 +2372,7 @@ export class AssetsService {
     }
 
     if (!approve) {
-      return this.prisma.$transaction(async (tx) => {
+      const rejectedTransfer = await this.prisma.$transaction(async (tx) => {
         await tx.assetTransferApproval.update({
           where: { id: pendingApproval.id },
           data: {
@@ -2161,6 +2397,36 @@ export class AssetsService {
           },
         });
       });
+
+      await this.closeAssetTransferBatchApprovalIfDoneBestEffort({
+        transferBatchId: request.transferBatchId,
+        approverUserId: managerUserId,
+        status: 'REJECTED',
+      });
+
+      await this.sendWorkflowApprovalResultsBestEffort({
+        recipientUserIds: [
+          request.requestedByUserId,
+          ...request.approvals.map((approval) => approval.approverUserId),
+        ],
+        entityType: 'ASSET_TRANSFER',
+        entityId: request.id,
+        workflowType: 'ASSET_TRANSFER',
+        reference: request.asset?.assetId || request.assetId,
+        status: 'REJECTED',
+        metadata: {
+          assetId: request.assetId,
+          assetCode: request.asset?.assetId || null,
+          fromProjectId: request.fromProjectId,
+          fromProjectName: request.fromProject?.name || null,
+          toProjectId: request.toProjectId,
+          toProjectName: request.toProject?.name || null,
+          transferBatchId: request.transferBatchId || null,
+          rejectionReason: rejectionReason || 'Rejected',
+        },
+      });
+
+      return rejectedTransfer;
     }
 
     /*
@@ -2174,31 +2440,55 @@ export class AssetsService {
     );
 
     if (hasOtherPendingApprovals) {
-      return this.prisma.$transaction(async (tx) => {
-        await tx.assetTransferApproval.update({
-          where: { id: pendingApproval.id },
-          data: {
-            status: 'APPROVED',
-            reviewedAt: now,
-          },
-        });
+      const partiallyApprovedTransfer = await this.prisma.$transaction(
+        async (tx) => {
+          await tx.assetTransferApproval.update({
+            where: { id: pendingApproval.id },
+            data: {
+              status: 'APPROVED',
+              reviewedAt: now,
+            },
+          });
 
-        return tx.assetTransferRequest.update({
-          where: { id: transferId },
-          data: {
-            status: 'PARTIALLY_APPROVED',
-            reason: request.reason
-              ? `${request.reason}; Approval by manager ${managerUserId}`
-              : `First approval by manager ${managerUserId}`,
-          },
-          include: {
-            asset: true,
-            fromProject: true,
-            toProject: true,
-            approvals: true,
-          },
+          return tx.assetTransferRequest.update({
+            where: { id: transferId },
+            data: {
+              status: 'PARTIALLY_APPROVED',
+              reason: request.reason
+                ? `${request.reason}; Approval by manager ${managerUserId}`
+                : `First approval by manager ${managerUserId}`,
+            },
+            include: {
+              asset: true,
+              fromProject: true,
+              toProject: true,
+              approvals: true,
+            },
+          });
+        },
+      );
+
+      try {
+        await this.notificationsService.closeWorkflowApprovalRequired({
+          entityType: 'ASSET_TRANSFER',
+          entityId: request.id,
+          userId: managerUserId,
+          status: 'APPROVED',
         });
+      } catch (error) {
+        console.warn(
+          '[notifications][assets][partial-close]',
+          error instanceof Error ? error.message : error,
+        );
+      }
+
+      await this.closeAssetTransferBatchApprovalIfDoneBestEffort({
+        transferBatchId: request.transferBatchId,
+        approverUserId: managerUserId,
+        status: 'APPROVED',
       });
+
+      return partiallyApprovedTransfer;
     }
 
     /*
@@ -2210,7 +2500,7 @@ export class AssetsService {
 
       No additional reads run inside this transaction.
     */
-    return this.prisma.$transaction(async (tx) => {
+    const approvedTransfer = await this.prisma.$transaction(async (tx) => {
       await tx.assetTransferApproval.update({
         where: { id: pendingApproval.id },
         data: {
@@ -2256,6 +2546,35 @@ export class AssetsService {
         },
       });
     });
+
+    await this.closeAssetTransferBatchApprovalIfDoneBestEffort({
+      transferBatchId: request.transferBatchId,
+      approverUserId: managerUserId,
+      status: 'APPROVED',
+    });
+
+    await this.sendWorkflowApprovalResultsBestEffort({
+      recipientUserIds: [
+        request.requestedByUserId,
+        ...request.approvals.map((approval) => approval.approverUserId),
+      ],
+      entityType: 'ASSET_TRANSFER',
+      entityId: request.id,
+      workflowType: 'ASSET_TRANSFER',
+      reference: request.asset?.assetId || request.assetId,
+      status: 'APPROVED',
+      metadata: {
+        assetId: request.assetId,
+        assetCode: request.asset?.assetId || null,
+        fromProjectId: request.fromProjectId,
+        fromProjectName: request.fromProject?.name || null,
+        toProjectId: request.toProjectId,
+        toProjectName: request.toProject?.name || null,
+        transferBatchId: request.transferBatchId || null,
+      },
+    });
+
+    return approvedTransfer;
   }
 
   async remove(id: string) {
