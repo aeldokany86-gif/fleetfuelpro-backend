@@ -5,13 +5,168 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { randomUUID } from 'crypto';
 
 @Injectable()
 export class EmployeeTransfersService {
   constructor(
     private prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
   ) {}
+
+  private async sendWorkflowApprovalRequiredBestEffort(input: {
+    recipientUserId: string;
+    entityType: string;
+    entityId: string;
+    workflowType: string;
+    reference: string;
+    approvalStage?: string | null;
+    requestedByName?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }) {
+    try {
+      await this.notificationsService.sendWorkflowApprovalRequired(input);
+    } catch (error) {
+      console.warn(
+        '[notifications][employees][approval-required]',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  private async sendWorkflowApprovalResultsBestEffort(input: {
+    recipientUserIds: string[];
+    entityType: string;
+    entityId: string;
+    workflowType: string;
+    reference: string;
+    status: 'APPROVED' | 'REJECTED';
+    metadata?: Record<string, unknown> | null;
+  }) {
+    const recipientUserIds = Array.from(
+      new Set(
+        (input.recipientUserIds || [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    for (const recipientUserId of recipientUserIds) {
+      try {
+        await this.notificationsService.sendWorkflowApprovalResult({
+          recipientUserId,
+          entityType: input.entityType,
+          entityId: input.entityId,
+          workflowType: input.workflowType,
+          reference: input.reference,
+          status: input.status,
+          metadata: input.metadata || null,
+        });
+      } catch (error) {
+        console.warn(
+          '[notifications][employees][approval-result]',
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  }
+
+  private employeeTransferReference(request: any) {
+    return String(
+      request?.employeeCodeAtTransfer ||
+        request?.employee?.employeeId ||
+        request?.employeeId ||
+        '',
+    ).trim();
+  }
+
+  private employeeTransferMetadata(request: any) {
+    return {
+      employeeId: request?.employeeId || null,
+      employeeCode:
+        request?.employeeCodeAtTransfer ||
+        request?.employee?.employeeId ||
+        null,
+      employeeName:
+        request?.employeeNameAtTransfer ||
+        request?.employee?.name ||
+        null,
+      fromProjectId: request?.fromProjectId || null,
+      fromProjectName:
+        request?.fromProject?.name ||
+        request?.fromProject?.code ||
+        null,
+      toProjectId: request?.toProjectId || null,
+      toProjectName:
+        request?.toProject?.name ||
+        request?.toProject?.code ||
+        null,
+      transferBatchId: request?.transferBatchId || null,
+      keepLinkedProjects: request?.keepLinkedProjects ?? null,
+    };
+  }
+
+  private async notifyPendingProjectRemovalRequestsBestEffort(
+    transferRequestId: string,
+  ) {
+    try {
+      const requests =
+        await this.prisma.employeeProjectRemovalRequest.findMany({
+          where: {
+            transferRequestId,
+            status: 'PENDING',
+          },
+          include: {
+            employee: true,
+            project: true,
+            requestedBy: {
+              select: {
+                id: true,
+                fullName: true,
+                email: true,
+              },
+            },
+          },
+        });
+
+      for (const request of requests) {
+        await this.sendWorkflowApprovalRequiredBestEffort({
+          recipientUserId: request.approverUserId,
+          entityType: 'EMPLOYEE_PROJECT_REMOVAL',
+          entityId: request.id,
+          workflowType: 'EMPLOYEE_PROJECT_REMOVAL',
+          reference:
+            request.employee?.employeeId ||
+            request.employeeId,
+          approvalStage: 'Project Manager',
+          requestedByName:
+            request.requestedBy?.fullName ||
+            request.requestedBy?.email ||
+            null,
+          metadata: {
+            employeeId: request.employeeId,
+            employeeCode:
+              request.employee?.employeeId || null,
+            employeeName:
+              request.employee?.name || null,
+            projectId: request.projectId,
+            projectName:
+              request.project?.name ||
+              request.project?.code ||
+              null,
+            transferRequestId:
+              request.transferRequestId || null,
+          },
+        });
+      }
+    } catch (error) {
+      console.warn(
+        '[notifications][employees][project-removal-required]',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
 
   private normalizeRoleName(roleName: string) {
     return String(roleName || '')
@@ -440,16 +595,49 @@ export class EmployeeTransfersService {
     const now = new Date();
 
     if (!approve) {
-      return this.prisma.employeeProjectRemovalRequest.update({
-        where: { id: requestId },
-        data: {
-          status: 'REJECTED',
-          reviewedByUserId: reviewerUserId,
-          reviewedAt: now,
-          rejectionReason: rejectionReason || 'Rejected',
+      const rejectedRequest =
+        await this.prisma.employeeProjectRemovalRequest.update({
+          where: { id: requestId },
+          data: {
+            status: 'REJECTED',
+            reviewedByUserId: reviewerUserId,
+            reviewedAt: now,
+            rejectionReason: rejectionReason || 'Rejected',
+          },
+          include: { employee: true, project: true },
+        });
+
+      await this.sendWorkflowApprovalResultsBestEffort({
+        recipientUserIds: [
+          request.requestedByUserId,
+          reviewerUserId,
+        ],
+        entityType: 'EMPLOYEE_PROJECT_REMOVAL',
+        entityId: request.id,
+        workflowType: 'EMPLOYEE_PROJECT_REMOVAL',
+        reference:
+          request.employee?.employeeId ||
+          request.employeeId,
+        status: 'REJECTED',
+        metadata: {
+          employeeId: request.employeeId,
+          employeeCode:
+            request.employee?.employeeId || null,
+          employeeName:
+            request.employee?.name || null,
+          projectId: request.projectId,
+          projectName:
+            request.project?.name ||
+            request.project?.code ||
+            null,
+          transferRequestId:
+            request.transferRequestId || null,
+          rejectionReason:
+            rejectionReason || 'Rejected',
         },
-        include: { employee: true, project: true },
       });
+
+      return rejectedRequest;
     }
 
     // Never remove the employee from the current Primary Project, even if an
@@ -458,7 +646,7 @@ export class EmployeeTransfersService {
       throw new BadRequestException('Current primary project cannot be removed');
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const approvedRequest = await this.prisma.$transaction(async (tx) => {
       await tx.employeeProjectAssignment.deleteMany({
         where: {
           employeeId: request.employeeId,
@@ -476,6 +664,36 @@ export class EmployeeTransfersService {
         include: { employee: true, project: true },
       });
     }, { timeout: 60000 });
+
+    await this.sendWorkflowApprovalResultsBestEffort({
+      recipientUserIds: [
+        request.requestedByUserId,
+        reviewerUserId,
+      ],
+      entityType: 'EMPLOYEE_PROJECT_REMOVAL',
+      entityId: request.id,
+      workflowType: 'EMPLOYEE_PROJECT_REMOVAL',
+      reference:
+        request.employee?.employeeId ||
+        request.employeeId,
+      status: 'APPROVED',
+      metadata: {
+        employeeId: request.employeeId,
+        employeeCode:
+          request.employee?.employeeId || null,
+        employeeName:
+          request.employee?.name || null,
+        projectId: request.projectId,
+        projectName:
+          request.project?.name ||
+          request.project?.code ||
+          null,
+        transferRequestId:
+          request.transferRequestId || null,
+      },
+    });
+
+    return approvedRequest;
   }
 
   async createTransferRequest(
@@ -599,33 +817,51 @@ export class EmployeeTransfersService {
       const admins =
         await this.getActiveAdmins(employee.companyId);
 
-      return this.prisma.employeeTransferRequest.create({
-        data: {
-          companyId: employee.companyId,
-          employeeId,
-          fromProjectId: employee.projectId!,
-          toProjectId,
-          requestedByUserId,
-          transferBatchId: transferBatchId || null,
-          keepLinkedProjects,
-          employeeCodeAtTransfer: employee.employeeId,
-          employeeNameAtTransfer: employee.name,
-          status: 'PENDING',
-          effectiveDate: requestedEffectiveDate,
-          reason: 'ADMIN_APPROVAL_EMPLOYEE_TRANSFER',
-          approvals: {
-            create: admins.map((admin) => ({
-              approverUserId: admin.id,
-              projectId: employee.projectId!,
-              approvalStage: 'Admin Approval',
-              status: 'PENDING' as any,
-              reviewedAt: null,
-              note: 'Manager or Top Management transfer requires Admin approval',
-            })),
+      const transferRequest =
+        await this.prisma.employeeTransferRequest.create({
+          data: {
+            companyId: employee.companyId,
+            employeeId,
+            fromProjectId: employee.projectId!,
+            toProjectId,
+            requestedByUserId,
+            transferBatchId: transferBatchId || null,
+            keepLinkedProjects,
+            employeeCodeAtTransfer: employee.employeeId,
+            employeeNameAtTransfer: employee.name,
+            status: 'PENDING',
+            effectiveDate: requestedEffectiveDate,
+            reason: 'ADMIN_APPROVAL_EMPLOYEE_TRANSFER',
+            approvals: {
+              create: admins.map((admin) => ({
+                approverUserId: admin.id,
+                projectId: employee.projectId!,
+                approvalStage: 'Admin Approval',
+                status: 'PENDING' as any,
+                reviewedAt: null,
+                note: 'Manager or Top Management transfer requires Admin approval',
+              })),
+            },
           },
-        },
-        include: this.buildInclude(),
-      });
+          include: this.buildInclude(),
+        });
+
+      for (const approval of transferRequest.approvals.filter(
+        (item) => item.status === 'PENDING',
+      )) {
+        await this.sendWorkflowApprovalRequiredBestEffort({
+          recipientUserId: approval.approverUserId,
+          entityType: 'EMPLOYEE_TRANSFER',
+          entityId: transferRequest.id,
+          workflowType: 'EMPLOYEE_TRANSFER',
+          reference: this.employeeTransferReference(transferRequest),
+          approvalStage: approval.approvalStage,
+          requestedByName: requester.fullName,
+          metadata: this.employeeTransferMetadata(transferRequest),
+        });
+      }
+
+      return transferRequest;
     }
 
     if (
@@ -689,7 +925,7 @@ export class EmployeeTransfersService {
           approval.status === 'APPROVED',
       );
 
-    return this.prisma.$transaction(async (tx) => {
+    const transferResult = await this.prisma.$transaction(async (tx) => {
       const transferRequest =
         await tx.employeeTransferRequest.create({
           data: {
@@ -754,6 +990,31 @@ export class EmployeeTransfersService {
         include: this.buildInclude(),
       });
     }, { timeout: 60000 });
+
+    if (transferResult) {
+      for (const approval of transferResult.approvals.filter(
+        (item) => item.status === 'PENDING',
+      )) {
+        await this.sendWorkflowApprovalRequiredBestEffort({
+          recipientUserId: approval.approverUserId,
+          entityType: 'EMPLOYEE_TRANSFER',
+          entityId: transferResult.id,
+          workflowType: 'EMPLOYEE_TRANSFER',
+          reference: this.employeeTransferReference(transferResult),
+          approvalStage: approval.approvalStage,
+          requestedByName: requester.fullName,
+          metadata: this.employeeTransferMetadata(transferResult),
+        });
+      }
+
+      if (transferResult.status === 'APPROVED') {
+        await this.notifyPendingProjectRemovalRequestsBestEffort(
+          transferResult.id,
+        );
+      }
+    }
+
+    return transferResult;
   }
 
   async createBulkTransferRequests(
@@ -1005,7 +1266,7 @@ export class EmployeeTransfersService {
       }
 
       if (!approve) {
-        return this.prisma.$transaction(async (tx) => {
+        const rejectedTransfer = await this.prisma.$transaction(async (tx) => {
           await tx.employeeTransferApproval.update({
             where: {
               id: adminPendingApproval.id,
@@ -1030,9 +1291,31 @@ export class EmployeeTransfersService {
             include: this.buildInclude(),
           });
         }, { timeout: 60000 });
+
+        await this.sendWorkflowApprovalResultsBestEffort({
+          recipientUserIds: [
+            request.requestedByUserId,
+            managerUserId,
+            ...request.approvals.map(
+              (approval) => approval.approverUserId,
+            ),
+          ],
+          entityType: 'EMPLOYEE_TRANSFER',
+          entityId: request.id,
+          workflowType: 'EMPLOYEE_TRANSFER',
+          reference: this.employeeTransferReference(request),
+          status: 'REJECTED',
+          metadata: {
+            ...this.employeeTransferMetadata(request),
+            rejectionReason:
+              rejectionReason || 'Rejected',
+          },
+        });
+
+        return rejectedTransfer;
       }
 
-      return this.prisma.$transaction(async (tx) => {
+      const approvedTransfer = await this.prisma.$transaction(async (tx) => {
         await tx.employeeTransferApproval.update({
           where: {
             id: adminPendingApproval.id,
@@ -1063,6 +1346,28 @@ export class EmployeeTransfersService {
           include: this.buildInclude(),
         });
       }, { timeout: 60000 });
+
+      await this.sendWorkflowApprovalResultsBestEffort({
+        recipientUserIds: [
+          request.requestedByUserId,
+          managerUserId,
+          ...request.approvals.map(
+            (approval) => approval.approverUserId,
+          ),
+        ],
+        entityType: 'EMPLOYEE_TRANSFER',
+        entityId: request.id,
+        workflowType: 'EMPLOYEE_TRANSFER',
+        reference: this.employeeTransferReference(request),
+        status: 'APPROVED',
+        metadata: this.employeeTransferMetadata(request),
+      });
+
+      await this.notifyPendingProjectRemovalRequestsBestEffort(
+        request.id,
+      );
+
+      return approvedTransfer;
     }
 
     const pendingApproval =
@@ -1080,7 +1385,7 @@ export class EmployeeTransfersService {
     }
 
     if (!approve) {
-      return this.prisma.$transaction(async (tx) => {
+      const rejectedTransfer = await this.prisma.$transaction(async (tx) => {
         await tx.employeeTransferApproval.update({
           where: {
             id: pendingApproval.id,
@@ -1107,9 +1412,30 @@ export class EmployeeTransfersService {
           include: this.buildInclude(),
         });
       }, { timeout: 60000 });
+
+      await this.sendWorkflowApprovalResultsBestEffort({
+        recipientUserIds: [
+          request.requestedByUserId,
+          ...request.approvals.map(
+            (approval) => approval.approverUserId,
+          ),
+        ],
+        entityType: 'EMPLOYEE_TRANSFER',
+        entityId: request.id,
+        workflowType: 'EMPLOYEE_TRANSFER',
+        reference: this.employeeTransferReference(request),
+        status: 'REJECTED',
+        metadata: {
+          ...this.employeeTransferMetadata(request),
+          rejectionReason:
+            rejectionReason || 'Rejected',
+        },
+      });
+
+      return rejectedTransfer;
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const approvedOrPartialTransfer = await this.prisma.$transaction(async (tx) => {
       await tx.employeeTransferApproval.update({
         where: {
           id: pendingApproval.id,
@@ -1166,5 +1492,45 @@ export class EmployeeTransfersService {
         include: this.buildInclude(),
       });
     }, { timeout: 60000 });
+
+    if (approvedOrPartialTransfer.status === 'PARTIALLY_APPROVED') {
+      try {
+        await this.notificationsService.closeWorkflowApprovalRequired({
+          entityType: 'EMPLOYEE_TRANSFER',
+          entityId: request.id,
+          userId: managerUserId,
+          status: 'APPROVED',
+        });
+      } catch (error) {
+        console.warn(
+          '[notifications][employees][partial-close]',
+          error instanceof Error ? error.message : error,
+        );
+      }
+
+      return approvedOrPartialTransfer;
+    }
+
+    await this.sendWorkflowApprovalResultsBestEffort({
+      recipientUserIds: [
+        request.requestedByUserId,
+        ...request.approvals.map(
+          (approval) => approval.approverUserId,
+        ),
+      ],
+      entityType: 'EMPLOYEE_TRANSFER',
+      entityId: request.id,
+      workflowType: 'EMPLOYEE_TRANSFER',
+      reference: this.employeeTransferReference(request),
+      status: 'APPROVED',
+      metadata: this.employeeTransferMetadata(request),
+    });
+
+    await this.notifyPendingProjectRemovalRequestsBestEffort(
+      request.id,
+    );
+
+    return approvedOrPartialTransfer;
   }
+
 }
