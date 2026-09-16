@@ -22,6 +22,7 @@ type JwtUser = {
 type MobileApprovalReviewInput = {
   action: 'APPROVE' | 'REJECT';
   note?: string;
+  requestIds?: string[];
 };
 
 type ApprovalInboxItem = {
@@ -212,6 +213,78 @@ export class MobileApprovalsService {
           } as any,
           domainRequest,
         );
+
+      case 'ASSET_TRANSFER_BATCH': {
+        const requestedIds = Array.from(
+          new Set(
+            (Array.isArray(input.requestIds) ? input.requestIds : [])
+              .map((id) => String(id || '').trim())
+              .filter(Boolean),
+          ),
+        );
+
+        if (!requestedIds.length) {
+          throw new BadRequestException(
+            'At least one asset transfer request must be selected.',
+          );
+        }
+
+        const eligibleRequests = await (this.prisma as any).assetTransferRequest.findMany({
+          where: {
+            id: { in: requestedIds },
+            companyId: currentUser.companyId,
+            transferBatchId: requestId,
+            status: {
+              in: ['PENDING', 'PARTIALLY_APPROVED'],
+            },
+            approvals: {
+              some: {
+                approverUserId: reviewerUserId,
+                status: 'PENDING',
+              },
+            },
+          },
+          select: {
+            id: true,
+          },
+        });
+
+        const eligibleIds = new Set(
+          eligibleRequests.map((item: any) => String(item.id)),
+        );
+
+        if (
+          eligibleIds.size !== requestedIds.length ||
+          requestedIds.some((id) => !eligibleIds.has(id))
+        ) {
+          throw new BadRequestException(
+            'One or more selected asset transfers are no longer available for your approval.',
+          );
+        }
+
+        const results: unknown[] = [];
+
+        // Keep reviews sequential because each domain review can update the same
+        // batch notification and remote pooled database connections are sensitive
+        // to parallel Prisma activity.
+        for (const selectedRequestId of requestedIds) {
+          results.push(
+            await this.assetsService.reviewTransfer(
+              selectedRequestId,
+              reviewerUserId,
+              approve,
+              note,
+            ),
+          );
+        }
+
+        return {
+          ok: true,
+          batchId: requestId,
+          reviewedCount: results.length,
+          results,
+        };
+      }
 
       case 'ASSET_TRANSFER':
         return this.assetsService.reviewTransfer(
@@ -668,8 +741,18 @@ export class MobileApprovalsService {
       });
     }
 
+    const assetTransferBatchGroups = new Map<string, any[]>();
+
     for (const approval of assetTransferApprovals) {
       const request = approval.transferRequest;
+      const transferBatchId = String(request.transferBatchId || '').trim();
+
+      if (transferBatchId) {
+        const group = assetTransferBatchGroups.get(transferBatchId) || [];
+        group.push(approval);
+        assetTransferBatchGroups.set(transferBatchId, group);
+        continue;
+      }
 
       items.push({
         id: request.id,
@@ -678,7 +761,7 @@ export class MobileApprovalsService {
         module: 'ASSETS',
         status: String(request.status || 'PENDING'),
         approvalStage: approval.approvalStage || null,
-        reference: request.transferBatchId || request.id,
+        reference: request.id,
         requestedAt: request.createdAt,
         requestedBy: this.requestedByInfo(request.requestedBy),
         fromProject: this.projectInfo(request.fromProject),
@@ -692,7 +775,57 @@ export class MobileApprovalsService {
         },
         summary: {
           reason: request.reason || null,
-          transferBatchId: request.transferBatchId || null,
+          transferBatchId: null,
+        },
+        availableActions: ['APPROVE', 'REJECT'],
+      });
+    }
+
+    for (const [transferBatchId, approvals] of assetTransferBatchGroups.entries()) {
+      if (!approvals.length) continue;
+
+      const firstApproval = approvals[0];
+      const firstRequest = firstApproval.transferRequest;
+      const hasPartiallyApproved = approvals.some(
+        (approval) =>
+          String(approval.transferRequest?.status || '').toUpperCase() ===
+          'PARTIALLY_APPROVED',
+      );
+
+      const batchItems = approvals.map((approval) => {
+        const request = approval.transferRequest;
+
+        return {
+          requestId: request.id,
+          approvalId: approval.id,
+          status: String(request.status || 'PENDING'),
+          entity: {
+            id: request.asset?.id || request.assetId || null,
+            code: request.asset?.assetId || null,
+            name: request.asset?.type || null,
+            kind: 'ASSET',
+          },
+        };
+      });
+
+      items.push({
+        id: transferBatchId,
+        approvalId: null,
+        type: 'ASSET_TRANSFER_BATCH',
+        module: 'ASSETS',
+        status: hasPartiallyApproved ? 'PARTIALLY_APPROVED' : 'PENDING',
+        approvalStage: firstApproval.approvalStage || null,
+        reference: transferBatchId,
+        requestedAt: firstRequest.createdAt,
+        requestedBy: this.requestedByInfo(firstRequest.requestedBy),
+        fromProject: this.projectInfo(firstRequest.fromProject),
+        toProject: this.projectInfo(firstRequest.toProject),
+        project: this.projectInfo(firstApproval.project),
+        entity: null,
+        summary: {
+          transferBatchId,
+          itemCount: batchItems.length,
+          items: batchItems,
         },
         availableActions: ['APPROVE', 'REJECT'],
       });

@@ -26,6 +26,7 @@ type JwtRequest = {
 type MobileApprovalReviewBody = {
   action?: string;
   note?: string;
+  requestIds?: string[];
 };
 
 @Controller('mobile/approvals')
@@ -61,6 +62,7 @@ export class MobileApprovalsController {
       {
         action: action as 'APPROVE' | 'REJECT',
         note: body?.note,
+        requestIds: Array.isArray(body?.requestIds) ? body.requestIds : undefined,
       },
       request.user,
     );
