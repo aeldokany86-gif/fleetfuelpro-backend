@@ -286,6 +286,78 @@ export class MobileApprovalsService {
         };
       }
 
+      case 'EMPLOYEE_TRANSFER_BATCH': {
+        const requestedIds = Array.from(
+          new Set(
+            (Array.isArray(input.requestIds) ? input.requestIds : [])
+              .map((id) => String(id || '').trim())
+              .filter(Boolean),
+          ),
+        );
+
+        if (!requestedIds.length) {
+          throw new BadRequestException(
+            'At least one employee transfer request must be selected.',
+          );
+        }
+
+        const eligibleRequests =
+          await (this.prisma as any).employeeTransferRequest.findMany({
+            where: {
+              id: { in: requestedIds },
+              companyId: currentUser.companyId,
+              transferBatchId: requestId,
+              status: {
+                in: ['PENDING', 'PARTIALLY_APPROVED'],
+              },
+              approvals: {
+                some: {
+                  approverUserId: reviewerUserId,
+                  status: 'PENDING',
+                },
+              },
+            },
+            select: {
+              id: true,
+            },
+          });
+
+        const eligibleIds = new Set(
+          eligibleRequests.map((item: any) => String(item.id)),
+        );
+
+        if (
+          eligibleIds.size !== requestedIds.length ||
+          requestedIds.some((id) => !eligibleIds.has(id))
+        ) {
+          throw new BadRequestException(
+            'One or more selected employee transfers are no longer available for your approval.',
+          );
+        }
+
+        const results: unknown[] = [];
+
+        // Keep batch reviews sequential so every employee still goes through the
+        // existing domain review logic and to avoid parallel Prisma pressure.
+        for (const selectedRequestId of requestedIds) {
+          results.push(
+            await this.employeeTransfersService.reviewTransfer(
+              selectedRequestId,
+              reviewerUserId,
+              approve,
+              note,
+            ),
+          );
+        }
+
+        return {
+          ok: true,
+          batchId: requestId,
+          reviewedCount: results.length,
+          results,
+        };
+      }
+
       case 'ASSET_TRANSFER':
         return this.assetsService.reviewTransfer(
           requestId,
@@ -861,8 +933,18 @@ export class MobileApprovalsService {
       });
     }
 
+    const employeeTransferBatchGroups = new Map<string, any[]>();
+
     for (const approval of employeeTransferApprovals) {
       const request = approval.transferRequest;
+      const transferBatchId = String(request.transferBatchId || '').trim();
+
+      if (transferBatchId) {
+        const group = employeeTransferBatchGroups.get(transferBatchId) || [];
+        group.push(approval);
+        employeeTransferBatchGroups.set(transferBatchId, group);
+        continue;
+      }
 
       items.push({
         id: request.id,
@@ -871,7 +953,7 @@ export class MobileApprovalsService {
         module: 'EMPLOYEES',
         status: String(request.status || 'PENDING'),
         approvalStage: approval.approvalStage || null,
-        reference: request.transferBatchId || request.id,
+        reference: request.id,
         requestedAt: request.createdAt,
         requestedBy: this.requestedByInfo(request.requestedBy),
         fromProject: this.projectInfo(request.fromProject),
@@ -892,7 +974,108 @@ export class MobileApprovalsService {
         summary: {
           reason: request.reason || null,
           keepLinkedProjects: request.keepLinkedProjects ?? null,
-          transferBatchId: request.transferBatchId || null,
+          transferBatchId: null,
+        },
+        availableActions: ['APPROVE', 'REJECT'],
+      });
+    }
+
+    for (const [transferBatchId, approvals] of employeeTransferBatchGroups.entries()) {
+      if (!approvals.length) continue;
+
+      const firstApproval = approvals[0];
+      const firstRequest = firstApproval.transferRequest;
+
+      const hasPartiallyApproved = approvals.some(
+        (approval) =>
+          String(approval.transferRequest?.status || '').toUpperCase() ===
+          'PARTIALLY_APPROVED',
+      );
+
+      const approvalStages = Array.from(
+        new Set(
+          approvals
+            .map((approval) => String(approval.approvalStage || '').trim())
+            .filter(Boolean),
+        ),
+      );
+
+      const sourceProjectIds = Array.from(
+        new Set(
+          approvals
+            .map((approval) => approval.transferRequest?.fromProject?.id)
+            .filter(Boolean),
+        ),
+      );
+
+      const destinationProjectIds = Array.from(
+        new Set(
+          approvals
+            .map((approval) => approval.transferRequest?.toProject?.id)
+            .filter(Boolean),
+        ),
+      );
+
+      const approvalProjectIds = Array.from(
+        new Set(
+          approvals
+            .map((approval) => approval.project?.id)
+            .filter(Boolean),
+        ),
+      );
+
+      const batchItems = approvals.map((approval) => {
+        const request = approval.transferRequest;
+
+        return {
+          requestId: request.id,
+          approvalId: approval.id,
+          status: String(request.status || 'PENDING'),
+          entity: {
+            id: request.employee?.id || request.employeeId || null,
+            code:
+              request.employeeCodeAtTransfer ||
+              request.employee?.employeeId ||
+              null,
+            name:
+              request.employeeNameAtTransfer ||
+              request.employee?.name ||
+              null,
+            kind: 'EMPLOYEE',
+          },
+          fromProject: this.projectInfo(request.fromProject),
+          toProject: this.projectInfo(request.toProject),
+        };
+      });
+
+      items.push({
+        id: transferBatchId,
+        approvalId: null,
+        type: 'EMPLOYEE_TRANSFER_BATCH',
+        module: 'EMPLOYEES',
+        status: hasPartiallyApproved ? 'PARTIALLY_APPROVED' : 'PENDING',
+        approvalStage:
+          approvalStages.length === 1 ? approvalStages[0] : null,
+        reference: transferBatchId,
+        requestedAt: firstRequest.createdAt,
+        requestedBy: this.requestedByInfo(firstRequest.requestedBy),
+        fromProject:
+          sourceProjectIds.length === 1
+            ? this.projectInfo(firstRequest.fromProject)
+            : null,
+        toProject:
+          destinationProjectIds.length === 1
+            ? this.projectInfo(firstRequest.toProject)
+            : null,
+        project:
+          approvalProjectIds.length === 1
+            ? this.projectInfo(firstApproval.project)
+            : null,
+        entity: null,
+        summary: {
+          transferBatchId,
+          itemCount: batchItems.length,
+          items: batchItems,
         },
         availableActions: ['APPROVE', 'REJECT'],
       });
