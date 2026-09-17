@@ -124,7 +124,10 @@ export class NotificationsService {
     const normalized = String(workflowType || '').trim().toUpperCase();
     return {
       key: `approvals.types.${normalized}`,
-      fallback: normalized.replace(/_/g, ' ') || 'Request',
+      fallback:
+        normalized === 'EMPLOYEE_TRANSFER_BATCH'
+          ? 'Bulk Employee Transfer'
+          : normalized.replace(/_/g, ' ') || 'Request',
     };
   }
 
@@ -142,6 +145,7 @@ export class NotificationsService {
       STATION_COUNTER_RESET: { ar: 'إعادة ضبط عداد المحطة', en: 'Station Counter Reset' },
       STATION_INVENTORY_ADJUSTMENT: { ar: 'تسوية مخزون المحطة', en: 'Station Inventory Adjustment' },
       EMPLOYEE_TRANSFER: { ar: 'نقل موظف', en: 'Employee Transfer' },
+      EMPLOYEE_TRANSFER_BATCH: { ar: 'نقل موظفين جماعي', en: 'Bulk Employee Transfer' },
       EMPLOYEE_PROJECT_REMOVAL: { ar: 'إزالة موظف من مشروع', en: 'Employee Project Removal' },
       OPERATION_CORRECTION: { ar: 'تصحيح عملية', en: 'Operation Correction' },
     };

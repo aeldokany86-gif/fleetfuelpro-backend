@@ -107,6 +107,48 @@ export class EmployeeTransfersService {
     };
   }
 
+  private async closeEmployeeTransferBatchApprovalRequiredIfDoneBestEffort(
+    request: any,
+    reviewerUserId: string,
+    status: 'APPROVED' | 'REJECTED',
+  ) {
+    const transferBatchId = String(request?.transferBatchId || '').trim();
+    const userId = String(reviewerUserId || '').trim();
+
+    if (!transferBatchId || !userId) return;
+
+    try {
+      const remainingPending =
+        await (this.prisma as any).employeeTransferApproval.count({
+          where: {
+            approverUserId: userId,
+            status: 'PENDING',
+            transferRequest: {
+              transferBatchId,
+              companyId: request.companyId,
+              status: {
+                in: ['PENDING', 'PARTIALLY_APPROVED'],
+              },
+            },
+          },
+        });
+
+      if (remainingPending > 0) return;
+
+      await this.notificationsService.closeWorkflowApprovalRequired({
+        entityType: 'EMPLOYEE_TRANSFER_BATCH',
+        entityId: transferBatchId,
+        userId,
+        status,
+      });
+    } catch (error) {
+      console.warn(
+        '[notifications][employees][batch-required-close]',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
   private async notifyPendingProjectRemovalRequestsBestEffort(
     transferRequestId: string,
   ) {
@@ -703,6 +745,7 @@ export class EmployeeTransfersService {
     effectiveDate?: string | Date | null,
     transferBatchId?: string | null,
     keepLinkedProjects: boolean = true,
+    suppressApprovalNotification: boolean = false,
   ) {
     const employee =
       await this.prisma.employee.findFirst({
@@ -846,19 +889,21 @@ export class EmployeeTransfersService {
           include: this.buildInclude(),
         });
 
-      for (const approval of transferRequest.approvals.filter(
-        (item) => item.status === 'PENDING',
-      )) {
-        await this.sendWorkflowApprovalRequiredBestEffort({
-          recipientUserId: approval.approverUserId,
-          entityType: 'EMPLOYEE_TRANSFER',
-          entityId: transferRequest.id,
-          workflowType: 'EMPLOYEE_TRANSFER',
-          reference: this.employeeTransferReference(transferRequest),
-          approvalStage: approval.approvalStage,
-          requestedByName: requester.fullName,
-          metadata: this.employeeTransferMetadata(transferRequest),
-        });
+      if (!suppressApprovalNotification) {
+        for (const approval of transferRequest.approvals.filter(
+          (item) => item.status === 'PENDING',
+        )) {
+          await this.sendWorkflowApprovalRequiredBestEffort({
+            recipientUserId: approval.approverUserId,
+            entityType: 'EMPLOYEE_TRANSFER',
+            entityId: transferRequest.id,
+            workflowType: 'EMPLOYEE_TRANSFER',
+            reference: this.employeeTransferReference(transferRequest),
+            approvalStage: approval.approvalStage,
+            requestedByName: requester.fullName,
+            metadata: this.employeeTransferMetadata(transferRequest),
+          });
+        }
       }
 
       return transferRequest;
@@ -992,19 +1037,21 @@ export class EmployeeTransfersService {
     }, { timeout: 60000 });
 
     if (transferResult) {
-      for (const approval of transferResult.approvals.filter(
-        (item) => item.status === 'PENDING',
-      )) {
-        await this.sendWorkflowApprovalRequiredBestEffort({
-          recipientUserId: approval.approverUserId,
-          entityType: 'EMPLOYEE_TRANSFER',
-          entityId: transferResult.id,
-          workflowType: 'EMPLOYEE_TRANSFER',
-          reference: this.employeeTransferReference(transferResult),
-          approvalStage: approval.approvalStage,
-          requestedByName: requester.fullName,
-          metadata: this.employeeTransferMetadata(transferResult),
-        });
+      if (!suppressApprovalNotification) {
+        for (const approval of transferResult.approvals.filter(
+          (item) => item.status === 'PENDING',
+        )) {
+          await this.sendWorkflowApprovalRequiredBestEffort({
+            recipientUserId: approval.approverUserId,
+            entityType: 'EMPLOYEE_TRANSFER',
+            entityId: transferResult.id,
+            workflowType: 'EMPLOYEE_TRANSFER',
+            reference: this.employeeTransferReference(transferResult),
+            approvalStage: approval.approvalStage,
+            requestedByName: requester.fullName,
+            metadata: this.employeeTransferMetadata(transferResult),
+          });
+        }
       }
 
       if (transferResult.status === 'APPROVED') {
@@ -1055,6 +1102,8 @@ export class EmployeeTransfersService {
 
     // Sequential creation keeps the same validation and snapshot-safe transfer
     // behavior as the existing single-request path for every employee.
+    // Individual Approval Required notifications are suppressed here because the
+    // whole bulk submission is represented by one batch notification per approver.
     for (const employeeId of uniqueEmployeeIds) {
       transfers.push(
         await this.createTransferRequest(
@@ -1064,8 +1113,98 @@ export class EmployeeTransfersService {
           null,
           transferBatchId,
           keepLinkedProjects,
+          true,
         ),
       );
+    }
+
+    const batchCompanyId = String(transfers[0]?.companyId || '').trim();
+
+    if (!batchCompanyId) {
+      throw new BadRequestException(
+        'Bulk employee transfer company context is missing',
+      );
+    }
+
+    const requester = await this.getRequester(
+      requestedByUserId,
+      batchCompanyId,
+    );
+
+    const pendingByApprover = new Map<
+      string,
+      {
+        recipientUserId: string;
+        approvalStage: string | null;
+        itemCount: number;
+      }
+    >();
+
+    for (const transfer of transfers) {
+      for (const approval of (transfer?.approvals || []).filter(
+        (item: any) => item.status === 'PENDING',
+      )) {
+        const recipientUserId = String(approval.approverUserId || '').trim();
+        if (!recipientUserId) continue;
+
+        const current = pendingByApprover.get(recipientUserId);
+        if (current) {
+          current.itemCount += 1;
+          continue;
+        }
+
+        pendingByApprover.set(recipientUserId, {
+          recipientUserId,
+          approvalStage: approval.approvalStage || null,
+          itemCount: 1,
+        });
+      }
+    }
+
+    const batchEmployeeItems = transfers.map((transfer: any) => ({
+      requestId: transfer.id,
+      employeeId: transfer.employeeId || null,
+      employeeCode:
+        transfer.employeeCodeAtTransfer ||
+        transfer.employee?.employeeId ||
+        null,
+      employeeName:
+        transfer.employeeNameAtTransfer ||
+        transfer.employee?.name ||
+        null,
+      fromProjectId: transfer.fromProjectId || null,
+      fromProjectName:
+        transfer.fromProject?.name ||
+        transfer.fromProject?.code ||
+        null,
+      toProjectId: transfer.toProjectId || null,
+      toProjectName:
+        transfer.toProject?.name ||
+        transfer.toProject?.code ||
+        null,
+    }));
+
+    for (const pending of pendingByApprover.values()) {
+      await this.sendWorkflowApprovalRequiredBestEffort({
+        recipientUserId: pending.recipientUserId,
+        entityType: 'EMPLOYEE_TRANSFER_BATCH',
+        entityId: transferBatchId,
+        workflowType: 'EMPLOYEE_TRANSFER_BATCH',
+        reference: transferBatchId,
+        approvalStage: pending.approvalStage,
+        requestedByName: requester.fullName,
+        metadata: {
+          transferBatchId,
+          itemCount: pending.itemCount,
+          totalItemCount: transfers.length,
+          toProjectId,
+          toProjectName:
+            transfers[0]?.toProject?.name ||
+            transfers[0]?.toProject?.code ||
+            null,
+          items: batchEmployeeItems,
+        },
+      });
     }
 
     return {
@@ -1312,6 +1451,12 @@ export class EmployeeTransfersService {
           },
         });
 
+        await this.closeEmployeeTransferBatchApprovalRequiredIfDoneBestEffort(
+          request,
+          managerUserId,
+          'REJECTED',
+        );
+
         return rejectedTransfer;
       }
 
@@ -1365,6 +1510,12 @@ export class EmployeeTransfersService {
 
       await this.notifyPendingProjectRemovalRequestsBestEffort(
         request.id,
+      );
+
+      await this.closeEmployeeTransferBatchApprovalRequiredIfDoneBestEffort(
+        request,
+        managerUserId,
+        'APPROVED',
       );
 
       return approvedTransfer;
@@ -1431,6 +1582,12 @@ export class EmployeeTransfersService {
             rejectionReason || 'Rejected',
         },
       });
+
+      await this.closeEmployeeTransferBatchApprovalRequiredIfDoneBestEffort(
+        request,
+        managerUserId,
+        'REJECTED',
+      );
 
       return rejectedTransfer;
     }
@@ -1508,6 +1665,12 @@ export class EmployeeTransfersService {
         );
       }
 
+      await this.closeEmployeeTransferBatchApprovalRequiredIfDoneBestEffort(
+        request,
+        managerUserId,
+        'APPROVED',
+      );
+
       return approvedOrPartialTransfer;
     }
 
@@ -1528,6 +1691,12 @@ export class EmployeeTransfersService {
 
     await this.notifyPendingProjectRemovalRequestsBestEffort(
       request.id,
+    );
+
+    await this.closeEmployeeTransferBatchApprovalRequiredIfDoneBestEffort(
+      request,
+      managerUserId,
+      'APPROVED',
     );
 
     return approvedOrPartialTransfer;
