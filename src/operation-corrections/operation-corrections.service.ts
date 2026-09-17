@@ -207,7 +207,23 @@ export class OperationCorrectionsService {
     this.validateFieldAllowedForOperation(fieldName, operation.type);
 
     const oldValue = this.getOperationFieldValue(operation, fieldName);
-    const newValue = await this.normalizeNewValue(fieldName, dto.newValue, operation, currentUser.companyId);
+    const newValue = await this.normalizeNewValue(
+      fieldName,
+      dto.newValue,
+      operation,
+      currentUser.companyId,
+    );
+
+    // Validate odometer sequence before creating a pending approval request.
+    // The same rule is intentionally validated again during apply/review as a
+    // second safety layer in case later operations/resets change before approval.
+    if (fieldName === 'ODOMETER') {
+      await this.validateCorrectedOdometerSequence(
+        this.prisma as any,
+        operation,
+        Number(newValue),
+      );
+    }
 
     if (this.valuesEqual(oldValue, newValue)) {
       throw new BadRequestException('New value is the same as the current value.');
