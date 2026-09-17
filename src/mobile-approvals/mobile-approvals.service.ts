@@ -433,6 +433,15 @@ export class MobileApprovalsService {
       },
       include: {
         role: true,
+        managedProjects: {
+          where: {
+            deletedAt: null,
+            isActive: true,
+          },
+          select: {
+            id: true,
+          },
+        },
       },
     });
 
@@ -450,20 +459,14 @@ export class MobileApprovalsService {
     const canReviewOperationCorrections =
       isManager || this.isOperationCorrectionAdminRole(roleName);
 
-    const managedProjects = isManager
-      ? await (this.prisma as any).project.findMany({
-          where: {
-            companyId,
-            projectManagerId: userId,
-            deletedAt: null,
-          },
-          select: {
-            id: true,
-          },
-        })
+    // Keep manager scope identical to OperationCorrectionsService.
+    // The authenticated User.managedProjects relation is the authoritative
+    // source used by the domain service for Operation Correction permissions.
+    const managedProjectIds = isManager
+      ? (currentUser.managedProjects || [])
+          .map((project: any) => String(project?.id || '').trim())
+          .filter(Boolean)
       : [];
-
-    const managedProjectIds = managedProjects.map((project: any) => project.id);
 
     // Keep approval inbox reads sequential. This endpoint can touch several
     // approval domains, and firing all queries at once can exhaust/interrupt

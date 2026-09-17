@@ -148,40 +148,39 @@ export class OperationCorrectionsService {
 
     if (!projectIds.length) return [];
 
-    const projects = await (this.prisma as any).project.findMany({
+    // Use exactly the same manager-project relation used by
+    // resolveCurrentUser()/assertCanReviewOperation. This avoids a notification
+    // or mobile-inbox mismatch if projectManagerId and the user's managedProjects
+    // relation are not in sync for historical operation snapshots.
+    const activeUsers = await (this.prisma as any).user.findMany({
       where: {
-        id: { in: projectIds },
-        companyId,
-        deletedAt: null,
-      },
-      select: {
-        projectManagerId: true,
-      },
-    });
-
-    const managerIds = Array.from(
-      new Set(
-        projects
-          .map((project: any) =>
-            String(project?.projectManagerId || '').trim(),
-          )
-          .filter(Boolean),
-      ),
-    );
-
-    if (!managerIds.length) return [];
-
-    const activeManagers = await (this.prisma as any).user.findMany({
-      where: {
-        id: { in: managerIds },
         companyId,
         deletedAt: null,
         isActive: true,
+        managedProjects: {
+          some: {
+            id: { in: projectIds },
+            deletedAt: null,
+            isActive: true,
+          },
+        },
       },
-      select: { id: true },
+      include: {
+        role: true,
+      },
     });
 
-    return activeManagers.map((user: any) => user.id);
+    return Array.from(
+      new Set(
+        activeUsers
+          .filter(
+            (user: any) =>
+              this.normalizeRole(user?.role?.name) === 'Manager',
+          )
+          .map((user: any) => String(user?.id || '').trim())
+          .filter(Boolean),
+      ),
+    );
   }
 
   async create(dto: CreateOperationCorrectionDto, request?: RequestLike) {
