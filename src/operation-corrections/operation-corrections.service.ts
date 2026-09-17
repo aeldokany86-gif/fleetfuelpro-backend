@@ -6,6 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateOperationCorrectionDto } from './dto/create-operation-correction.dto';
 import { ReviewOperationCorrectionDto } from './dto/review-operation-correction.dto';
 
@@ -37,7 +38,151 @@ type CorrectionField =
 
 @Injectable()
 export class OperationCorrectionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notificationsService: NotificationsService,
+  ) {}
+
+  private async sendCorrectionApprovalRequiredBestEffort(input: {
+    recipientUserId: string;
+    correctionId: string;
+    operationNo: string;
+    requestedByName?: string | null;
+    metadata?: Record<string, unknown> | null;
+  }) {
+    try {
+      await this.notificationsService.sendWorkflowApprovalRequired({
+        recipientUserId: input.recipientUserId,
+        entityType: 'OPERATION_CORRECTION',
+        entityId: input.correctionId,
+        workflowType: 'OPERATION_CORRECTION',
+        reference: input.operationNo,
+        approvalStage: 'Project Manager',
+        requestedByName: input.requestedByName || null,
+        metadata: input.metadata || null,
+      });
+    } catch (error) {
+      console.warn(
+        '[notifications][operation-corrections][approval-required]',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  private async sendCorrectionApprovalResultsBestEffort(input: {
+    recipientUserIds: string[];
+    correctionId: string;
+    operationNo: string;
+    status: 'APPROVED' | 'REJECTED';
+    metadata?: Record<string, unknown> | null;
+  }) {
+    const recipientUserIds = Array.from(
+      new Set(
+        (input.recipientUserIds || [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    for (const recipientUserId of recipientUserIds) {
+      try {
+        await this.notificationsService.sendWorkflowApprovalResult({
+          recipientUserId,
+          entityType: 'OPERATION_CORRECTION',
+          entityId: input.correctionId,
+          workflowType: 'OPERATION_CORRECTION',
+          reference: input.operationNo,
+          status: input.status,
+          metadata: input.metadata || null,
+        });
+      } catch (error) {
+        console.warn(
+          '[notifications][operation-corrections][approval-result]',
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+  }
+
+  private operationCorrectionNotificationMetadata(
+    correction: any,
+    operation: any,
+  ) {
+    return {
+      correctionId: correction?.id || null,
+      operationId: operation?.id || correction?.operationId || null,
+      operationNo: operation?.operationNo || null,
+      operationType: operation?.type || null,
+      fieldName: correction?.fieldName || null,
+      oldValue: this.fromJsonValue(correction?.oldValue),
+      newValue: this.fromJsonValue(correction?.newValue),
+      reason: correction?.reason || null,
+      projectIdAtOperation: operation?.projectIdAtOperation || null,
+      projectNameAtOperation: operation?.projectNameAtOperation || null,
+      sourceProjectIdAtOperation:
+        operation?.sourceProjectIdAtOperation || null,
+      sourceProjectNameAtOperation:
+        operation?.sourceProjectNameAtOperation || null,
+      destinationProjectIdAtOperation:
+        operation?.destinationProjectIdAtOperation || null,
+      destinationProjectNameAtOperation:
+        operation?.destinationProjectNameAtOperation || null,
+    };
+  }
+
+  private async getCorrectionApproverUserIds(
+    operation: any,
+    companyId: string,
+  ): Promise<string[]> {
+    const projectIds = Array.from(
+      new Set(
+        [
+          operation?.projectIdAtOperation,
+          operation?.sourceProjectIdAtOperation,
+          operation?.destinationProjectIdAtOperation,
+        ]
+          .map((value) => String(value || '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (!projectIds.length) return [];
+
+    const projects = await (this.prisma as any).project.findMany({
+      where: {
+        id: { in: projectIds },
+        companyId,
+        deletedAt: null,
+      },
+      select: {
+        projectManagerId: true,
+      },
+    });
+
+    const managerIds = Array.from(
+      new Set(
+        projects
+          .map((project: any) =>
+            String(project?.projectManagerId || '').trim(),
+          )
+          .filter(Boolean),
+      ),
+    );
+
+    if (!managerIds.length) return [];
+
+    const activeManagers = await (this.prisma as any).user.findMany({
+      where: {
+        id: { in: managerIds },
+        companyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: { id: true },
+    });
+
+    return activeManagers.map((user: any) => user.id);
+  }
 
   async create(dto: CreateOperationCorrectionDto, request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(request);
@@ -119,6 +264,32 @@ export class OperationCorrectionsService {
         where: { id: correctionId },
         include: this.correctionInclude(),
       });
+
+      if (correction) {
+        const approverUserIds = await this.getCorrectionApproverUserIds(
+          operation,
+          currentUser.companyId,
+        );
+
+        const operationNo = String(
+          operation.operationNo || operation.id || '',
+        ).trim();
+
+        const metadata = this.operationCorrectionNotificationMetadata(
+          correction,
+          operation,
+        );
+
+        for (const recipientUserId of approverUserIds) {
+          await this.sendCorrectionApprovalRequiredBestEffort({
+            recipientUserId,
+            correctionId: correction.id,
+            operationNo,
+            requestedByName: currentUser.fullName,
+            metadata,
+          });
+        }
+      }
 
       return {
         ok: true,
@@ -1366,6 +1537,34 @@ export class OperationCorrectionsService {
         include: this.correctionInclude(),
       });
 
+      const approverUserIds = await this.getCorrectionApproverUserIds(
+        correction.operation,
+        currentUser.companyId,
+      );
+
+      await this.sendCorrectionApprovalResultsBestEffort({
+        recipientUserIds: [
+          correction.requestedByUserId,
+          currentUser.id,
+          ...approverUserIds,
+        ],
+        correctionId: correction.id,
+        operationNo: String(
+          correction.operation?.operationNo ||
+            correction.operation?.id ||
+            correction.operationId ||
+            '',
+        ).trim(),
+        status: 'REJECTED',
+        metadata: {
+          ...this.operationCorrectionNotificationMetadata(
+            correction,
+            correction.operation,
+          ),
+          reviewNote: dto.note || null,
+        },
+      });
+
       return {
         ok: true,
         message: 'Operation correction rejected.',
@@ -1403,6 +1602,34 @@ export class OperationCorrectionsService {
     const result = await (this.prisma as any).operationCorrection.findUnique({
       where: { id: correction.id },
       include: this.correctionInclude(),
+    });
+
+    const approverUserIds = await this.getCorrectionApproverUserIds(
+      correction.operation,
+      currentUser.companyId,
+    );
+
+    await this.sendCorrectionApprovalResultsBestEffort({
+      recipientUserIds: [
+        correction.requestedByUserId,
+        currentUser.id,
+        ...approverUserIds,
+      ],
+      correctionId: correction.id,
+      operationNo: String(
+        correction.operation?.operationNo ||
+          correction.operation?.id ||
+          correction.operationId ||
+          '',
+      ).trim(),
+      status: 'APPROVED',
+      metadata: {
+        ...this.operationCorrectionNotificationMetadata(
+          correction,
+          correction.operation,
+        ),
+        reviewNote: dto.note || null,
+      },
     });
 
     return {
