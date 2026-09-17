@@ -754,30 +754,38 @@ model StationStockMovement {
 }
 
 model Operation {
-  id                                String                   @id @default(cuid())
-  companyId                         String
-  operationNo                       String
-  clientOperationId                 String?
-  type                              OperationType
-  status                            OperationStatus          @default(COMPLETED)
-  sourceStationId                   String?
-  destinationStationId              String?
-  assetId                           String?
-  quantity                          Float
-  odometer                          Float?
-  stationCounter                    Float?
-  externalStationName               String?
-  invoiceNumber                     String?
-  notes                             String?
-  attachments                       Json?
-  requestedByUserId                 String
-  fuelerEmployeeIdAtOperation       String?
-  fuelerNameAtOperation             String?
-  completedAt                       DateTime?
-  approvedAt                        DateTime?
-  rejectedAt                        DateTime?
-  cancelledAt                       DateTime?
-  occurredAt                        DateTime                 @default(now())
+  id                          String          @id @default(cuid())
+  companyId                   String
+  operationNo                 String
+  clientOperationId           String?
+  type                        OperationType
+  status                      OperationStatus @default(COMPLETED)
+  sourceStationId             String?
+  destinationStationId        String?
+  assetId                     String?
+  quantity                    Float
+  odometer                    Float?
+  stationCounter              Float?
+  externalStationName         String?
+  invoiceNumber               String?
+  notes                       String?
+  attachments                 Json?
+  requestedByUserId           String
+  fuelerEmployeeIdAtOperation String?
+  fuelerNameAtOperation       String?
+  completedAt                 DateTime?
+  approvedAt                  DateTime?
+  rejectedAt                  DateTime?
+  cancelledAt                 DateTime?
+  occurredAt                  DateTime        @default(now())
+
+  // Immutable operation-location snapshot captured at the real-world operation time.
+  // Nullable for Web operations, historical data, and Mobile capture failures.
+  locationLatitude   Float?
+  locationLongitude  Float?
+  locationAccuracy   Float?
+  locationCapturedAt DateTime?
+
   createdAt                         DateTime                 @default(now())
   updatedAt                         DateTime                 @updatedAt
   fuelPriceHistoryId                String?

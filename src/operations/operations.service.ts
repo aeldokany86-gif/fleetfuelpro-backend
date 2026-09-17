@@ -86,6 +86,13 @@ type OperationProjectSnapshot = {
   destinationProjectNameAtOperation: string | null;
 };
 
+type OperationLocationSnapshot = {
+  locationLatitude: number | null;
+  locationLongitude: number | null;
+  locationAccuracy: number | null;
+  locationCapturedAt: Date | null;
+};
+
 @Injectable()
 export class OperationsService {
   constructor(
@@ -1405,6 +1412,89 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     );
   }
 
+  private buildOperationLocationSnapshot(
+    dto: CreateOperationDto,
+  ): OperationLocationSnapshot {
+    const hasLatitude = dto.locationLatitude !== undefined && dto.locationLatitude !== null;
+    const hasLongitude = dto.locationLongitude !== undefined && dto.locationLongitude !== null;
+    const hasAccuracy = dto.locationAccuracy !== undefined && dto.locationAccuracy !== null;
+    const hasCapturedAt =
+      dto.locationCapturedAt !== undefined &&
+      dto.locationCapturedAt !== null &&
+      String(dto.locationCapturedAt).trim() !== '';
+
+    const hasAnyLocationValue =
+      hasLatitude || hasLongitude || hasAccuracy || hasCapturedAt;
+
+    if (!hasAnyLocationValue) {
+      return {
+        locationLatitude: null,
+        locationLongitude: null,
+        locationAccuracy: null,
+        locationCapturedAt: null,
+      };
+    }
+
+    if (!hasLatitude || !hasLongitude) {
+      throw new BadRequestException(
+        'Location snapshot requires both latitude and longitude.',
+      );
+    }
+
+    const latitude = Number(dto.locationLatitude);
+    const longitude = Number(dto.locationLongitude);
+
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+      throw new BadRequestException(
+        'locationLatitude must be between -90 and 90.',
+      );
+    }
+
+    if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      throw new BadRequestException(
+        'locationLongitude must be between -180 and 180.',
+      );
+    }
+
+    let accuracy: number | null = null;
+    if (hasAccuracy) {
+      accuracy = Number(dto.locationAccuracy);
+      if (!Number.isFinite(accuracy) || accuracy < 0) {
+        throw new BadRequestException(
+          'locationAccuracy must be a valid non-negative number.',
+        );
+      }
+    }
+
+    if (!hasCapturedAt) {
+      throw new BadRequestException(
+        'locationCapturedAt is required when operation coordinates are supplied.',
+      );
+    }
+
+    const capturedAt = new Date(String(dto.locationCapturedAt));
+    if (Number.isNaN(capturedAt.getTime())) {
+      throw new BadRequestException(
+        'locationCapturedAt must be a valid ISO date-time.',
+      );
+    }
+
+    // Small clock-skew allowance only. A snapshot timestamp far in the future
+    // cannot represent the actual field location of this operation.
+    if (capturedAt.getTime() > Date.now() + 5 * 60 * 1000) {
+      throw new BadRequestException(
+        'locationCapturedAt cannot be in the future.',
+      );
+    }
+
+    return {
+      locationLatitude: latitude,
+      locationLongitude: longitude,
+      locationAccuracy: accuracy,
+      locationCapturedAt: capturedAt,
+    };
+  }
+
   private async createPersistedOperation(
     dto: CreateOperationDto,
     currentUser: CurrentUserContext,
@@ -1418,6 +1508,8 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     if (Number.isNaN(occurredAt.getTime())) {
       throw new BadRequestException('occurredAt must be a valid ISO date-time.');
     }
+
+    const locationSnapshot = this.buildOperationLocationSnapshot(dto);
 
     const entities = await this.loadAndValidateEntities(
       this.prisma as any,
@@ -1552,6 +1644,10 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
               fuelerEmployeeIdAtOperation: currentUser.fuelerEmployeeId,
               fuelerNameAtOperation: currentUser.fuelerName,
               occurredAt,
+              locationLatitude: locationSnapshot.locationLatitude,
+              locationLongitude: locationSnapshot.locationLongitude,
+              locationAccuracy: locationSnapshot.locationAccuracy,
+              locationCapturedAt: locationSnapshot.locationCapturedAt,
               completedAt,
               approvedAt:
                 status === 'COMPLETED' || status === 'PARTIALLY_APPROVED'
@@ -1805,6 +1901,10 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         assetId: dto.assetId || null,
         currentProjectId: dto.currentProjectId || null,
         clientOperationId: dto.clientOperationId || null,
+        locationLatitude: dto.locationLatitude ?? null,
+        locationLongitude: dto.locationLongitude ?? null,
+        locationAccuracy: dto.locationAccuracy ?? null,
+        locationCapturedAt: dto.locationCapturedAt || null,
         quantity: dto.quantity,
         odometer: dto.odometer ?? null,
         stationCounter: dto.stationCounter ?? null,

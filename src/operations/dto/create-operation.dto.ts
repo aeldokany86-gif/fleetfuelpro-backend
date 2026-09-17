@@ -5,6 +5,8 @@ import {
   IsNumber,
   IsOptional,
   IsPositive,
+  Max,
+  Min,
   IsString,
   MaxLength,
 } from 'class-validator';
@@ -78,6 +80,37 @@ export class CreateOperationDto {
   @IsOptional()
   @IsDateString()
   occurredAt?: string;
+
+  /*
+    Immutable operation-location snapshot.
+
+    Mobile captures these automatically when the operation is recorded.
+    Web clients may omit them. Mobile may also omit them when location capture
+    genuinely fails; the operation must still be allowed to continue.
+
+    If coordinates are supplied, the service requires a complete valid pair and
+    a real capture timestamp. Accuracy is optional and expressed in meters.
+  */
+  @IsOptional()
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  locationLatitude?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  locationLongitude?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  locationAccuracy?: number;
+
+  @IsOptional()
+  @IsDateString()
+  locationCapturedAt?: string;
 
   /*
     Client-generated idempotency key.
