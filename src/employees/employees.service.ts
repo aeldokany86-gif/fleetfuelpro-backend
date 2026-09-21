@@ -64,6 +64,201 @@ export class EmployeesService {
     );
   }
 
+
+  private normalizeCompanyCode(value?: string | null) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
+  private buildUsername(company: any, employeeId: string) {
+    const companyCode =
+      this.normalizeCompanyCode(company?.code) ||
+      this.normalizeCompanyCode(company?.name) ||
+      this.normalizeCompanyCode(company?.id);
+
+    const normalizedEmployeeId = String(employeeId || '')
+      .trim()
+      .toLowerCase();
+
+    if (!companyCode || !normalizedEmployeeId) {
+      throw new BadRequestException(
+        'Username cannot be generated without company code and employee ID',
+      );
+    }
+
+    return `${companyCode}.${normalizedEmployeeId}`;
+  }
+
+  private async validateEmployeeIdCorrection(
+    existing: any,
+    newEmployeeId: string,
+    actorCompanyId?: string,
+    actorRoleName?: string,
+  ) {
+    const normalizedActorRole = this.normalizeRoleName(actorRoleName);
+    const actorIsPlatformUser = this.isPlatformUser(actorRoleName);
+    const actorIsCompanyAdmin = normalizedActorRole === 'admin';
+
+    if (!actorIsPlatformUser && !actorIsCompanyAdmin) {
+      throw new BadRequestException(
+        'Only Admin can change Employee ID',
+      );
+    }
+
+    if (
+      actorIsCompanyAdmin &&
+      (!actorCompanyId || actorCompanyId !== existing.companyId)
+    ) {
+      throw new BadRequestException(
+        'Admin can change Employee ID only inside their own company',
+      );
+    }
+
+    if (actorIsPlatformUser) {
+      const linkedRole = this.normalizeRoleName(
+        existing.linkedUser?.role?.name,
+      );
+
+      if (!existing.linkedUserId || linkedRole !== 'admin') {
+        throw new BadRequestException(
+          'Platform User can change Employee ID only for the first company Admin',
+        );
+      }
+
+      const firstCompanyUser = await this.prisma.user.findFirst({
+        where: {
+          companyId: existing.companyId,
+        },
+        orderBy: [
+          { createdAt: 'asc' },
+          { id: 'asc' },
+        ],
+        select: { id: true },
+      });
+
+      if (!firstCompanyUser || firstCompanyUser.id !== existing.linkedUserId) {
+        throw new BadRequestException(
+          'Platform User can change Employee ID only for the first company Admin',
+        );
+      }
+    }
+
+    const duplicateEmployee = await this.prisma.employee.findFirst({
+      where: {
+        companyId: existing.companyId,
+        employeeId: newEmployeeId,
+        id: { not: existing.id },
+      },
+      select: {
+        id: true,
+        deletedAt: true,
+      },
+    });
+
+    if (duplicateEmployee) {
+      throw new BadRequestException(
+        duplicateEmployee.deletedAt
+          ? 'This Employee ID was previously used and cannot be reused'
+          : 'Employee ID already exists',
+      );
+    }
+
+    const operationIdentityWhere: any[] = [
+      {
+        fuelerEmployeeIdAtOperation: {
+          equals: existing.employeeId,
+          mode: 'insensitive',
+        },
+      },
+    ];
+
+    if (existing.linkedUserId) {
+      operationIdentityWhere.push({
+        requestedByUserId: existing.linkedUserId,
+      });
+    }
+
+    const [
+      transferCount,
+      additionalProjectAssignmentCount,
+      projectRemovalRequestCount,
+      operationCount,
+    ] = await this.prisma.$transaction([
+      this.prisma.employeeTransferRequest.count({
+        where: { employeeId: existing.id },
+      }),
+      this.prisma.employeeProjectAssignment.count({
+        where: { employeeId: existing.id },
+      }),
+      this.prisma.employeeProjectRemovalRequest.count({
+        where: { employeeId: existing.id },
+      }),
+      this.prisma.operation.count({
+        where: {
+          companyId: existing.companyId,
+          OR: operationIdentityWhere,
+        },
+      }),
+    ]);
+
+    if (
+      transferCount > 0 ||
+      additionalProjectAssignmentCount > 0 ||
+      projectRemovalRequestCount > 0 ||
+      operationCount > 0
+    ) {
+      throw new BadRequestException(
+        'Employee ID cannot be changed because this employee already has operational or workflow history',
+      );
+    }
+
+    let nextUsername: string | null = null;
+
+    if (existing.linkedUserId) {
+      const company = await this.prisma.company.findUnique({
+        where: { id: existing.companyId },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+        },
+      });
+
+      if (!company) {
+        throw new BadRequestException('Employee company was not found');
+      }
+
+      nextUsername = this.buildUsername(company, newEmployeeId);
+
+      const conflictingUser = await this.prisma.user.findFirst({
+        where: {
+          id: { not: existing.linkedUserId },
+          deletedAt: null,
+          OR: [
+            { username: nextUsername },
+            {
+              companyId: existing.companyId,
+              employeeId: newEmployeeId,
+            },
+          ],
+        },
+        select: { id: true },
+      });
+
+      if (conflictingUser) {
+        throw new BadRequestException(
+          'The new Employee ID conflicts with an existing user account',
+        );
+      }
+    }
+
+    return { nextUsername };
+  }
+
   async checkEmployeeIdAvailability(
     employeeIdValue: string,
     requestedCompanyId: string | undefined,
@@ -493,9 +688,49 @@ export class EmployeesService {
   async update(
     id: string,
     updateEmployeeDto: UpdateEmployeeDto,
+    _actorUserId?: string,
+    actorCompanyId?: string,
+    actorRoleName?: string,
   ) {
-    const existing =
-      await this.findOne(id);
+    const existing = await this.findOne(id);
+
+    const normalizedRequestedEmployeeId =
+      updateEmployeeDto.employeeId !== undefined
+        ? this.normalizeEmployeeId(updateEmployeeDto.employeeId)
+        : undefined;
+
+    if (
+      updateEmployeeDto.employeeId !== undefined &&
+      !normalizedRequestedEmployeeId
+    ) {
+      throw new BadRequestException('Employee ID is required');
+    }
+
+    const isEmployeeIdChanging =
+      normalizedRequestedEmployeeId !== undefined &&
+      normalizedRequestedEmployeeId !== existing.employeeId;
+
+    if (
+      isEmployeeIdChanging &&
+      updateEmployeeDto.linkedUserId !== undefined &&
+      updateEmployeeDto.linkedUserId !== existing.linkedUserId
+    ) {
+      throw new BadRequestException(
+        'Employee ID and linked user cannot be changed in the same request',
+      );
+    }
+
+    let nextUsername: string | null = null;
+
+    if (isEmployeeIdChanging) {
+      const correction = await this.validateEmployeeIdCorrection(
+        existing,
+        normalizedRequestedEmployeeId!,
+        actorCompanyId,
+        actorRoleName,
+      );
+      nextUsername = correction.nextUsername;
+    }
 
     const isRetiring =
       updateEmployeeDto.status ===
@@ -514,86 +749,6 @@ export class EmployeesService {
       );
     }
 
-    const employeeUpdate =
-      this.prisma.employee.update({
-      where: {
-        id: existing.id,
-      },
-
-      data: {
-        ...(isRetiring
-          ? {
-              deletedAt: retiredAt,
-            }
-          : {}),
-
-        ...(updateEmployeeDto.name !==
-        undefined
-          ? {
-              name:
-                updateEmployeeDto.name.trim(),
-            }
-          : {}),
-
-        ...(updateEmployeeDto.phone !==
-        undefined
-          ? {
-              phone:
-                updateEmployeeDto.phone?.trim() ||
-                null,
-            }
-          : {}),
-
-        ...(updateEmployeeDto.email !==
-        undefined
-          ? {
-              email:
-                updateEmployeeDto.email?.trim() ||
-                null,
-            }
-          : {}),
-
-        ...(updateEmployeeDto.status !==
-        undefined
-          ? {
-              status:
-                updateEmployeeDto.status,
-            }
-          : {}),
-
-        ...(updateEmployeeDto.linkedUserId !==
-        undefined
-          ? {
-              linkedUserId:
-                updateEmployeeDto.linkedUserId ||
-                null,
-            }
-          : {}),
-
-        ...(updateEmployeeDto.jobTitle !==
-        undefined
-          ? {
-              jobTitle:
-                updateEmployeeDto.jobTitle ||
-                'Operator',
-            }
-          : {}),
-      },
-
-      include: {
-        project: true,
-
-        linkedUser: {
-          select: {
-            id: true,
-            fullName: true,
-            email: true,
-            isActive: true,
-          },
-        },
-      },
-    });
-
     const normalizedUpdatedName =
       updateEmployeeDto.name !== undefined
         ? updateEmployeeDto.name.trim()
@@ -607,17 +762,82 @@ export class EmployeesService {
       isRetiring &&
       Boolean(existing.linkedUserId);
 
-    if (
-      !shouldSyncLinkedUserName &&
-      !shouldDeactivateLinkedUser
-    ) {
-      return employeeUpdate;
-    }
+    const shouldSyncLinkedUserIdentity =
+      isEmployeeIdChanging &&
+      Boolean(existing.linkedUserId);
+
+    const employeeData: any = {
+      ...(isRetiring
+        ? {
+            deletedAt: retiredAt,
+          }
+        : {}),
+
+      ...(isEmployeeIdChanging
+        ? {
+            employeeId: normalizedRequestedEmployeeId,
+          }
+        : {}),
+
+      ...(updateEmployeeDto.name !==
+      undefined
+        ? {
+            name:
+              updateEmployeeDto.name.trim(),
+          }
+        : {}),
+
+      ...(updateEmployeeDto.phone !==
+      undefined
+        ? {
+            phone:
+              updateEmployeeDto.phone?.trim() ||
+              null,
+          }
+        : {}),
+
+      ...(updateEmployeeDto.email !==
+      undefined
+        ? {
+            email:
+              updateEmployeeDto.email?.trim() ||
+              null,
+          }
+        : {}),
+
+      ...(updateEmployeeDto.status !==
+      undefined
+        ? {
+            status:
+              updateEmployeeDto.status,
+          }
+        : {}),
+
+      ...(updateEmployeeDto.linkedUserId !==
+      undefined
+        ? {
+            linkedUserId:
+              updateEmployeeDto.linkedUserId ||
+              null,
+          }
+        : {}),
+
+      ...(updateEmployeeDto.jobTitle !==
+      undefined
+        ? {
+            jobTitle:
+              updateEmployeeDto.jobTitle ||
+              'Operator',
+          }
+        : {}),
+    };
 
     const userUpdateData: {
       fullName?: string;
       isActive?: boolean;
       deletedAt?: Date | null;
+      employeeId?: string;
+      username?: string;
     } = {};
 
     if (shouldSyncLinkedUserName) {
@@ -630,19 +850,73 @@ export class EmployeesService {
       userUpdateData.deletedAt = retiredAt;
     }
 
-    const [updatedEmployee] =
-      await this.prisma.$transaction([
-        employeeUpdate,
-        this.prisma.user.updateMany({
-          where: {
-            id: existing.linkedUserId!,
-            deletedAt: null,
-          },
-          data: userUpdateData,
-        }),
-      ]);
+    if (shouldSyncLinkedUserIdentity) {
+      userUpdateData.employeeId =
+        normalizedRequestedEmployeeId;
+      userUpdateData.username = nextUsername!;
+    }
 
-    return updatedEmployee;
+    const shouldUpdateLinkedUser =
+      Boolean(existing.linkedUserId) &&
+      Object.keys(userUpdateData).length > 0;
+
+    if (!shouldUpdateLinkedUser) {
+      return this.prisma.employee.update({
+        where: {
+          id: existing.id,
+        },
+        data: employeeData,
+        include: {
+          project: true,
+          linkedUser: {
+            select: {
+              id: true,
+              fullName: true,
+              email: true,
+              isActive: true,
+              employeeId: true,
+              username: true,
+            },
+          },
+        },
+      });
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.employee.update({
+        where: {
+          id: existing.id,
+        },
+        data: employeeData,
+      });
+
+      await tx.user.updateMany({
+        where: {
+          id: existing.linkedUserId!,
+          deletedAt: null,
+        },
+        data: userUpdateData,
+      });
+
+      return tx.employee.findUnique({
+        where: {
+          id: existing.id,
+        },
+        include: {
+          project: true,
+          linkedUser: {
+            select: {
+              id: true,
+              fullName: true,
+              email: true,
+              isActive: true,
+              employeeId: true,
+              username: true,
+            },
+          },
+        },
+      });
+    });
   }
 
   private async getProjectAssignmentActor(

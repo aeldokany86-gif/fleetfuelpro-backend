@@ -156,14 +156,19 @@ export class EmployeesController {
     );
   }
 
+  @UseGuards(AuthGuard('jwt'))
   @Patch(':id')
   update(
     @Param('id') id: string,
     @Body() updateEmployeeDto: UpdateEmployeeDto,
+    @Request() req,
   ) {
     return this.employeesService.update(
       id,
       updateEmployeeDto,
+      req.user.userId || req.user.id || req.user.sub,
+      req.user.companyId,
+      req.user.roleName || req.user.role || req.user.roleNameNormalized,
     );
   }
 
