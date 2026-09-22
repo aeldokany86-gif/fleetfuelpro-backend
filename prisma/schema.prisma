@@ -243,7 +243,7 @@ model User {
   companyId                        String
   roleId                           String
   fullName                         String
-  email                            String?                         @unique
+  email                            String?
   phone                            String?
   passwordHash                     String
   isActive                         Boolean                         @default(true)
@@ -298,6 +298,7 @@ model User {
   role                             Role                            @relation(fields: [roleId], references: [id])
 
   @@unique([companyId, employeeId])
+  @@unique([companyId, email])
   @@index([companyId])
   @@index([roleId])
   @@index([employeeId])

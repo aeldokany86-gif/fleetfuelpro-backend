@@ -422,13 +422,14 @@ export class UsersService {
     if (email) {
       const existingUser = await this.prisma.user.findFirst({
         where: {
+          companyId: targetCompanyId,
           email,
           deletedAt: null,
         },
       });
 
       if (existingUser) {
-        throw new BadRequestException('Email already exists');
+        throw new BadRequestException('Email already exists in this company');
       }
     }
 
@@ -544,6 +545,7 @@ export class UsersService {
     if (nextEmail && nextEmail !== user.email) {
       const existingUser = await this.prisma.user.findFirst({
         where: {
+          companyId: user.companyId,
           email: nextEmail,
           deletedAt: null,
           NOT: {
@@ -553,7 +555,7 @@ export class UsersService {
       });
 
       if (existingUser) {
-        throw new BadRequestException('Email already exists');
+        throw new BadRequestException('Email already exists in this company');
       }
     }
 
