@@ -1095,6 +1095,100 @@ export class OperationsService {
     };
   }
 
+async getMobileMyOperations(request?: RequestLike) {
+  /*
+    Mobile "My Operations" history.
+
+    Security / scope rules:
+    - The authenticated user identity always comes from the JWT request.
+    - The client cannot choose another userId, employeeId, companyId, projectId,
+      or date range.
+    - Only operations created by the authenticated user are returned.
+    - The window is a rolling 24 hours based on the operation occurredAt value,
+      not the later server sync/create time.
+    - Return only the compact fields required by the Mobile review screen.
+  */
+  const currentUser = await this.resolveAuthenticatedCurrentUser(request);
+
+  if (!currentUser.companyId) {
+    throw new UnauthorizedException(
+      'Authenticated user company was not found.',
+    );
+  }
+
+  const windowTo = new Date();
+  const windowFrom = new Date(windowTo.getTime() - 24 * 60 * 60 * 1000);
+
+  const operations = await (this.prisma as any).operation.findMany({
+    where: {
+      companyId: currentUser.companyId,
+      requestedByUserId: currentUser.id,
+      occurredAt: {
+        gte: windowFrom,
+        lte: windowTo,
+      },
+    },
+
+    select: {
+      operationNo: true,
+      type: true,
+      status: true,
+      quantity: true,
+      occurredAt: true,
+      odometer: true,
+      stationCounter: true,
+      asset: {
+        select: {
+          assetId: true,
+        },
+      },
+      destinationStation: {
+        select: {
+          stationId: true,
+        },
+      },
+    },
+
+    orderBy: [
+      { occurredAt: 'desc' },
+      { createdAt: 'desc' },
+    ],
+  });
+
+  const compactOperations = operations.map((operation: any) => {
+    const isAssetOperation = [
+      'DIRECT_REFUEL',
+      'EXTERNAL_DIRECT_REFUEL',
+    ].includes(String(operation.type || '').toUpperCase());
+
+    return {
+      operationNo: operation.operationNo,
+      type: operation.type,
+      status: operation.status,
+      quantity: Number(operation.quantity),
+      occurredAt: operation.occurredAt,
+      targetIdentifier: isAssetOperation
+        ? operation.asset?.assetId || null
+        : operation.destinationStation?.stationId || null,
+      destinationMeter: isAssetOperation
+        ? operation.odometer == null
+          ? null
+          : Number(operation.odometer)
+        : operation.stationCounter == null
+          ? null
+          : Number(operation.stationCounter),
+    };
+  });
+
+  return {
+    windowHours: 24,
+    windowFrom: windowFrom.toISOString(),
+    windowTo: windowTo.toISOString(),
+    count: compactOperations.length,
+    operations: compactOperations,
+  };
+}
+
 async findAll(request?: RequestLike) {
   const startedAt = Date.now();
 

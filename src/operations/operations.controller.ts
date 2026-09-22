@@ -42,6 +42,12 @@ export class OperationsController {
     );
   }
 
+  @Get('mobile-my-operations')
+  @UseGuards(AuthGuard('jwt'))
+  getMobileMyOperations(@Req() req: any) {
+    return this.operationsService.getMobileMyOperations(req);
+  }
+
   @Get('events/stream')
   @UseGuards(AuthGuard('jwt'))
   async streamOperationEvents(@Req() req: any, @Res() res: Response) {
