@@ -181,7 +181,7 @@ const DEFAULT_ROLE_PERMISSIONS: Record<string, string[]> = {
 export class CompaniesService {
   constructor(private prisma: PrismaService) {}
 
-  private async ensureDefaultRolesAndPermissionsForCompany(companyId: string) {
+  private async ensureGlobalCustomerRolesAndPermissions() {
     const permissions: Record<string, { id: string }> = {};
 
     for (const [key, name] of DEFAULT_PERMISSIONS) {
@@ -200,21 +200,34 @@ export class CompaniesService {
     const roles: Record<string, { id: string }> = {};
 
     for (const [name, description] of DEFAULT_COMPANY_ROLES) {
-      const role = await this.prisma.role.upsert({
+      let role = await this.prisma.role.findFirst({
         where: {
-          companyId_name: {
-            companyId,
-            name,
-          },
-        },
-        update: { description },
-        create: {
-          companyId,
+          companyId: null,
           name,
-          description,
-          isSystemRole: true,
+        },
+        orderBy: {
+          createdAt: 'asc',
         },
       });
+
+      if (!role) {
+        role = await this.prisma.role.create({
+          data: {
+            companyId: null,
+            name,
+            description,
+            isSystemRole: true,
+          },
+        });
+      } else {
+        role = await this.prisma.role.update({
+          where: { id: role.id },
+          data: {
+            description,
+            isSystemRole: true,
+          },
+        });
+      }
 
       roles[name] = role;
     }
@@ -517,7 +530,7 @@ export class CompaniesService {
       },
     });
 
-    await this.ensureDefaultRolesAndPermissionsForCompany(company.id);
+    await this.ensureGlobalCustomerRolesAndPermissions();
 
     return company;
   }
@@ -532,6 +545,19 @@ export class CompaniesService {
 
     if (!company) {
       throw new NotFoundException('Company not found');
+    }
+
+    const isPlatformCompany =
+      String(company.code || '').trim().toUpperCase() === 'PLATFORM';
+
+    if (
+      isPlatformCompany &&
+      dto.code !== undefined &&
+      String(dto.code || '').trim().toUpperCase() !== 'PLATFORM'
+    ) {
+      throw new BadRequestException(
+        'Platform company code is fixed and cannot be changed',
+      );
     }
 
     if (dto.code && dto.code !== company.code) {

@@ -186,18 +186,19 @@ export class RolesService {
     return normalizedRole === 'platformuser' || normalizedRole === 'platformadmin';
   }
 
-  private async ensureDefaultRolesForCompany(companyId: string) {
-    const company = await this.prisma.company.findFirst({
-      where: {
-        id: companyId,
-        deletedAt: null,
-      },
-    });
+  private isPlatformConsoleCompany(company?: any) {
+    const normalizedId = this.normalizeRoleName(company?.id || '');
+    const normalizedCode = this.normalizeRoleName(company?.code || '');
+    const normalizedName = this.normalizeRoleName(company?.name || '');
 
-    if (!company) {
-      throw new NotFoundException('Company not found');
-    }
+    return (
+      normalizedId === 'platform' ||
+      normalizedCode === 'platform' ||
+      normalizedName === 'platformconsole'
+    );
+  }
 
+  private async ensurePermissions() {
     const permissions: Record<string, { id: string }> = {};
 
     for (const [key, name] of PERMISSIONS_DATA) {
@@ -213,61 +214,123 @@ export class RolesService {
       permissions[key] = permission;
     }
 
-    for (const [name, description] of DEFAULT_COMPANY_ROLES) {
-      const role = await this.prisma.role.upsert({
+    return permissions;
+  }
+
+  private async syncRolePermissions(
+    roleId: string,
+    permissionKeys: string[],
+    permissions: Record<string, { id: string }>,
+  ) {
+    const allowedPermissionIds = permissionKeys
+      .map((key) => permissions[key]?.id)
+      .filter(Boolean);
+
+    await this.prisma.rolePermission.deleteMany({
+      where: {
+        roleId,
+        permissionId: {
+          notIn: allowedPermissionIds,
+        },
+      },
+    });
+
+    for (const permissionKey of permissionKeys) {
+      const permission = permissions[permissionKey];
+
+      if (!permission) {
+        throw new BadRequestException(
+          `Permission not found: ${permissionKey}`,
+        );
+      }
+
+      await this.prisma.rolePermission.upsert({
         where: {
-          companyId_name: {
-            companyId,
-            name,
-          },
-        },
-        update: { description },
-        create: {
-          companyId,
-          name,
-          description,
-          isSystemRole: true,
-        },
-      });
-
-      const permissionKeys = ROLE_PERMISSIONS[name] || [];
-      const allowedPermissionIds = permissionKeys
-        .map((key) => permissions[key]?.id)
-        .filter(Boolean);
-
-      await this.prisma.rolePermission.deleteMany({
-        where: {
-          roleId: role.id,
-          permissionId: {
-            notIn: allowedPermissionIds,
-          },
-        },
-      });
-
-      for (const permissionKey of permissionKeys) {
-        const permission = permissions[permissionKey];
-
-        if (!permission) {
-          throw new BadRequestException(
-            `Permission not found: ${permissionKey}`,
-          );
-        }
-
-        await this.prisma.rolePermission.upsert({
-          where: {
-            roleId_permissionId: {
-              roleId: role.id,
-              permissionId: permission.id,
-            },
-          },
-          update: {},
-          create: {
-            roleId: role.id,
+          roleId_permissionId: {
+            roleId,
             permissionId: permission.id,
+          },
+        },
+        update: {},
+        create: {
+          roleId,
+          permissionId: permission.id,
+        },
+      });
+    }
+  }
+
+  private async ensureGlobalCustomerRoles() {
+    const permissions = await this.ensurePermissions();
+
+    for (const [name, description] of DEFAULT_COMPANY_ROLES) {
+      let role = await this.prisma.role.findFirst({
+        where: {
+          companyId: null,
+          name,
+        },
+        orderBy: {
+          createdAt: 'asc',
+        },
+      });
+
+      if (!role) {
+        role = await this.prisma.role.create({
+          data: {
+            companyId: null,
+            name,
+            description,
+            isSystemRole: true,
+          },
+        });
+      } else {
+        role = await this.prisma.role.update({
+          where: { id: role.id },
+          data: {
+            description,
+            isSystemRole: true,
           },
         });
       }
+
+      await this.syncRolePermissions(
+        role.id,
+        ROLE_PERMISSIONS[name] || [],
+        permissions,
+      );
     }
+  }
+
+  private async ensurePlatformRole(company: any) {
+    if (!this.isPlatformConsoleCompany(company)) {
+      throw new BadRequestException('Platform Console company is required');
+    }
+
+    let role = await this.prisma.role.findFirst({
+      where: {
+        companyId: company.id,
+        name: {
+          equals: 'Platform User',
+          mode: 'insensitive',
+        },
+      },
+      orderBy: {
+        createdAt: 'asc',
+      },
+    });
+
+    if (!role) {
+      role = await this.prisma.role.create({
+        data: {
+          companyId: company.id,
+          name: 'Platform User',
+          description: 'Platform-level access only',
+          isSystemRole: true,
+        },
+      });
+    }
+
+    return role;
   }
 
   async findAll(
@@ -283,22 +346,39 @@ export class RolesService {
       throw new BadRequestException('Company ID is required');
     }
 
-    const existingRoleCount = await this.prisma.role.count({
+    const targetCompany = await this.prisma.company.findFirst({
       where: {
-        companyId: targetCompanyId,
-        name: {
-          in: DEFAULT_COMPANY_ROLES.map(([name]) => name),
-        },
+        id: targetCompanyId,
+        deletedAt: null,
+        isActive: true,
       },
     });
 
-    if (existingRoleCount < DEFAULT_COMPANY_ROLES.length) {
-      await this.ensureDefaultRolesForCompany(targetCompanyId);
+    if (!targetCompany) {
+      throw new NotFoundException('Company not found');
     }
+
+    if (this.isPlatformConsoleCompany(targetCompany)) {
+      const platformRole = await this.ensurePlatformRole(targetCompany);
+
+      return this.prisma.role.findMany({
+        where: {
+          id: platformRole.id,
+        },
+        orderBy: {
+          name: 'asc',
+        },
+      });
+    }
+
+    await this.ensureGlobalCustomerRoles();
 
     return this.prisma.role.findMany({
       where: {
-        companyId: targetCompanyId,
+        companyId: null,
+        name: {
+          in: DEFAULT_COMPANY_ROLES.map(([name]) => name),
+        },
       },
       orderBy: {
         name: 'asc',

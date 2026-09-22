@@ -11,6 +11,15 @@ import { ResetUserPasswordDto } from './dto/reset-user-password.dto';
 
 import * as bcrypt from 'bcryptjs';
 
+const CUSTOMER_ROLE_NAMES = [
+  'Top Management',
+  'Admin',
+  'Manager',
+  'Supervisor',
+  'Officer',
+  'Operator',
+] as const;
+
 @Injectable()
 export class UsersService {
   constructor(private prisma: PrismaService) {}
@@ -154,75 +163,71 @@ export class UsersService {
 
   private async validateRoleForCompany(roleIdOrName: string, company: any) {
     const rawRoleValue = String(roleIdOrName || '').trim();
-    const normalizedRoleValue = this.normalizeRoleName(rawRoleValue);
 
     if (!rawRoleValue) {
       throw new BadRequestException('Selected role is not valid');
     }
 
-    const selectedRole = await this.prisma.role.findFirst({
-      where: {
-        OR: [
-          { id: rawRoleValue },
-          {
+    const targetIsPlatformConsole = this.isPlatformConsoleCompany(company);
+
+    const selectedRole = targetIsPlatformConsole
+      ? await this.prisma.role.findFirst({
+          where: {
             companyId: company.id,
             name: {
-              equals: rawRoleValue,
+              equals: 'Platform User',
               mode: 'insensitive',
             },
+            OR: [
+              { id: rawRoleValue },
+              {
+                name: {
+                  equals: rawRoleValue,
+                  mode: 'insensitive',
+                },
+              },
+            ],
           },
-          {
-            companyId: null,
-            name: {
-              equals: rawRoleValue,
-              mode: 'insensitive',
-            },
-          },
-        ],
-      },
-    });
-
-    const fallbackRole = selectedRole
-      ? null
+        })
       : await this.prisma.role.findFirst({
           where: {
+            companyId: null,
+            name: {
+              in: [...CUSTOMER_ROLE_NAMES],
+            },
             OR: [
-              { companyId: company.id },
-              { companyId: null },
+              { id: rawRoleValue },
+              {
+                name: {
+                  equals: rawRoleValue,
+                  mode: 'insensitive',
+                },
+              },
             ],
           },
         });
 
-    const effectiveSelectedRole = selectedRole || (
-      fallbackRole && this.normalizeRoleName(fallbackRole.name) === normalizedRoleValue
-        ? fallbackRole
-        : null
-    );
-
-    if (!effectiveSelectedRole) {
-      throw new BadRequestException('Selected role is not valid for this company');
-    }
-
-    const roleBelongsToCompany =
-      effectiveSelectedRole.companyId === null ||
-      effectiveSelectedRole.companyId === company.id;
-
-    if (!roleBelongsToCompany) {
+    if (!selectedRole) {
       throw new BadRequestException(
-        'Selected role does not belong to the selected company',
+        targetIsPlatformConsole
+          ? 'Only the Platform User role is allowed inside Platform Console'
+          : 'Selected role is not a valid customer role',
       );
     }
 
-    const selectedRoleIsPlatform = this.isPlatformRoleName(effectiveSelectedRole.name);
-    const targetIsPlatformConsole = this.isPlatformConsoleCompany(company);
+    if (targetIsPlatformConsole && !this.isPlatformRoleName(selectedRole.name)) {
+      throw new BadRequestException(
+        'Only the Platform User role is allowed inside Platform Console',
+      );
+    }
 
-    if (selectedRoleIsPlatform && !targetIsPlatformConsole) {
+    if (!targetIsPlatformConsole && this.isPlatformRoleName(selectedRole.name)) {
       throw new BadRequestException(
         'Platform roles are only allowed inside Platform Console',
       );
     }
 
-    return effectiveSelectedRole;
+    return selectedRole;
   }
 
   private async resolveEmployeeForUser({
@@ -343,52 +348,68 @@ export class UsersService {
     if (this.isPlatformUser(actorRoleName)) {
       const normalizedSelectedRole =
         this.normalizeRoleName(selectedRole.name);
+      const targetIsPlatformConsole =
+        this.isPlatformConsoleCompany(company);
 
-      if (normalizedSelectedRole !== 'admin') {
-        throw new BadRequestException(
-          'Platform User can create only the first company Admin user',
-        );
-      }
+      if (targetIsPlatformConsole) {
+        if (!this.isPlatformRoleName(selectedRole.name)) {
+          throw new BadRequestException(
+            'Platform Console employees can be linked only to the Platform User role',
+          );
+        }
 
-      if (employee.projectId) {
-        throw new BadRequestException(
-          'The bootstrap Admin employee must not be assigned to a project before the first project is created',
-        );
-      }
+        if (employee.projectId) {
+          throw new BadRequestException(
+            'Platform Console employees cannot be assigned to customer projects',
+          );
+        }
+      } else {
+        if (normalizedSelectedRole !== 'admin') {
+          throw new BadRequestException(
+            'Platform User can create only the first company Admin user',
+          );
+        }
 
-      const [
-        existingUsers,
-        existingProjects,
-        bootstrapEmployees,
-      ] = await this.prisma.$transaction([
-        this.prisma.user.count({
-          where: {
-            companyId: targetCompanyId,
-            deletedAt: null,
-          },
-        }),
-        this.prisma.project.count({
-          where: {
-            companyId: targetCompanyId,
-            deletedAt: null,
-          },
-        }),
-        this.prisma.employee.count({
-          where: {
-            companyId: targetCompanyId,
-            deletedAt: null,
-          },
-        }),
-      ]);
+        if (employee.projectId) {
+          throw new BadRequestException(
+            'The bootstrap Admin employee must not be assigned to a project before the first project is created',
+          );
+        }
 
-      if (
-        existingUsers > 0 ||
-        existingProjects > 0 ||
-        bootstrapEmployees !== 1
-      ) {
-        throw new BadRequestException(
-          'Bootstrap Admin user can be created only once for a new company with exactly one unassigned employee',
-        );
+        const [
+          existingUsers,
+          existingProjects,
+          bootstrapEmployees,
+        ] = await this.prisma.$transaction([
+          this.prisma.user.count({
+            where: {
+              companyId: targetCompanyId,
+              deletedAt: null,
+            },
+          }),
+          this.prisma.project.count({
+            where: {
+              companyId: targetCompanyId,
+              deletedAt: null,
+            },
+          }),
+          this.prisma.employee.count({
+            where: {
+              companyId: targetCompanyId,
+              deletedAt: null,
+            },
+          }),
+        ]);
+
+        if (
+          existingUsers > 0 ||
+          existingProjects > 0 ||
+          bootstrapEmployees !== 1
+        ) {
+          throw new BadRequestException(
+            'Bootstrap Admin user can be created only once for a new company with exactly one unassigned employee',
+          );
+        }
       }
     }
 
@@ -411,7 +432,9 @@ export class UsersService {
       }
     }
 
-    const username = this.buildUsername(company, employee.employeeId);
+    const username = this.isPlatformRoleName(selectedRole.name)
+      ? email!
+      : this.buildUsername(company, employee.employeeId);
 
     const existingUsernameUser = await this.prisma.user.findFirst({
       where: {
@@ -490,6 +513,7 @@ export class UsersService {
       ),
       include: {
         company: true,
+        role: true,
         linkedEmployee: true,
       },
     });
@@ -553,17 +577,18 @@ export class UsersService {
       );
     }
 
-    if (selectedRole && this.isPlatformRoleName(selectedRole.name)) {
-      const effectiveEmail = nextEmail !== undefined ? nextEmail : user.email;
+    const effectiveRoleName = selectedRole?.name || user.role?.name || '';
+    const effectiveEmail = nextEmail !== undefined ? nextEmail : user.email;
 
-      if (!effectiveEmail) {
-        throw new BadRequestException('Email is required for Platform users');
-      }
+    if (this.isPlatformRoleName(effectiveRoleName) && !effectiveEmail) {
+      throw new BadRequestException('Email is required for Platform users');
     }
 
-    const nextUsername = nextEmployee
-      ? this.buildUsername(user.company, nextEmployee.employeeId)
-      : undefined;
+    const nextUsername = this.isPlatformRoleName(effectiveRoleName)
+      ? effectiveEmail || undefined
+      : nextEmployee
+        ? this.buildUsername(user.company, nextEmployee.employeeId)
+        : undefined;
 
     if (nextUsername && nextUsername !== user.username) {
       const existingUsernameUser = await this.prisma.user.findFirst({
@@ -615,8 +640,10 @@ export class UsersService {
           ...(nextEmployee
             ? {
                 employeeId: nextEmployee.employeeId,
-                username: nextUsername,
               }
+            : {}),
+          ...(nextUsername && nextUsername !== user.username
+            ? { username: nextUsername }
             : {}),
           ...(nextEmail !== undefined
             ? { email: nextEmail }

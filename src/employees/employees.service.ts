@@ -33,6 +33,18 @@ export class EmployeesService {
     );
   }
 
+  private isPlatformConsoleCompany(company?: any) {
+    const normalizedId = this.normalizeRoleName(company?.id || '');
+    const normalizedCode = this.normalizeRoleName(company?.code || '');
+    const normalizedName = this.normalizeRoleName(company?.name || '');
+
+    return (
+      normalizedId === 'platform' ||
+      normalizedCode === 'platform' ||
+      normalizedName === 'platformconsole'
+    );
+  }
+
   private isAdminRole(roleName?: string) {
     const normalizedRole = this.normalizeRoleName(roleName);
     return (
@@ -119,31 +131,36 @@ export class EmployeesService {
     }
 
     if (actorIsPlatformUser) {
-      const linkedRole = this.normalizeRoleName(
-        existing.linkedUser?.role?.name,
-      );
+      const targetIsPlatformConsole =
+        this.isPlatformConsoleCompany(existing.company);
 
-      if (!existing.linkedUserId || linkedRole !== 'admin') {
-        throw new BadRequestException(
-          'Platform User can change Employee ID only for the first company Admin',
+      if (!targetIsPlatformConsole) {
+        const linkedRole = this.normalizeRoleName(
+          existing.linkedUser?.role?.name,
         );
-      }
 
-      const firstCompanyUser = await this.prisma.user.findFirst({
-        where: {
-          companyId: existing.companyId,
-        },
-        orderBy: [
-          { createdAt: 'asc' },
-          { id: 'asc' },
-        ],
-        select: { id: true },
-      });
+        if (!existing.linkedUserId || linkedRole !== 'admin') {
+          throw new BadRequestException(
+            'Platform User can change Employee ID only for the first company Admin',
+          );
+        }
 
-      if (!firstCompanyUser || firstCompanyUser.id !== existing.linkedUserId) {
-        throw new BadRequestException(
-          'Platform User can change Employee ID only for the first company Admin',
-        );
+        const firstCompanyUser = await this.prisma.user.findFirst({
+          where: {
+            companyId: existing.companyId,
+          },
+          orderBy: [
+            { createdAt: 'asc' },
+            { id: 'asc' },
+          ],
+          select: { id: true },
+        });
+
+        if (!firstCompanyUser || firstCompanyUser.id !== existing.linkedUserId) {
+          throw new BadRequestException(
+            'Platform User can change Employee ID only for the first company Admin',
+          );
+        }
       }
     }
 
@@ -232,7 +249,25 @@ export class EmployeesService {
         throw new BadRequestException('Employee company was not found');
       }
 
-      nextUsername = this.buildUsername(company, newEmployeeId);
+      const linkedUserIsPlatform = this.isPlatformUser(
+        existing.linkedUser?.role?.name,
+      );
+
+      if (linkedUserIsPlatform) {
+        const platformEmail = String(existing.linkedUser?.email || '')
+          .trim()
+          .toLowerCase();
+
+        if (!platformEmail) {
+          throw new BadRequestException(
+            'Email is required for Platform users',
+          );
+        }
+
+        nextUsername = platformEmail;
+      } else {
+        nextUsername = this.buildUsername(company, newEmployeeId);
+      }
 
       const conflictingUser = await this.prisma.user.findFirst({
         where: {
@@ -340,10 +375,22 @@ export class EmployeesService {
     }
 
     let project: any = null;
+    const targetIsPlatformConsole =
+      this.isPlatformConsoleCompany(company);
+    const isPlatformConsoleEmployee =
+      platformUser && targetIsPlatformConsole;
     const isBootstrapEmployee =
-      platformUser && !createEmployeeDto.projectId;
+      platformUser &&
+      !targetIsPlatformConsole &&
+      !createEmployeeDto.projectId;
 
-    if (isBootstrapEmployee) {
+    if (isPlatformConsoleEmployee) {
+      if (createEmployeeDto.projectId) {
+        throw new BadRequestException(
+          'Platform Console employees cannot be assigned to customer projects',
+        );
+      }
+    } else if (isBootstrapEmployee) {
       const [
         existingEmployees,
         existingUsers,
@@ -434,9 +481,11 @@ export class EmployeesService {
         email: createEmployeeDto.email,
         projectId: project?.id || null,
         linkedUserId: createEmployeeDto.linkedUserId || null,
-        jobTitle: isBootstrapEmployee
-          ? 'Company Admin'
-          : createEmployeeDto.jobTitle || 'Operator',
+        jobTitle: isPlatformConsoleEmployee
+          ? createEmployeeDto.jobTitle || 'Platform Staff'
+          : isBootstrapEmployee
+            ? 'Company Admin'
+            : createEmployeeDto.jobTitle || 'Operator',
         status:
           createEmployeeDto.status ||
           'ON_DUTY',
@@ -649,7 +698,7 @@ export class EmployeesService {
         },
 
         include: {
-          company: { select: { id: true, name: true, multiProjectEnabled: true } },
+          company: { select: { id: true, name: true, code: true, multiProjectEnabled: true } },
           project: true,
           projectAssignments: {
             include: {

@@ -6,15 +6,14 @@ const bcrypt = require('bcryptjs');
 const prisma = new PrismaClient();
 
 async function main() {
-  const passwordHash = await bcrypt.hash('Admin@12345', 10);
   const platformPasswordHash = await bcrypt.hash('Platform@123', 10);
 
   const company = await prisma.company.upsert({
-    where: { code: 'FFP' },
+    where: { code: 'PLATFORM' },
     update: {},
     create: {
-      name: 'Fleet Fuel PRO',
-      code: 'FFP',
+      name: 'Platform Console',
+      code: 'PLATFORM',
       country: 'Saudi Arabia',
       city: 'Jeddah',
       timezone: 'Asia/Riyadh',
@@ -281,24 +280,6 @@ async function main() {
     }
   }
 
-  const adminUser = await prisma.user.upsert({
-    where: { email: 'admin@fleetfuelpro.com' },
-    update: {
-      passwordHash,
-      roleId: roles.Admin.id,
-    },
-    create: {
-      companyId: company.id,
-      roleId: roles.Admin.id,
-      fullName: 'Amr Eldokany',
-      email: 'admin@fleetfuelpro.com',
-      phone: '+966000000000',
-      passwordHash,
-      isActive: true,
-      mustChangePassword: false,
-    },
-  });
-
   const platformUser = await prisma.user.upsert({
     where: { email: 'platform@fleetfuelpro.com' },
     update: {
@@ -321,8 +302,7 @@ async function main() {
   });
 
   console.log('✅ Seed completed successfully');
-  console.log('Admin email:', adminUser.email);
-  console.log('Admin password: Admin@12345');
+  console.log('Platform Console is platform-only: no normal company Admin is seeded there.');
   console.log('Platform email:', platformUser.email);
   console.log('Platform password: Platform@123');
   console.log('Admin platform permissions removed: companies.read, companies.manage, subscriptions.manage');
