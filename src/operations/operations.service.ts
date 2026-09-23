@@ -50,10 +50,14 @@ type CurrentUserContext = {
   fuelerName: string;
 };
 
+type OperationDispenserReadingInput = { stationId: string; counter: number };
+
 type LoadedOperationEntities = {
   sourceStation?: any;
   destinationStation?: any;
   asset?: any;
+  sourceInventoryStation?: any;
+  destinationInventoryStation?: any;
   sourceProjectId?: string | null;
   destinationProjectId?: string | null;
   assetProjectId?: string | null;
@@ -114,6 +118,28 @@ export class OperationsService {
         },
       },
 
+      stationCounterReadings: {
+        select: {
+          id: true,
+          stationId: true,
+          counterValue: true,
+          lifetimeCounter: true,
+          counterCycleNumber: true,
+          createdAt: true,
+          station: {
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+              status: true,
+              structureType: true,
+              parentStationId: true,
+            },
+          },
+        },
+        orderBy: [{ createdAt: 'asc' }],
+      },
+
       approvals: {
         select: {
           id: true,
@@ -139,6 +165,8 @@ export class OperationsService {
           stationId: true,
           name: true,
           projectId: true,
+          structureType: true,
+          parentStationId: true,
         },
       },
 
@@ -148,6 +176,8 @@ export class OperationsService {
           stationId: true,
           name: true,
           projectId: true,
+          structureType: true,
+          parentStationId: true,
         },
       },
 
@@ -313,6 +343,35 @@ export class OperationsService {
           currentLifetimeCounter: true,
           currentCounterCycle: true,
           capacity: true,
+          structureType: true,
+          parentStationId: true,
+          parentStation: {
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+              status: true,
+              structureType: true,
+              projectId: true,
+              currentStock: true,
+              capacity: true,
+            },
+          },
+          dispensers: {
+            where: { deletedAt: null },
+            orderBy: [{ stationId: 'asc' }],
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+              status: true,
+              structureType: true,
+              parentStationId: true,
+              currentCounter: true,
+              currentLifetimeCounter: true,
+              currentCounterCycle: true,
+            },
+          },
         },
         orderBy: [{ stationId: 'asc' }, { name: 'asc' }],
       }),
@@ -389,7 +448,13 @@ export class OperationsService {
       buildExternalSourceHistory('EXTERNAL_SUPPLY');
 
     const stations = projectStationsRaw
-      .filter((station: any) => isActiveStatus(station.status))
+      .filter(
+        (station: any) =>
+          isActiveStatus(station.status) &&
+          (String(station.structureType || 'STANDALONE').toUpperCase() !== 'DISPENSER' ||
+            (isActiveStatus(station.parentStation?.status) &&
+              String(station.parentStation?.structureType || '').toUpperCase() === 'SHARED_TANK')),
+      )
       .map((station: any) => ({
         id: station.id,
         stationId: station.stationId,
@@ -397,6 +462,17 @@ export class OperationsService {
         projectId: station.projectId,
         projectName: project.name,
         projectCode: project.code,
+        structureType: station.structureType || 'STANDALONE',
+        parentStationId: station.parentStationId || null,
+        parentStation: station.parentStation || null,
+        dispensers: (station.dispensers || [])
+          .filter((item: any) => isActiveStatus(item.status))
+          .map((item: any) => ({
+            ...item,
+            currentCounter: Number(item.currentCounter || 0),
+            currentLifetimeCounter: Number(item.currentLifetimeCounter || 0),
+            currentCounterCycle: Number(item.currentCounterCycle || 1),
+          })),
         currentStock: Number(station.currentStock || 0),
         currentCounter: Number(station.currentCounter || 0),
         currentLifetimeCounter: Number(
@@ -456,6 +532,20 @@ export class OperationsService {
               currentLifetimeCounter: true,
               currentCounterCycle: true,
               capacity: true,
+              structureType: true,
+              parentStationId: true,
+              parentStation: {
+                select: {
+                  id: true,
+                  stationId: true,
+                  name: true,
+                  status: true,
+                  structureType: true,
+                  projectId: true,
+                  currentStock: true,
+                  capacity: true,
+                },
+              },
               project: {
                 select: {
                   id: true,
@@ -483,6 +573,9 @@ export class OperationsService {
             projectId: station.projectId,
             projectName: station.project?.name || '',
             projectCode: station.project?.code || '',
+            structureType: station.structureType || 'STANDALONE',
+            parentStationId: station.parentStationId || null,
+            parentStation: station.parentStation || null,
             currentStock: Number(station.currentStock || 0),
             currentCounter: Number(station.currentCounter || 0),
             currentLifetimeCounter: Number(
@@ -680,6 +773,35 @@ export class OperationsService {
           currentLifetimeCounter: true,
           currentCounterCycle: true,
           capacity: true,
+          structureType: true,
+          parentStationId: true,
+          parentStation: {
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+              status: true,
+              structureType: true,
+              projectId: true,
+              currentStock: true,
+              capacity: true,
+            },
+          },
+          dispensers: {
+            where: { deletedAt: null },
+            orderBy: [{ stationId: 'asc' }],
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+              status: true,
+              structureType: true,
+              parentStationId: true,
+              currentCounter: true,
+              currentLifetimeCounter: true,
+              currentCounterCycle: true,
+            },
+          },
           createdAt: true,
         },
         orderBy: [{ stationId: 'asc' }, { name: 'asc' }],
@@ -857,7 +979,7 @@ export class OperationsService {
 
     const operation = await (this.prisma as any).operation.findFirst({
       where: { id: operationId, companyId: currentUser.companyId },
-      include: { approvals: true },
+      include: { approvals: true, stationCounterReadings: true },
     });
     if (!operation) throw new NotFoundException('Operation was not found.');
     if (['COMPLETED', 'REJECTED', 'CANCELLED'].includes(operation.status)) {
@@ -886,6 +1008,12 @@ export class OperationsService {
       quantity: Number(operation.quantity),
       odometer: operation.odometer == null ? undefined : Number(operation.odometer),
       stationCounter: operation.stationCounter == null ? undefined : Number(operation.stationCounter),
+      dispenserReadings: Array.isArray(operation.stationCounterReadings)
+        ? operation.stationCounterReadings.map((item: any) => ({
+            stationId: item.stationId,
+            counter: Number(item.counterValue),
+          }))
+        : undefined,
       externalStationName: operation.externalStationName || undefined,
       invoiceNumber: operation.invoiceNumber || undefined,
       notes: operation.notes || undefined,
@@ -2033,6 +2161,19 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
             operation.id,
           );
 
+
+          if (Array.isArray(dto.dispenserReadings) && dto.dispenserReadings.length) {
+            await (tx as any).operationStationCounterReading.createMany({
+              data: dto.dispenserReadings.map((item) => ({
+                operationId: operation.id,
+                companyId: currentUser.companyId!,
+                stationId: String(item.stationId),
+                counterValue: Number(item.counter),
+              })),
+              skipDuplicates: true,
+            });
+          }
+
           if (approvalPlan.length) {
             await (tx as any).operationApproval.createMany({
               data: approvalPlan.map((item) => ({
@@ -2655,6 +2796,283 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     }
   }
 
+
+  private getStationStructureType(station: any) {
+    return String(station?.structureType || 'STANDALONE').trim().toUpperCase();
+  }
+
+  private isStationOperationallyActive(station: any) {
+    const ownActive = String(station?.status || '').trim().toUpperCase() === 'ACTIVE';
+    if (!ownActive) return false;
+
+    if (this.getStationStructureType(station) === 'DISPENSER') {
+      return (
+        String(station?.parentStation?.status || '').trim().toUpperCase() === 'ACTIVE' &&
+        this.getStationStructureType(station?.parentStation) === 'SHARED_TANK'
+      );
+    }
+
+    return true;
+  }
+
+  private async resolveInventoryStation(tx: any, station: any) {
+    if (!station) return null;
+    if (this.getStationStructureType(station) !== 'DISPENSER') return station;
+
+    const parent = station.parentStation ||
+      (station.parentStationId
+        ? await tx.station.findFirst({
+            where: {
+              id: station.parentStationId,
+              companyId: station.companyId,
+              deletedAt: null,
+            },
+          })
+        : null);
+
+    if (!parent || this.getStationStructureType(parent) !== 'SHARED_TANK') {
+      throw new BadRequestException(
+        `Dispenser ${station.stationId || station.id} is not linked to a valid SHARED_TANK.`,
+      );
+    }
+
+    return parent;
+  }
+
+  private validateStationStructureForOperation(
+    type: NormalizedOperationType,
+    entities: LoadedOperationEntities,
+    dto: CreateOperationDto,
+  ) {
+    const sourceType = this.getStationStructureType(entities.sourceStation);
+    const destinationType = this.getStationStructureType(entities.destinationStation);
+
+    if (entities.sourceStation && !this.isStationOperationallyActive(entities.sourceStation)) {
+      throw new BadRequestException('Selected source station is not operationally active.');
+    }
+
+    if (entities.destinationStation && !this.isStationOperationallyActive(entities.destinationStation)) {
+      throw new BadRequestException('Selected destination station is not operationally active.');
+    }
+
+    if (type === 'DIRECT_REFUEL') {
+      if (!['STANDALONE', 'DISPENSER'].includes(sourceType)) {
+        throw new BadRequestException(
+          'Direct Refuel source must be a STANDALONE station or an active DISPENSER.',
+        );
+      }
+      return;
+    }
+
+    if (type === 'EXTERNAL_SUPPLY') {
+      if (!['STANDALONE', 'SHARED_TANK'].includes(destinationType)) {
+        throw new BadRequestException(
+          'External Supply destination must be a STANDALONE station or SHARED_TANK.',
+        );
+      }
+
+      if (destinationType === 'STANDALONE') {
+        if (dto.stationCounter === undefined || dto.stationCounter === null) {
+          throw new BadRequestException(
+            'stationCounter is required when External Supply destination is STANDALONE.',
+          );
+        }
+        if (Array.isArray(dto.dispenserReadings) && dto.dispenserReadings.length) {
+          throw new BadRequestException(
+            'dispenserReadings are allowed only when External Supply destination is SHARED_TANK.',
+          );
+        }
+      } else {
+        if (dto.stationCounter !== undefined && dto.stationCounter !== null) {
+          throw new BadRequestException(
+            'stationCounter must not be sent for a SHARED_TANK destination.',
+          );
+        }
+      }
+      return;
+    }
+
+    if (type === 'INTERNAL_TRANSFER') {
+      /*
+        A Shared Tank is an inventory owner, not a physical dispensing point.
+        Internal Transfer out of a shared tank must therefore select one of its
+        active DISPENSER children as the operation source. Stock is routed to
+        the parent SHARED_TANK by resolveInventoryStation(), while the operation
+        remains attributed to the actual dispenser used in the field.
+
+        Destination behavior intentionally remains unchanged for Phase 2:
+        the receiving/mobile station must be STANDALONE and keeps the existing
+        destination stationCounter workflow.
+      */
+      if (!['STANDALONE', 'DISPENSER'].includes(sourceType)) {
+        throw new BadRequestException(
+          'Internal Transfer source must be a STANDALONE station or an active DISPENSER.',
+        );
+      }
+
+      if (destinationType !== 'STANDALONE') {
+        throw new BadRequestException(
+          'Internal Transfer destination must currently be a STANDALONE station.',
+        );
+      }
+
+      if (dto.stationCounter === undefined || dto.stationCounter === null) {
+        throw new BadRequestException(
+          'stationCounter is required for the Internal Transfer destination.',
+        );
+      }
+
+      return;
+    }
+
+    if (type === 'EXTERNAL_TRANSFER') {
+      if (sourceType !== 'STANDALONE' || destinationType !== 'STANDALONE') {
+        throw new BadRequestException(
+          'External Transfer currently requires STANDALONE source and destination stations.',
+        );
+      }
+
+      if (dto.stationCounter === undefined || dto.stationCounter === null) {
+        throw new BadRequestException(
+          'stationCounter is required for the External Transfer destination.',
+        );
+      }
+    }
+  }
+
+  private async validateSharedTankDispenserReadings(
+    tx: any,
+    dto: CreateOperationDto,
+    destinationStation: any,
+  ) {
+    if (
+      !destinationStation ||
+      this.getStationStructureType(destinationStation) !== 'SHARED_TANK'
+    ) {
+      return;
+    }
+
+    const activeDispensers = await tx.station.findMany({
+      where: {
+        parentStationId: destinationStation.id,
+        companyId: destinationStation.companyId,
+        deletedAt: null,
+        status: 'ACTIVE',
+      },
+      orderBy: [{ stationId: 'asc' }],
+      select: {
+        id: true,
+        stationId: true,
+        currentCounter: true,
+        currentLifetimeCounter: true,
+        currentCounterCycle: true,
+      },
+    });
+
+    const readings = Array.isArray(dto.dispenserReadings)
+      ? dto.dispenserReadings
+      : [];
+
+    if (readings.length !== activeDispensers.length) {
+      throw new BadRequestException(
+        `External Supply to SHARED_TANK requires one counter reading for every active dispenser (${activeDispensers.length} required).`,
+      );
+    }
+
+    const seen = new Set<string>();
+    const activeById = new Map<string, any>(
+      activeDispensers.map((item: any) => [String(item.id), item] as [string, any]),
+    );
+
+    for (const reading of readings as OperationDispenserReadingInput[]) {
+      const stationId = String(reading?.stationId || '').trim();
+      const counter = Number(reading?.counter);
+
+      if (!stationId || seen.has(stationId)) {
+        throw new BadRequestException(
+          'Each active dispenser must have exactly one counter reading.',
+        );
+      }
+      seen.add(stationId);
+
+      const dispenser = activeById.get(stationId);
+      if (!dispenser) {
+        throw new BadRequestException(
+          'dispenserReadings contains a dispenser that is not active under the selected SHARED_TANK.',
+        );
+      }
+
+      if (!Number.isFinite(counter) || counter < 0) {
+        throw new BadRequestException('Dispenser counter must be zero or positive.');
+      }
+
+      const currentCounter = Number(dispenser.currentCounter || 0);
+      if (counter < currentCounter) {
+        throw new BadRequestException(
+          `Dispenser ${dispenser.stationId} counter cannot be lower than current counter ${currentCounter}.`,
+        );
+      }
+    }
+  }
+
+  private async applySharedTankDispenserReadings(
+    tx: any,
+    operation: any,
+    dto: CreateOperationDto,
+  ) {
+    if (
+      operation.type !== 'EXTERNAL_SUPPLY' ||
+      !Array.isArray(dto.dispenserReadings) ||
+      dto.dispenserReadings.length === 0
+    ) {
+      return;
+    }
+
+    for (const reading of dto.dispenserReadings) {
+      const dispenser = await tx.station.findFirst({
+        where: {
+          id: String(reading.stationId),
+          companyId: operation.companyId,
+          deletedAt: null,
+          structureType: 'DISPENSER',
+          parentStationId: operation.destinationStationId,
+        },
+      });
+
+      if (!dispenser) {
+        throw new BadRequestException(
+          'An External Supply dispenser reading no longer belongs to the selected SHARED_TANK.',
+        );
+      }
+
+      const snapshot = this.calculateStationLifetimeSnapshot(
+        dispenser,
+        Number(reading.counter),
+      );
+
+      await tx.station.update({
+        where: { id: dispenser.id },
+        data: {
+          currentCounter: Number(reading.counter),
+          currentLifetimeCounter: snapshot.lifetimeCounter,
+          currentCounterCycle: snapshot.stationCounterCycleNumber,
+        },
+      });
+
+      await (tx as any).operationStationCounterReading.updateMany({
+        where: {
+          operationId: operation.id,
+          stationId: dispenser.id,
+        },
+        data: {
+          counterValue: Number(reading.counter),
+          lifetimeCounter: snapshot.lifetimeCounter,
+          counterCycleNumber: snapshot.stationCounterCycleNumber,
+        },
+      });
+    }
+  }
+
   private async loadAndValidateEntities(
     tx: any,
     dto: CreateOperationDto,
@@ -2671,13 +3089,13 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       dto.sourceStationId
         ? tx.station.findFirst({
             where: { id: dto.sourceStationId, companyId: user.companyId, deletedAt: null },
-            include: { project: true },
+            include: { project: true, parentStation: true },
           })
         : Promise.resolve(undefined),
       dto.destinationStationId
         ? tx.station.findFirst({
             where: { id: dto.destinationStationId, companyId: user.companyId, deletedAt: null },
-            include: { project: true },
+            include: { project: true, parentStation: true },
           })
         : Promise.resolve(undefined),
       dto.assetId
@@ -2698,10 +3116,17 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       this.resolveEntityProjectAt(tx, 'asset', asset, occurredAt),
     ]);
 
+    const [sourceInventoryStation, destinationInventoryStation] = await Promise.all([
+      this.resolveInventoryStation(tx, sourceStation),
+      this.resolveInventoryStation(tx, destinationStation),
+    ]);
+
     const entities: LoadedOperationEntities = {
       sourceStation,
       destinationStation,
       asset,
+      sourceInventoryStation,
+      destinationInventoryStation,
       sourceProjectId: sourceAt.projectId,
       destinationProjectId: destinationAt.projectId,
       assetProjectId: assetAt.projectId,
@@ -2709,6 +3134,15 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       destinationProjectAtOperation: destinationAt.project,
       assetProjectAtOperation: assetAt.project,
     };
+
+    this.validateStationStructureForOperation(type, entities, dto);
+    if (type === 'EXTERNAL_SUPPLY') {
+      await this.validateSharedTankDispenserReadings(
+        tx,
+        dto,
+        destinationStation,
+      );
+    }
 
     this.validateSelectedProjectAgainstHistoricalEntities(type, entities, dto);
     this.validateProjectRules(type, entities);
@@ -3054,7 +3488,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     if (type === 'DIRECT_REFUEL') {
       await this.createStockMovement(tx, {
-        station: entities.sourceStation,
+        station: entities.sourceInventoryStation || entities.sourceStation,
         operation,
         movementType: 'DIRECT_REFUEL_OUT',
         quantity: -Math.abs(Number(dto.quantity)),
@@ -3097,7 +3531,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     if (type === 'INTERNAL_TRANSFER') {
       await this.createStockMovement(tx, {
-        station: entities.sourceStation,
+        station: entities.sourceInventoryStation || entities.sourceStation,
         operation,
         movementType: 'INTERNAL_TRANSFER_OUT',
         quantity: -Math.abs(Number(dto.quantity)),
@@ -3106,7 +3540,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       });
 
       await this.createStockMovement(tx, {
-        station: entities.destinationStation,
+        station: entities.destinationInventoryStation || entities.destinationStation,
         operation,
         movementType: 'INTERNAL_TRANSFER_IN',
         quantity: Math.abs(Number(dto.quantity)),
@@ -3118,19 +3552,21 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     if (type === 'EXTERNAL_SUPPLY') {
       await this.createStockMovement(tx, {
-        station: entities.destinationStation,
+        station: entities.destinationInventoryStation || entities.destinationStation,
         operation,
         movementType: 'EXTERNAL_SUPPLY_IN',
         quantity: Math.abs(Number(dto.quantity)),
         reason: 'External Supply operation',
         currentUser,
       });
+
+      await this.applySharedTankDispenserReadings(tx, operation, dto);
       return;
     }
 
     if (type === 'EXTERNAL_TRANSFER') {
       await this.createStockMovement(tx, {
-        station: entities.sourceStation,
+        station: entities.sourceInventoryStation || entities.sourceStation,
         operation,
         movementType: 'EXTERNAL_TRANSFER_OUT',
         quantity: -Math.abs(Number(dto.quantity)),
@@ -3139,7 +3575,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       });
 
       await this.createStockMovement(tx, {
-        station: entities.destinationStation,
+        station: entities.destinationInventoryStation || entities.destinationStation,
         operation,
         movementType: 'EXTERNAL_TRANSFER_IN',
         quantity: Math.abs(Number(dto.quantity)),
@@ -3166,7 +3602,9 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     const movementQuantity = Number(quantity || 0);
     const counterStationId = this.getOperationCounterStationId(operation);
     const shouldApplyCounter =
-      operation.stationCounter != null && counterStationId === station.id;
+      operation.stationCounter != null &&
+      counterStationId === station.id &&
+      this.getStationStructureType(station) === 'STANDALONE';
 
     /*
       Stock protection is enforced after the atomic database increment/decrement
@@ -3601,6 +4039,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     if (
       counterStation &&
+      this.getStationStructureType(counterStation) === 'STANDALONE' &&
       dto.stationCounter !== undefined &&
       dto.stationCounter !== null
     ) {

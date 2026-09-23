@@ -8,7 +8,7 @@ export class CreateOperationCorrectionDto {
   /**
    * Allowed values:
    * assetId, sourceStationId, destinationStationId, quantity, odometer,
-   * stationCounter, externalStationName, invoiceNumber, totalCostAtOperation, notes
+   * stationCounter, dispenserCounterReading, externalStationName, invoiceNumber, totalCostAtOperation, notes
    */
   @IsString()
   @IsNotEmpty()

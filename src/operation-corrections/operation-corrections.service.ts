@@ -31,6 +31,7 @@ type CorrectionField =
   | 'QUANTITY'
   | 'ODOMETER'
   | 'STATION_COUNTER'
+  | 'DISPENSER_COUNTER_READING'
   | 'EXTERNAL_STATION_NAME'
   | 'INVOICE_NUMBER'
   | 'TOTAL_COST_AT_OPERATION'
@@ -205,14 +206,28 @@ export class OperationCorrectionsService {
     }
 
     this.validateFieldAllowedForOperation(fieldName, operation.type);
+    this.validateStructureAwareCorrectionField(fieldName, operation);
 
-    const oldValue = this.getOperationFieldValue(operation, fieldName);
+    let oldValue = this.getOperationFieldValue(operation, fieldName);
     const newValue = await this.normalizeNewValue(
       fieldName,
       dto.newValue,
       operation,
       currentUser.companyId,
     );
+
+    if (fieldName === 'DISPENSER_COUNTER_READING') {
+      const targetStationId = String((newValue as any)?.stationId || '');
+      const existingReading = (operation.stationCounterReadings || []).find(
+        (item: any) => item.stationId === targetStationId,
+      );
+      oldValue = existingReading
+        ? {
+            stationId: existingReading.stationId,
+            counter: Number(existingReading.counterValue),
+          }
+        : null;
+    }
 
     // Validate odometer sequence before creating a pending approval request.
     // The same rule is intentionally validated again during apply/review as a
@@ -602,6 +617,8 @@ export class OperationCorrectionsService {
                 name: true,
                 status: true,
                 projectId: true,
+                structureType: true,
+                parentStationId: true,
                 createdAt: true,
               },
               orderBy: [{ stationId: 'asc' }, { createdAt: 'asc' }],
@@ -1515,8 +1532,15 @@ export class OperationCorrectionsService {
       include: {
         operation: {
           include: {
-            sourceStation: true,
-            destinationStation: true,
+            sourceStation: {
+              include: { parentStation: true },
+            },
+            destinationStation: {
+              include: { parentStation: true },
+            },
+            stationCounterReadings: {
+              orderBy: [{ createdAt: 'asc' }],
+            },
             asset: true,
           },
         },
@@ -1698,6 +1722,11 @@ export class OperationCorrectionsService {
       return;
     }
 
+    if (fieldName === 'DISPENSER_COUNTER_READING') {
+      await this.applyDispenserCounterReadingCorrection(tx, operation, newValue);
+      return;
+    }
+
     if (fieldName === 'TOTAL_COST_AT_OPERATION') {
       await (tx as any).operation.update({
         where: { id: operation.id },
@@ -1782,6 +1811,98 @@ export class OperationCorrectionsService {
     }
   }
 
+
+  private getStationStructureType(station: any) {
+    return String(station?.structureType || 'STANDALONE').trim().toUpperCase();
+  }
+
+  private async resolveInventoryStation(tx: any, station: any) {
+    if (!station) return null;
+    if (this.getStationStructureType(station) !== 'DISPENSER') return station;
+
+    const parent = station.parentStation ||
+      (station.parentStationId
+        ? await tx.station.findFirst({
+            where: {
+              id: station.parentStationId,
+              companyId: station.companyId,
+              deletedAt: null,
+            },
+          })
+        : null);
+
+    if (!parent || this.getStationStructureType(parent) !== 'SHARED_TANK') {
+      throw new BadRequestException(
+        'DISPENSER is not linked to a valid SHARED_TANK.',
+      );
+    }
+
+    return parent;
+  }
+
+  private validateCorrectedStationStructure(
+    operation: any,
+    fieldName: 'SOURCE_STATION_ID' | 'DESTINATION_STATION_ID',
+    station: any,
+  ) {
+    const structureType = this.getStationStructureType(station);
+
+    if (fieldName === 'SOURCE_STATION_ID') {
+      if (operation.type === 'DIRECT_REFUEL') {
+        if (!['STANDALONE', 'DISPENSER'].includes(structureType)) {
+          throw new BadRequestException(
+            'Direct Refuel source must be STANDALONE or DISPENSER.',
+          );
+        }
+        return;
+      }
+
+      if (operation.type === 'INTERNAL_TRANSFER') {
+        if (!['STANDALONE', 'DISPENSER'].includes(structureType)) {
+          throw new BadRequestException(
+            'Internal Transfer source correction must be STANDALONE or DISPENSER.',
+          );
+        }
+        return;
+      }
+
+      if (operation.type === 'EXTERNAL_TRANSFER') {
+        if (structureType !== 'STANDALONE') {
+          throw new BadRequestException(
+            'External Transfer source correction currently requires a STANDALONE station.',
+          );
+        }
+      }
+      return;
+    }
+
+    if (operation.type === 'EXTERNAL_SUPPLY') {
+      if (!['STANDALONE', 'SHARED_TANK'].includes(structureType)) {
+        throw new BadRequestException(
+          'External Supply destination must be STANDALONE or SHARED_TANK.',
+        );
+      }
+      return;
+    }
+
+    if (operation.type === 'INTERNAL_TRANSFER') {
+      if (structureType !== 'STANDALONE') {
+        throw new BadRequestException(
+          'Internal Transfer destination correction currently requires a STANDALONE station.',
+        );
+      }
+      return;
+    }
+
+    if (operation.type === 'EXTERNAL_TRANSFER') {
+      if (structureType !== 'STANDALONE') {
+        throw new BadRequestException(
+          'External Transfer destination correction currently requires a STANDALONE station.',
+        );
+      }
+    }
+  }
+
   private async applySourceStationCorrection(tx: any, operation: any, newStationId: string, currentUser: CurrentUserContext) {
     if (!['DIRECT_REFUEL', 'INTERNAL_TRANSFER', 'EXTERNAL_TRANSFER'].includes(operation.type)) {
       throw new BadRequestException('Source station correction is not allowed for this operation type.');
@@ -1813,27 +1934,37 @@ export class OperationCorrectionsService {
       assetProjectId: operation.projectIdAtOperation,
     });
 
-    const quantity = Math.abs(Number(operation.quantity || 0));
+    this.validateCorrectedStationStructure(
+      operation,
+      'SOURCE_STATION_ID',
+      newStation,
+    );
 
-    if (oldStation) {
+    const quantity = Math.abs(Number(operation.quantity || 0));
+    const oldInventoryStation = await this.resolveInventoryStation(tx, oldStation);
+    const newInventoryStation = await this.resolveInventoryStation(tx, newStation);
+
+    if (oldInventoryStation?.id !== newInventoryStation?.id) {
+      if (oldInventoryStation) {
+        await this.createStockMovement(tx, {
+          station: oldInventoryStation,
+          operation,
+          movementType: 'ADJUSTMENT',
+          quantity,
+          reason: 'Operation correction: reverse old source inventory station',
+          currentUser,
+        });
+      }
+
       await this.createStockMovement(tx, {
-        station: oldStation,
+        station: newInventoryStation,
         operation,
         movementType: 'ADJUSTMENT',
-        quantity,
-        reason: 'Operation correction: reverse old source station',
+        quantity: -quantity,
+        reason: 'Operation correction: apply new source inventory station',
         currentUser,
       });
     }
-
-    await this.createStockMovement(tx, {
-      station: newStation,
-      operation,
-      movementType: 'ADJUSTMENT',
-      quantity: -quantity,
-      reason: 'Operation correction: apply new source station',
-      currentUser,
-    });
 
     await tx.operation.update({
       where: { id: operation.id },
@@ -1873,27 +2004,54 @@ export class OperationCorrectionsService {
       assetProjectId: operation.projectIdAtOperation,
     });
 
-    const quantity = Math.abs(Number(operation.quantity || 0));
+    this.validateCorrectedStationStructure(
+      operation,
+      'DESTINATION_STATION_ID',
+      newStation,
+    );
 
-    if (oldStation) {
+    if (operation.type === 'EXTERNAL_SUPPLY') {
+      const oldStructure = this.getStationStructureType(oldStation);
+      const newStructure = this.getStationStructureType(newStation);
+
+      if (oldStructure !== newStructure) {
+        throw new BadRequestException(
+          'External Supply destination cannot be corrected between STANDALONE and SHARED_TANK because their counter evidence is different. Cancel and recreate the operation instead.',
+        );
+      }
+
+      if (oldStructure === 'SHARED_TANK' && oldStation?.id !== newStation.id) {
+        throw new BadRequestException(
+          'External Supply destination cannot be changed from one SHARED_TANK to another because the recorded dispenser readings belong to the original tank. Cancel and recreate the operation instead.',
+        );
+      }
+    }
+
+    const quantity = Math.abs(Number(operation.quantity || 0));
+    const oldInventoryStation = await this.resolveInventoryStation(tx, oldStation);
+    const newInventoryStation = await this.resolveInventoryStation(tx, newStation);
+
+    if (oldInventoryStation?.id !== newInventoryStation?.id) {
+      if (oldInventoryStation) {
+        await this.createStockMovement(tx, {
+          station: oldInventoryStation,
+          operation,
+          movementType: 'ADJUSTMENT',
+          quantity: -quantity,
+          reason: 'Operation correction: reverse old destination inventory station',
+          currentUser,
+        });
+      }
+
       await this.createStockMovement(tx, {
-        station: oldStation,
+        station: newInventoryStation,
         operation,
         movementType: 'ADJUSTMENT',
-        quantity: -quantity,
-        reason: 'Operation correction: reverse old destination station',
+        quantity,
+        reason: 'Operation correction: apply new destination inventory station',
         currentUser,
       });
     }
-
-    await this.createStockMovement(tx, {
-      station: newStation,
-      operation,
-      movementType: 'ADJUSTMENT',
-      quantity,
-      reason: 'Operation correction: apply new destination station',
-      currentUser,
-    });
 
     await tx.operation.update({
       where: { id: operation.id },
@@ -1902,6 +2060,7 @@ export class OperationCorrectionsService {
 
     if (
       operation.stationCounter != null &&
+      this.getStationStructureType(newStation) === 'STANDALONE' &&
       ['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'].includes(
         operation.type,
       )
@@ -2011,7 +2170,10 @@ export class OperationCorrectionsService {
     if (diff === 0) return;
 
     if (operation.type === 'DIRECT_REFUEL') {
-      const sourceStation = operation.sourceStation;
+      const sourceStation = await this.resolveInventoryStation(
+        tx,
+        operation.sourceStation,
+      );
       await this.createStockMovement(tx, {
         station: sourceStation,
         operation,
@@ -2023,8 +2185,14 @@ export class OperationCorrectionsService {
     }
 
     if (operation.type === 'INTERNAL_TRANSFER' || operation.type === 'EXTERNAL_TRANSFER') {
-      const sourceStation = operation.sourceStation;
-      const destinationStation = operation.destinationStation;
+      const sourceStation = await this.resolveInventoryStation(
+        tx,
+        operation.sourceStation,
+      );
+      const destinationStation = await this.resolveInventoryStation(
+        tx,
+        operation.destinationStation,
+      );
 
       await this.createStockMovement(tx, {
         station: sourceStation,
@@ -2046,7 +2214,10 @@ export class OperationCorrectionsService {
     }
 
     if (operation.type === 'EXTERNAL_SUPPLY') {
-      const destinationStation = operation.destinationStation;
+      const destinationStation = await this.resolveInventoryStation(
+        tx,
+        operation.destinationStation,
+      );
 
       await this.createStockMovement(tx, {
         station: destinationStation,
@@ -2283,6 +2454,12 @@ export class OperationCorrectionsService {
   private async applyStationCounterCorrection(tx: any, operation: any, newCounter: number) {
     if (Number(newCounter) < 0) throw new BadRequestException('Station counter cannot be negative.');
 
+    if (this.getStationStructureType(operation.destinationStation) !== 'STANDALONE') {
+      throw new BadRequestException(
+        'stationCounter correction is not available for SHARED_TANK operations. Correct a dispenser reading instead.',
+      );
+    }
+
     const stationId = this.getOperationCounterStationId(operation);
     if (!stationId) {
       throw new BadRequestException('This operation type does not use an internal station counter.');
@@ -2296,6 +2473,176 @@ export class OperationCorrectionsService {
     await this.rebuildStationLifetimeHistory(tx, stationId);
   }
 
+
+
+  private async applyDispenserCounterReadingCorrection(
+    tx: any,
+    operation: any,
+    newValue: any,
+  ) {
+    if (
+      operation.type !== 'EXTERNAL_SUPPLY' ||
+      this.getStationStructureType(operation.destinationStation) !== 'SHARED_TANK'
+    ) {
+      throw new BadRequestException(
+        'Dispenser counter reading correction is allowed only for External Supply to a SHARED_TANK.',
+      );
+    }
+
+    const stationId = String(newValue?.stationId || '').trim();
+    const counter = Number(newValue?.counter);
+
+    if (!stationId || !Number.isFinite(counter) || counter < 0) {
+      throw new BadRequestException(
+        'Dispenser counter correction requires { stationId, counter } with a zero or positive counter.',
+      );
+    }
+
+    const reading = await (tx as any).operationStationCounterReading.findFirst({
+      where: {
+        operationId: operation.id,
+        stationId,
+      },
+    });
+
+    if (!reading) {
+      throw new NotFoundException(
+        'The selected dispenser reading was not recorded on this operation.',
+      );
+    }
+
+    await (tx as any).operationStationCounterReading.update({
+      where: { id: reading.id },
+      data: { counterValue: counter },
+    });
+
+    await this.rebuildDispenserReadingHistory(tx, stationId);
+  }
+
+  private async rebuildDispenserReadingHistory(tx: any, stationId: string) {
+    const station = await tx.station.findUnique({ where: { id: stationId } });
+    if (!station || this.getStationStructureType(station) !== 'DISPENSER') {
+      throw new NotFoundException('Dispenser station was not found.');
+    }
+
+    const [readings, resets] = await Promise.all([
+      (tx as any).operationStationCounterReading.findMany({
+        where: {
+          stationId,
+          operation: { status: 'COMPLETED' },
+        },
+        include: {
+          operation: {
+            select: {
+              occurredAt: true,
+              createdAt: true,
+            },
+          },
+        },
+      }),
+      tx.stationCounterReset.findMany({
+        where: { stationId },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      }),
+    ]);
+
+    const events = [
+      ...readings.map((item: any) => ({
+        kind: 'READING' as const,
+        id: item.id,
+        at: item.operation?.occurredAt || item.operation?.createdAt || item.createdAt,
+        createdAt: item.createdAt,
+        item,
+      })),
+      ...resets.map((item: any) => ({
+        kind: 'RESET' as const,
+        id: item.id,
+        at: item.effectiveAt,
+        createdAt: item.createdAt,
+        item,
+      })),
+    ].sort((a, b) => {
+      const atDiff = new Date(a.at).getTime() - new Date(b.at).getTime();
+      if (atDiff !== 0) return atDiff;
+      if (a.kind !== b.kind) return a.kind === 'RESET' ? -1 : 1;
+      return String(a.id).localeCompare(String(b.id));
+    });
+
+    if (!events.length) return;
+
+    let cycleNumber = 1;
+    let cycleStartReading: number | null = null;
+    let lifetimeAtCycleStart = 0;
+    let latestReading: number | null = null;
+    let latestLifetime = 0;
+
+    for (const event of events) {
+      if (event.kind === 'RESET') {
+        const reset = event.item;
+        if (latestReading === null) {
+          latestReading = Number(reset.oldCounter || 0);
+          latestLifetime = Number(reset.lifetimeAtReset || latestReading || 0);
+          cycleNumber = Math.max(Number(reset.oldCounterCycle || 1), 1);
+        }
+
+        const newCounter = Number(reset.newCounter || 0);
+        await tx.stationCounterReset.update({
+          where: { id: reset.id },
+          data: {
+            oldCounter: latestReading,
+            lifetimeAtReset: latestLifetime,
+            oldCounterCycle: cycleNumber,
+            newCounterCycle: cycleNumber + 1,
+          },
+        });
+        cycleNumber += 1;
+        cycleStartReading = newCounter;
+        lifetimeAtCycleStart = latestLifetime;
+        latestReading = newCounter;
+        continue;
+      }
+
+      const readingValue = Number(event.item.counterValue);
+      if (!Number.isFinite(readingValue) || readingValue < 0) {
+        throw new BadRequestException('Dispenser counter reading is invalid.');
+      }
+
+      if (latestReading === null || cycleStartReading === null) {
+        cycleNumber = 1;
+        cycleStartReading = readingValue;
+        lifetimeAtCycleStart = readingValue;
+        latestReading = readingValue;
+        latestLifetime = readingValue;
+      } else {
+        if (readingValue < latestReading) {
+          throw new BadRequestException(
+            `Dispenser counter cannot decrease inside counter cycle ${cycleNumber}.`,
+          );
+        }
+        latestReading = readingValue;
+        latestLifetime = lifetimeAtCycleStart + (readingValue - cycleStartReading);
+      }
+
+      await (tx as any).operationStationCounterReading.update({
+        where: { id: event.item.id },
+        data: {
+          lifetimeCounter: latestLifetime,
+          counterCycleNumber: cycleNumber,
+        },
+      });
+    }
+
+    if (latestReading !== null) {
+      await tx.station.update({
+        where: { id: stationId },
+        data: {
+          currentCounter: latestReading,
+          currentLifetimeCounter: latestLifetime,
+          currentCounterCycle: cycleNumber,
+        },
+      });
+    }
+  }
 
   private getEffectiveAssetLifetime(asset: any) {
     const storedLifetime = Number(asset?.currentLifetimeOdometer || 0);
@@ -2565,14 +2912,41 @@ export class OperationCorrectionsService {
     const { station, operation, movementType, quantity, reason, currentUser } = args;
     if (!station) throw new BadRequestException('Station is required for stock movement correction.');
 
+    if (this.getStationStructureType(station) === 'DISPENSER') {
+      throw new BadRequestException(
+        'Stock corrections must target the dispenser parent SHARED_TANK, not the DISPENSER.',
+      );
+    }
+
     const movementQuantity = Number(quantity || 0);
     const updatedStation = await tx.station.update({
       where: { id: station.id },
       data: { currentStock: { increment: movementQuantity } },
-      select: { currentStock: true },
+      select: { currentStock: true, capacity: true, companyId: true },
     });
     const balanceAfter = Number(updatedStation.currentStock || 0);
     const balanceBefore = balanceAfter - movementQuantity;
+
+    if (movementQuantity < 0) {
+      const company = await tx.company.findUnique({
+        where: { id: updatedStation.companyId },
+        select: { stationNegativeTolerancePercent: true },
+      });
+      const configuredPercent = Number(company?.stationNegativeTolerancePercent ?? 2);
+      const tolerancePercent =
+        Number.isFinite(configuredPercent) && configuredPercent >= 0 && configuredPercent <= 5
+          ? configuredPercent
+          : 2;
+      const capacity = Number(updatedStation.capacity || 0);
+      const minimumAllowedBalance =
+        capacity > 0 ? -Math.abs(capacity * (tolerancePercent / 100)) : 0;
+
+      if (balanceAfter < minimumAllowedBalance - 0.000001) {
+        throw new BadRequestException(
+          `Correction would exceed the allowed negative station balance. Expected ${balanceAfter.toFixed(2)} L; minimum ${minimumAllowedBalance.toFixed(2)} L.`,
+        );
+      }
+    }
 
     await tx.stationStockMovement.create({
       data: {
@@ -2753,6 +3127,33 @@ export class OperationCorrectionsService {
     }
   }
 
+
+  private validateStructureAwareCorrectionField(
+    fieldName: CorrectionField,
+    operation: any,
+  ) {
+    if (
+      fieldName === 'STATION_COUNTER' &&
+      this.getStationStructureType(operation.destinationStation) !== 'STANDALONE'
+    ) {
+      throw new BadRequestException(
+        'stationCounter correction is not available for a SHARED_TANK destination.',
+      );
+    }
+
+    if (
+      fieldName === 'DISPENSER_COUNTER_READING' &&
+      !(
+        operation.type === 'EXTERNAL_SUPPLY' &&
+        this.getStationStructureType(operation.destinationStation) === 'SHARED_TANK'
+      )
+    ) {
+      throw new BadRequestException(
+        'Dispenser counter reading correction is allowed only for External Supply to a SHARED_TANK.',
+      );
+    }
+  }
+
   private validateFieldAllowedForOperation(fieldName: CorrectionField, type: string) {
     if (fieldName === 'ASSET_ID' && !['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type)) {
       throw new BadRequestException('assetId correction is allowed only for refuel operations.');
@@ -2779,12 +3180,43 @@ export class OperationCorrectionsService {
       );
     }
 
+    if (
+      fieldName === 'DISPENSER_COUNTER_READING' &&
+      type !== 'EXTERNAL_SUPPLY'
+    ) {
+      throw new BadRequestException(
+        'Dispenser counter reading correction is allowed only for External Supply.',
+      );
+    }
+
     if (fieldName === 'TOTAL_COST_AT_OPERATION' && type !== 'EXTERNAL_DIRECT_REFUEL') {
       throw new BadRequestException('Invoice amount correction is allowed only for External Direct Refuel.');
     }
   }
 
   private async normalizeNewValue(fieldName: CorrectionField, value: any, operation: any, companyId: string) {
+    if (fieldName === 'DISPENSER_COUNTER_READING') {
+      const stationId = String(value?.stationId || '').trim();
+      const counter = Number(value?.counter);
+
+      if (!stationId || !Number.isFinite(counter) || counter < 0) {
+        throw new BadRequestException(
+          'Dispenser counter correction requires { stationId, counter }.',
+        );
+      }
+
+      const reading = operation.stationCounterReadings?.find(
+        (item: any) => item.stationId === stationId,
+      );
+      if (!reading) {
+        throw new NotFoundException(
+          'The selected dispenser reading was not recorded on this operation.',
+        );
+      }
+
+      return { stationId, counter };
+    }
+
     if (fieldName === 'QUANTITY' || fieldName === 'ODOMETER' || fieldName === 'STATION_COUNTER' || fieldName === 'TOTAL_COST_AT_OPERATION') {
       const num = Number(value);
       if (Number.isNaN(num)) throw new BadRequestException(`${fieldName} must be a number.`);
@@ -2823,6 +3255,12 @@ export class OperationCorrectionsService {
         where: { id: String(value), companyId, deletedAt: null },
       });
       if (!station) throw new NotFoundException('New station was not found.');
+
+      this.validateCorrectedStationStructure(
+        operation,
+        fieldName,
+        station,
+      );
 
       const targetProjectId = this.getHistoricalProjectForCorrection(operation, fieldName);
       const stationProjectId = await this.getStationProjectAtOperationTime(
@@ -2964,6 +3402,12 @@ export class OperationCorrectionsService {
       QUANTITY: operation.quantity,
       ODOMETER: operation.odometer,
       STATION_COUNTER: operation.stationCounter,
+      DISPENSER_COUNTER_READING: (operation.stationCounterReadings || []).map(
+        (item: any) => ({
+          stationId: item.stationId,
+          counter: Number(item.counterValue),
+        }),
+      ),
       EXTERNAL_STATION_NAME: operation.externalStationName,
       INVOICE_NUMBER: operation.invoiceNumber,
       TOTAL_COST_AT_OPERATION: operation.totalCostAtOperation,
@@ -2977,8 +3421,15 @@ export class OperationCorrectionsService {
     const operation = await (this.prisma as any).operation.findFirst({
       where: { id: operationId, companyId },
       include: {
-        sourceStation: true,
-        destinationStation: true,
+        sourceStation: {
+          include: { parentStation: true },
+        },
+        destinationStation: {
+          include: { parentStation: true },
+        },
+        stationCounterReadings: {
+          orderBy: [{ createdAt: 'asc' }],
+        },
         asset: true,
       },
     });
@@ -3058,6 +3509,8 @@ export class OperationCorrectionsService {
       HOUR_METER: 'ODOMETER',
       STATION_COUNTER: 'STATION_COUNTER',
       STATIONCOUNTER: 'STATION_COUNTER',
+      DISPENSER_COUNTER_READING: 'DISPENSER_COUNTER_READING',
+      DISPENSERCOUNTERREADING: 'DISPENSER_COUNTER_READING',
       EXTERNAL_STATION_NAME: 'EXTERNAL_STATION_NAME',
       EXTERNALSTATIONNAME: 'EXTERNAL_STATION_NAME',
       INVOICE_NUMBER: 'INVOICE_NUMBER',

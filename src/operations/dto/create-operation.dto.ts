@@ -1,5 +1,6 @@
 import {
   IsArray,
+  ValidateNested,
   IsDateString,
   IsEnum,
   IsNumber,
@@ -10,6 +11,7 @@ import {
   IsString,
   MaxLength,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export enum OperationTypeDto {
   DIRECT_REFUEL = 'DIRECT_REFUEL',
@@ -42,6 +44,16 @@ export type OperationAttachmentDto = {
   draftStatus?: 'PENDING' | 'CONSUMED';
   captureSource?: 'WEB' | 'CAMERA' | 'GALLERY';
 };
+
+
+export class OperationDispenserReadingDto {
+  @IsString()
+  stationId!: string;
+
+  @IsNumber()
+  @Min(0)
+  counter!: number;
+}
 
 export class CreateOperationDto {
   @IsEnum(OperationTypeDto)
@@ -129,6 +141,13 @@ export class CreateOperationDto {
   @IsOptional()
   @IsNumber()
   stationCounter?: number;
+
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => OperationDispenserReadingDto)
+  dispenserReadings?: OperationDispenserReadingDto[];
 
   @IsOptional()
   @IsString()

@@ -81,6 +81,32 @@ export class StationsService {
     return this.stationCreationDomainService.mapStationStatus(status);
   }
 
+  private mapStationStructureType(structureType?: string | null) {
+    return this.stationCreationDomainService.mapStructureType(structureType);
+  }
+
+  private getStationStructureType(station: any) {
+    return String(station?.structureType || 'STANDALONE')
+      .trim()
+      .toUpperCase();
+  }
+
+  private ensureInventoryOwnerStation(station: any, actionLabel: string) {
+    if (this.getStationStructureType(station) === 'DISPENSER') {
+      throw new BadRequestException(
+        `${actionLabel} is not allowed for a DISPENSER. Use its parent SHARED_TANK for stock actions.`,
+      );
+    }
+  }
+
+  private ensureCounterOwnerStation(station: any, actionLabel: string) {
+    if (this.getStationStructureType(station) === 'SHARED_TANK') {
+      throw new BadRequestException(
+        `${actionLabel} is not allowed for a SHARED_TANK because it has no direct counter.`,
+      );
+    }
+  }
+
   private parseOptionalDate(value?: string, fallback = new Date()) {
     if (!value) return fallback;
     const date = new Date(value);
@@ -279,6 +305,39 @@ export class StationsService {
             email: true,
           },
         },
+        parentStation: {
+          select: {
+            id: true,
+            stationId: true,
+            name: true,
+            structureType: true,
+            status: true,
+            projectId: true,
+          },
+        },
+        dispensers: {
+          where: {
+            deletedAt: null,
+          },
+          orderBy: {
+            stationId: 'asc',
+          },
+          select: {
+            id: true,
+            companyId: true,
+            stationId: true,
+            name: true,
+            type: true,
+            structureType: true,
+            parentStationId: true,
+            currentCounter: true,
+            currentLifetimeCounter: true,
+            currentCounterCycle: true,
+            status: true,
+            projectId: true,
+            createdAt: true,
+          },
+        },
       },
       orderBy: {
         createdAt: 'desc',
@@ -308,6 +367,24 @@ export class StationsService {
             code: true,
             name: true,
             projectManagerId: true,
+          },
+        },
+        parentStation: {
+          select: {
+            id: true,
+            stationId: true,
+            name: true,
+            structureType: true,
+            status: true,
+            projectId: true,
+          },
+        },
+        dispensers: {
+          where: {
+            deletedAt: null,
+          },
+          orderBy: {
+            stationId: 'asc',
           },
         },
         counterResetHistory: {
@@ -364,6 +441,8 @@ export class StationsService {
     stationId: string;
     name?: string;
     type?: string;
+    structureType?: string;
+    parentStationId?: string;
     capacity?: number;
     openingBalance?: number;
     currentCounter?: number;
@@ -425,6 +504,8 @@ export class StationsService {
       );
     }
 
+    const structureType = this.mapStationStructureType(body.structureType);
+
     const openingBalance =
       this.stationCreationDomainService.normalizeOpeningBalance(
         body.openingBalance,
@@ -447,6 +528,8 @@ export class StationsService {
           stationId,
           name: body.name,
           type: body.type,
+          structureType,
+          parentStationId: body.parentStationId || null,
           capacity,
           openingBalance,
           currentCounter,
@@ -466,6 +549,8 @@ export class StationsService {
       type?: string | null;
       capacity?: number | null;
       status?: string;
+      structureType?: never;
+      parentStationId?: never;
       projectId?: never;
       currentStock?: never;
       openingBalance?: never;
@@ -516,6 +601,15 @@ export class StationsService {
       }
     }
 
+    if (
+      Object.prototype.hasOwnProperty.call(body as any, 'structureType') ||
+      Object.prototype.hasOwnProperty.call(body as any, 'parentStationId')
+    ) {
+      throw new BadRequestException(
+        'Station structure and parent cannot be changed from edit. Create the correct station hierarchy instead.',
+      );
+    }
+
     if (Object.prototype.hasOwnProperty.call(body as any, 'projectId')) {
       throw new BadRequestException(
         'Station project cannot be changed from edit. Use station transfer workflow.',
@@ -537,6 +631,15 @@ export class StationsService {
     if (Object.prototype.hasOwnProperty.call(body as any, 'currentCounter')) {
       throw new BadRequestException(
         'Station counter cannot be changed from edit. Use counter reset workflow.',
+      );
+    }
+
+    if (
+      body.capacity !== undefined &&
+      this.getStationStructureType(existingStation) === 'DISPENSER'
+    ) {
+      throw new BadRequestException(
+        'DISPENSER stations do not own stock capacity',
       );
     }
 
@@ -589,6 +692,8 @@ export class StationsService {
     if (!station) {
       throw new NotFoundException('Station not found');
     }
+
+    this.ensureCounterOwnerStation(station, 'Counter reset');
 
     await this.ensureStationActionDirectPermission(
       station,
@@ -1772,6 +1877,8 @@ export class StationsService {
       throw new NotFoundException('Station not found');
     }
 
+    this.ensureInventoryOwnerStation(permissionStation, 'Inventory adjustment');
+
     await this.ensureStationActionDirectPermission(
       permissionStation,
       body.createdByUserId,
@@ -1866,6 +1973,8 @@ export class StationsService {
     if (!permissionStation) {
       throw new NotFoundException('Station not found');
     }
+
+    this.ensureInventoryOwnerStation(permissionStation, 'Zero balance');
 
     await this.ensureStationActionDirectPermission(
       permissionStation,
@@ -1985,6 +2094,15 @@ export class StationsService {
 
     if (!station) {
       throw new NotFoundException('Station not found');
+    }
+
+    if (actionType === 'COUNTER_RESET') {
+      this.ensureCounterOwnerStation(station, 'Counter reset');
+    } else {
+      this.ensureInventoryOwnerStation(
+        station,
+        actionType === 'ZERO_BALANCE' ? 'Zero balance' : 'Inventory adjustment',
+      );
     }
 
     if (!station.projectId || !station.project) {
@@ -2327,6 +2445,19 @@ export class StationsService {
     );
     const reviewerRoleName = reviewer.role?.name || '';
     const actionType = String(request.actionType || '').toUpperCase();
+
+    if (!request.station) {
+      throw new BadRequestException('Station is unavailable');
+    }
+
+    if (actionType === 'COUNTER_RESET') {
+      this.ensureCounterOwnerStation(request.station, 'Counter reset');
+    } else {
+      this.ensureInventoryOwnerStation(
+        request.station,
+        actionType === 'ZERO_BALANCE' ? 'Zero balance' : 'Inventory adjustment',
+      );
+    }
 
     if (actionType === 'INVENTORY_ADJUSTMENT') {
       if (!this.isAdminRole(reviewerRoleName)) {
@@ -2696,11 +2827,38 @@ export class StationsService {
       },
       include: {
         project: true,
+        dispensers: {
+          where: {
+            deletedAt: null,
+          },
+          select: {
+            id: true,
+            projectId: true,
+          },
+        },
       },
     });
 
     if (!station) {
       throw new NotFoundException('Station not found');
+    }
+
+    if (this.getStationStructureType(station) === 'DISPENSER') {
+      throw new BadRequestException(
+        'A DISPENSER cannot be transferred independently. Transfer its parent SHARED_TANK instead.',
+      );
+    }
+
+    if (
+      this.getStationStructureType(station) === 'SHARED_TANK' &&
+      station.dispensers.some(
+        (dispenser: any) =>
+          (dispenser.projectId || null) !== (station.projectId || null),
+      )
+    ) {
+      throw new BadRequestException(
+        'Shared tank hierarchy is inconsistent. All dispensers must belong to the same project before transfer.',
+      );
     }
 
     if (!station.projectId) {
@@ -2853,27 +3011,37 @@ export class StationsService {
         return transferRequest;
       }
 
-      await tx.station.update({
+      const hierarchyStationIds =
+        this.getStationStructureType(station) === 'SHARED_TANK'
+          ? [station.id, ...station.dispensers.map((item: any) => item.id)]
+          : [station.id];
+
+      await tx.station.updateMany({
         where: {
-          id: station.id,
+          id: {
+            in: hierarchyStationIds,
+          },
         },
         data: {
           projectId: toProjectId,
         },
       });
 
-      await tx.stationAssignmentHistory.create({
-        data: {
+      await tx.stationAssignmentHistory.createMany({
+        data: hierarchyStationIds.map((hierarchyStationId: string) => ({
           companyId: station.companyId,
-          stationId: station.id,
+          stationId: hierarchyStationId,
           fromProjectId: station.projectId,
           toProjectId,
           transferRequestId: transferRequest.id,
           assignmentType: 'TRANSFER' as any,
-          reason: 'Station transfer auto-approved and applied',
+          reason:
+            hierarchyStationId === station.id
+              ? 'Station transfer auto-approved and applied'
+              : 'Dispenser transferred with parent shared tank',
           assignedAt: now,
           assignedByUserId: requestedByUserId,
-        },
+        })),
       });
 
       return tx.stationTransferRequest.findFirst({
@@ -3263,23 +3431,73 @@ export class StationsService {
           data: { status: 'APPROVED', reviewedAt: now },
         });
 
-        await tx.station.update({
-          where: { id: request.stationId },
-          data: { projectId: request.toProjectId },
+        const transferStation = await tx.station.findUnique({
+          where: {
+            id: request.stationId,
+          },
+          include: {
+            dispensers: {
+              where: {
+                deletedAt: null,
+              },
+              select: {
+                id: true,
+                projectId: true,
+              },
+            },
+          },
         });
 
-        await tx.stationAssignmentHistory.create({
+        if (!transferStation) {
+          throw new NotFoundException('Station not found');
+        }
+
+        const hierarchyStationIds =
+          this.getStationStructureType(transferStation) === 'SHARED_TANK'
+            ? [
+                transferStation.id,
+                ...transferStation.dispensers.map((item: any) => item.id),
+              ]
+            : [transferStation.id];
+
+        if (
+          this.getStationStructureType(transferStation) === 'SHARED_TANK' &&
+          transferStation.dispensers.some(
+            (item: any) =>
+              (item.projectId || null) !== (request.fromProjectId || null),
+          )
+        ) {
+          throw new BadRequestException(
+            'Shared tank hierarchy is inconsistent. All dispensers must remain in the source project until final approval.',
+          );
+        }
+
+        await tx.station.updateMany({
+          where: {
+            id: {
+              in: hierarchyStationIds,
+            },
+          },
           data: {
+            projectId: request.toProjectId,
+          },
+        });
+
+        await tx.stationAssignmentHistory.createMany({
+          data: hierarchyStationIds.map((hierarchyStationId: string) => ({
             companyId: request.companyId,
-            stationId: request.stationId,
+            stationId: hierarchyStationId,
             fromProjectId: request.fromProjectId,
             toProjectId: request.toProjectId,
             transferRequestId: request.id,
             assignmentType: 'TRANSFER' as any,
-            reason: 'Station transfer approved and applied',
+            reason:
+              hierarchyStationId === request.stationId
+                ? 'Station transfer approved and applied'
+                : 'Dispenser transferred with parent shared tank',
             assignedAt: now,
             assignedByUserId: managerUserId,
-          },
+          })),
         });
 
         return tx.stationTransferRequest.update({
@@ -3334,11 +3552,26 @@ export class StationsService {
       },
       select: {
         id: true,
+        structureType: true,
       },
     });
 
     if (!station) {
       throw new NotFoundException('Station not found');
+    }
+
+    if (this.getStationStructureType(station) === 'SHARED_TANK') {
+      const childCount = await this.prisma.station.count({
+        where: {
+          parentStationId: station.id,
+        },
+      });
+
+      if (childCount > 0) {
+        throw new BadRequestException(
+          'Cannot hard-delete a SHARED_TANK while dispenser records still reference it',
+        );
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -3412,6 +3645,21 @@ export class StationsService {
 
     if (!station) {
       throw new NotFoundException('Station not found');
+    }
+
+    if (this.getStationStructureType(station) === 'SHARED_TANK') {
+      const childCount = await this.prisma.station.count({
+        where: {
+          parentStationId: station.id,
+          deletedAt: null,
+        },
+      });
+
+      if (childCount > 0) {
+        throw new BadRequestException(
+          'Cannot delete a SHARED_TANK while it still has dispensers. Remove the dispensers first or keep the tank inactive.',
+        );
+      }
     }
 
     const currentStock = Number(station.currentStock);

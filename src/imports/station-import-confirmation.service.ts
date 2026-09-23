@@ -7,6 +7,7 @@ import {
   ImportBatchStatus,
   ImportType,
   StationStatus,
+  StationStructureType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StationCreationDomainService } from '../stations/station-creation-domain.service';
@@ -75,18 +76,15 @@ export class StationImportConfirmationService {
       const data = this.asObject(row.normalizedData);
 
       const stationId = this.requiredString(data.stationId);
+      const structureType = this.parseStructureType(data.structureType);
+      const parentStationCode = this.optionalString(data.parentStationId);
       const projectCode = this.requiredString(data.projectCode);
       const projectId = this.requiredString(data.projectId);
-      const openingBalance = this.requiredNumber(data.openingBalance);
-      const currentCounter = this.requiredNumber(data.currentCounter);
+      const capacity = this.optionalNumber(data.capacity);
+      const openingBalance = this.optionalNumber(data.openingBalance);
+      const currentCounter = this.optionalNumber(data.currentCounter);
 
-      if (
-        !stationId ||
-        !projectCode ||
-        !projectId ||
-        openingBalance === null ||
-        currentCounter === null
-      ) {
+      if (!stationId || !structureType || !projectCode || !projectId) {
         this.fail(
           'BATCH_SNAPSHOT_INVALID',
           `Validated snapshot is incomplete at Excel row ${row.rowNumber}`,
@@ -100,10 +98,72 @@ export class StationImportConfirmationService {
         );
       }
 
-      if (openingBalance < 0 || currentCounter < 0) {
+      if (
+        capacity !== null &&
+        (!Number.isFinite(capacity) || capacity < 0)
+      ) {
         this.fail(
           'BATCH_SNAPSHOT_INVALID',
-          `Validated opening values are invalid at Excel row ${row.rowNumber}`,
+          `Validated capacity is invalid at Excel row ${row.rowNumber}`,
+        );
+      }
+
+      if (
+        openingBalance !== null &&
+        (!Number.isFinite(openingBalance) || openingBalance < 0)
+      ) {
+        this.fail(
+          'BATCH_SNAPSHOT_INVALID',
+          `Validated opening balance is invalid at Excel row ${row.rowNumber}`,
+        );
+      }
+
+      if (
+        currentCounter !== null &&
+        (!Number.isFinite(currentCounter) || currentCounter < 0)
+      ) {
+        this.fail(
+          'BATCH_SNAPSHOT_INVALID',
+          `Validated current counter is invalid at Excel row ${row.rowNumber}`,
+        );
+      }
+
+      if (
+        structureType === StationStructureType.STANDALONE &&
+        (openingBalance === null || currentCounter === null || parentStationCode)
+      ) {
+        this.fail(
+          'BATCH_SNAPSHOT_INVALID',
+          `STANDALONE snapshot is invalid at Excel row ${row.rowNumber}`,
+        );
+      }
+
+      if (
+        structureType === StationStructureType.SHARED_TANK &&
+        (
+          openingBalance === null ||
+          parentStationCode ||
+          (currentCounter !== null && currentCounter !== 0)
+        )
+      ) {
+        this.fail(
+          'BATCH_SNAPSHOT_INVALID',
+          `SHARED_TANK snapshot is invalid at Excel row ${row.rowNumber}`,
+        );
+      }
+
+      if (
+        structureType === StationStructureType.DISPENSER &&
+        (
+          !parentStationCode ||
+          currentCounter === null ||
+          (openingBalance !== null && openingBalance !== 0) ||
+          (capacity !== null && capacity !== 0)
+        )
+      ) {
+        this.fail(
+          'BATCH_SNAPSHOT_INVALID',
+          `DISPENSER snapshot is invalid at Excel row ${row.rowNumber}`,
         );
       }
 
@@ -113,12 +173,24 @@ export class StationImportConfirmationService {
           this.stationCreationDomainService.normalizeStationId(stationId),
         stationName: this.optionalString(data.stationName),
         stationType: this.optionalString(data.stationType),
-        capacity: this.optionalNumber(data.capacity),
+        structureType,
+        parentStationCode: parentStationCode
+          ? this.stationCreationDomainService.normalizeStationId(
+              parentStationCode,
+            )
+          : null,
+        capacity,
         projectCode:
           this.stationCreationDomainService.normalizeProjectCode(projectCode),
         projectId,
-        openingBalance,
-        currentCounter,
+        openingBalance:
+          structureType === StationStructureType.DISPENSER
+            ? 0
+            : openingBalance ?? 0,
+        currentCounter:
+          structureType === StationStructureType.SHARED_TANK
+            ? 0
+            : currentCounter ?? 0,
       };
     });
 
@@ -129,6 +201,14 @@ export class StationImportConfirmationService {
         'Validated snapshot contains duplicate Station IDs',
       );
     }
+
+    const referencedParentCodes = Array.from(
+      new Set(
+        preparedRows
+          .map((row) => row.parentStationCode)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    );
 
     try {
       const result = await this.prisma.$transaction(
@@ -156,13 +236,23 @@ export class StationImportConfirmationService {
             );
           }
 
-          const [existingStations, projects] = await Promise.all([
+          const lookupCodes = Array.from(
+            new Set([...stationIds, ...referencedParentCodes]),
+          );
+
+          const [stationLookupRows, projects] = await Promise.all([
             tx.station.findMany({
               where: {
                 companyId: batch.companyId,
-                stationId: { in: stationIds, mode: 'insensitive' },
+                stationId: { in: lookupCodes, mode: 'insensitive' },
               },
-              select: { stationId: true, deletedAt: true },
+              select: {
+                id: true,
+                stationId: true,
+                structureType: true,
+                projectId: true,
+                deletedAt: true,
+              },
             }),
             tx.project.findMany({
               where: {
@@ -179,20 +269,26 @@ export class StationImportConfirmationService {
             }),
           ]);
 
-          if (existingStations.length > 0) {
-            const existing = existingStations[0];
-            const code =
+          const existingStationByCode = new Map(
+            stationLookupRows.map((station) => [
               this.stationCreationDomainService.normalizeStationId(
-                existing.stationId,
-              );
+                station.stationId,
+              ),
+              station,
+            ]),
+          );
+
+          for (const stationId of stationIds) {
+            const existing = existingStationByCode.get(stationId);
+            if (!existing) continue;
 
             this.fail(
               existing.deletedAt
                 ? 'STATION_ID_PREVIOUSLY_USED'
                 : 'STATION_ID_ALREADY_EXISTS',
               existing.deletedAt
-                ? `Station ID ${code} was previously used by a deleted station`
-                : `Station ID ${code} already exists`,
+                ? `Station ID ${stationId} was previously used by a deleted station`
+                : `Station ID ${stationId} already exists`,
             );
           }
 
@@ -226,16 +322,46 @@ export class StationImportConfirmationService {
             id: string;
             stationId: string;
             name: string | null;
+            structureType: StationStructureType;
+            parentStationId: string | null;
             rowNumber: number;
           }> = [];
 
-          for (const row of preparedRows) {
+          const availableParentByCode = new Map<
+            string,
+            {
+              id: string;
+              stationId: string;
+              structureType: StationStructureType;
+              projectId: string | null;
+            }
+          >();
+
+          for (const code of referencedParentCodes) {
+            const existing = existingStationByCode.get(code);
+            if (!existing || existing.deletedAt) continue;
+
+            availableParentByCode.set(code, {
+              id: existing.id,
+              stationId: existing.stationId,
+              structureType: existing.structureType,
+              projectId: existing.projectId,
+            });
+          }
+
+          const parentAndStandaloneRows = preparedRows.filter(
+            (row) => row.structureType !== StationStructureType.DISPENSER,
+          );
+
+          for (const row of parentAndStandaloneRows) {
             const station =
               await this.stationCreationDomainService.createStation(tx, {
                 companyId: batch.companyId,
                 stationId: row.stationId,
                 name: row.stationName,
                 type: row.stationType,
+                structureType: row.structureType,
+                parentStationId: null,
                 capacity: row.capacity,
                 openingBalance: row.openingBalance,
                 currentCounter: row.currentCounter,
@@ -248,9 +374,84 @@ export class StationImportConfirmationService {
               id: station.id,
               stationId: station.stationId,
               name: station.name,
+              structureType: station.structureType,
+              parentStationId: station.parentStationId,
+              rowNumber: row.rowNumber,
+            });
+
+            if (row.structureType === StationStructureType.SHARED_TANK) {
+              availableParentByCode.set(row.stationId, {
+                id: station.id,
+                stationId: station.stationId,
+                structureType: station.structureType,
+                projectId: station.projectId,
+              });
+            }
+          }
+
+          const dispenserRows = preparedRows.filter(
+            (row) => row.structureType === StationStructureType.DISPENSER,
+          );
+
+          for (const row of dispenserRows) {
+            const parentCode = row.parentStationCode;
+            if (!parentCode) {
+              this.fail(
+                'BATCH_SNAPSHOT_INVALID',
+                `DISPENSER parent is missing at Excel row ${row.rowNumber}`,
+              );
+            }
+
+            const parent = availableParentByCode.get(parentCode);
+
+            if (!parent) {
+              this.fail(
+                'PARENT_STATION_NOT_FOUND',
+                `Parent Station ID ${parentCode} is no longer available`,
+              );
+            }
+
+            if (parent.structureType !== StationStructureType.SHARED_TANK) {
+              this.fail(
+                'PARENT_MUST_BE_SHARED_TANK',
+                `Parent Station ID ${parentCode} is not a SHARED_TANK`,
+              );
+            }
+
+            if ((parent.projectId || null) !== row.projectId) {
+              this.fail(
+                'PARENT_PROJECT_MISMATCH',
+                `DISPENSER ${row.stationId} and parent ${parentCode} must belong to the same project`,
+              );
+            }
+
+            const station =
+              await this.stationCreationDomainService.createStation(tx, {
+                companyId: batch.companyId,
+                stationId: row.stationId,
+                name: row.stationName,
+                type: row.stationType,
+                structureType: row.structureType,
+                parentStationId: parent.id,
+                capacity: null,
+                openingBalance: 0,
+                currentCounter: row.currentCounter,
+                projectId: row.projectId,
+                status: StationStatus.ACTIVE,
+                createdById: context.actor.id,
+              });
+
+            createdStations.push({
+              id: station.id,
+              stationId: station.stationId,
+              name: station.name,
+              structureType: station.structureType,
+              parentStationId: station.parentStationId,
               rowNumber: row.rowNumber,
             });
           }
+
+          createdStations.sort((a, b) => a.rowNumber - b.rowNumber);
 
           const completedBatch = await tx.importBatch.update({
             where: { id: batch.id },
@@ -300,6 +501,27 @@ export class StationImportConfirmationService {
     }
   }
 
+  private parseStructureType(value: unknown): StationStructureType | null {
+    const normalized = String(value ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+
+    if (normalized === StationStructureType.STANDALONE) {
+      return StationStructureType.STANDALONE;
+    }
+
+    if (normalized === StationStructureType.SHARED_TANK) {
+      return StationStructureType.SHARED_TANK;
+    }
+
+    if (normalized === StationStructureType.DISPENSER) {
+      return StationStructureType.DISPENSER;
+    }
+
+    return null;
+  }
+
   private requiredString(value: unknown) {
     if (typeof value !== 'string') return '';
     return value.trim();
@@ -309,19 +531,6 @@ export class StationImportConfirmationService {
     if (value === null || value === undefined) return null;
     const normalized = String(value).trim();
     return normalized || null;
-  }
-
-  private requiredNumber(value: unknown): number | null {
-    if (
-      value === null ||
-      value === undefined ||
-      (typeof value === 'string' && value.trim() === '')
-    ) {
-      return null;
-    }
-
-    const number = Number(value);
-    return Number.isFinite(number) ? number : null;
   }
 
   private optionalNumber(value: unknown): number | null {

@@ -23,6 +23,8 @@ export class StationsController {
       stationId: string;
       name?: string;
       type?: string;
+      structureType?: 'STANDALONE' | 'SHARED_TANK' | 'DISPENSER';
+      parentStationId?: string;
       capacity?: number;
       openingBalance?: number;
       currentCounter?: number;
@@ -136,6 +138,8 @@ export class StationsController {
       type?: string | null;
       capacity?: number | null;
       status?: string;
+      structureType?: never;
+      parentStationId?: never;
       projectId?: never;
       currentStock?: never;
       openingBalance?: never;

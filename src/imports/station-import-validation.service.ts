@@ -7,6 +7,7 @@ import {
   ImportBatchStatus,
   ImportType,
   Prisma,
+  StationStructureType,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StationCreationDomainService } from '../stations/station-creation-domain.service';
@@ -114,6 +115,18 @@ export class StationImportValidationService {
         ),
       );
 
+      const parentStationIds = Array.from(
+        new Set(
+          rows
+            .map((row) => this.getNormalizedString(row, 'parentStationId'))
+            .filter((value): value is string => Boolean(value)),
+        ),
+      );
+
+      const stationLookupIds = Array.from(
+        new Set([...stationIds, ...parentStationIds]),
+      );
+
       const projectCodes = Array.from(
         new Set(
           rows
@@ -126,9 +139,16 @@ export class StationImportValidationService {
         this.prisma.station.findMany({
           where: {
             companyId: batch.companyId,
-            stationId: { in: stationIds, mode: 'insensitive' },
+            stationId: { in: stationLookupIds, mode: 'insensitive' },
           },
-          select: { stationId: true, deletedAt: true },
+          select: {
+            id: true,
+            stationId: true,
+            structureType: true,
+            projectId: true,
+            status: true,
+            deletedAt: true,
+          },
         }),
         this.prisma.project.findMany({
           where: {
@@ -145,13 +165,27 @@ export class StationImportValidationService {
         }),
       ]);
 
-      const existingStationById = new Map(
+      const existingStationByCode = new Map(
         existingStations.map((station) => [
           this.stationCreationDomainService.normalizeStationId(
             station.stationId,
           ),
           station,
         ]),
+      );
+
+      const uploadedRowByStationId = new Map(
+        rows
+          .map((row) => [
+            this.getNormalizedString(row, 'stationId'),
+            row,
+          ] as const)
+          .filter(
+            (
+              pair,
+            ): pair is readonly [string, ValidatedStationRow] =>
+              Boolean(pair[0]),
+          ),
       );
 
       const projectByCode = new Map(
@@ -166,7 +200,7 @@ export class StationImportValidationService {
         const projectCode = this.getNormalizedString(row, 'projectCode');
 
         if (stationId) {
-          const existingStation = existingStationById.get(stationId);
+          const existingStation = existingStationByCode.get(stationId);
           if (existingStation) {
             this.addError(row, {
               code: existingStation.deletedAt
@@ -201,7 +235,14 @@ export class StationImportValidationService {
             row.computedData.projectId = project.id;
           }
         }
+      }
 
+      for (const row of rows) {
+        this.applyParentStationValidation(
+          row,
+          uploadedRowByStationId,
+          existingStationByCode,
+        );
         row.isValid = row.errors.length === 0;
       }
 
@@ -364,14 +405,18 @@ export class StationImportValidationService {
     );
     const stationName = this.text(source.stationName).trim();
     const stationType = this.text(source.stationType).trim();
+    const structureType = this.normalizeStructureType(source.structureType);
+    const parentStationId = this.stationCreationDomainService.normalizeStationId(
+      this.text(source.parentStationId),
+    );
     const projectCode =
       this.stationCreationDomainService.normalizeProjectCode(
         this.text(source.projectCode),
       );
 
     const capacity = this.optionalNumber(source.capacity);
-    const openingBalance = this.requiredNumber(source.openingBalance);
-    const currentCounter = this.requiredNumber(source.currentCounter);
+    const openingBalance = this.optionalNumber(source.openingBalance);
+    const currentCounter = this.optionalNumber(source.currentCounter);
 
     const row: ValidatedStationRow = {
       id,
@@ -380,6 +425,8 @@ export class StationImportValidationService {
         stationId,
         stationName,
         stationType,
+        structureType: structureType || '',
+        parentStationId,
         capacity: capacity ?? '',
         projectCode,
         openingBalance: openingBalance ?? '',
@@ -388,8 +435,14 @@ export class StationImportValidationService {
       },
       computedData: {
         status: 'ACTIVE',
-        currentStock: openingBalance ?? '',
-        currentLifetimeCounter: currentCounter ?? '',
+        currentStock:
+          structureType === StationStructureType.DISPENSER
+            ? 0
+            : openingBalance ?? '',
+        currentLifetimeCounter:
+          structureType === StationStructureType.SHARED_TANK
+            ? 0
+            : currentCounter ?? '',
         currentCounterCycle: 1,
       },
       errors: [],
@@ -405,6 +458,15 @@ export class StationImportValidationService {
       });
     }
 
+    if (!structureType) {
+      this.addError(row, {
+        code: 'INVALID_STATION_STRUCTURE_TYPE',
+        field: 'structureType',
+        message:
+          'Structure Type is required and must be STANDALONE, SHARED_TANK, or DISPENSER',
+      });
+    }
+
     if (!projectCode) {
       this.addError(row, {
         code: 'EMPTY_PROJECT_CODE',
@@ -413,13 +475,27 @@ export class StationImportValidationService {
       });
     }
 
-    if (openingBalance === null) {
+    if (!this.isBlank(source.capacity) && capacity === null) {
+      this.addError(row, {
+        code: 'INVALID_CAPACITY',
+        field: 'capacity',
+        message: 'Capacity must be a valid number when provided',
+      });
+    } else if (capacity !== null && capacity < 0) {
+      this.addError(row, {
+        code: 'NEGATIVE_CAPACITY',
+        field: 'capacity',
+        message: 'Capacity must be zero or positive',
+      });
+    }
+
+    if (!this.isBlank(source.openingBalance) && openingBalance === null) {
       this.addError(row, {
         code: 'INVALID_OPENING_BALANCE',
         field: 'openingBalance',
-        message: 'Opening Balance is required and must be a valid number',
+        message: 'Opening Balance must be a valid number when provided',
       });
-    } else if (openingBalance < 0) {
+    } else if (openingBalance !== null && openingBalance < 0) {
       this.addError(row, {
         code: 'NEGATIVE_OPENING_BALANCE',
         field: 'openingBalance',
@@ -427,13 +503,13 @@ export class StationImportValidationService {
       });
     }
 
-    if (currentCounter === null) {
+    if (!this.isBlank(source.currentCounter) && currentCounter === null) {
       this.addError(row, {
         code: 'INVALID_CURRENT_COUNTER',
         field: 'currentCounter',
-        message: 'Current Counter is required and must be a valid number',
+        message: 'Current Counter must be a valid number when provided',
       });
-    } else if (currentCounter < 0) {
+    } else if (currentCounter !== null && currentCounter < 0) {
       this.addError(row, {
         code: 'NEGATIVE_CURRENT_COUNTER',
         field: 'currentCounter',
@@ -441,18 +517,215 @@ export class StationImportValidationService {
       });
     }
 
-    if (
-      !this.isBlank(source.capacity) &&
-      capacity === null
-    ) {
-      this.addError(row, {
-        code: 'INVALID_CAPACITY',
-        field: 'capacity',
-        message: 'Capacity must be a valid number when provided',
-      });
+    if (structureType === StationStructureType.STANDALONE) {
+      if (parentStationId) {
+        this.addError(row, {
+          code: 'PARENT_NOT_ALLOWED',
+          field: 'parentStationId',
+          message: 'STANDALONE stations cannot have a parent station',
+        });
+      }
+
+      if (openingBalance === null) {
+        this.addError(row, {
+          code: 'OPENING_BALANCE_REQUIRED',
+          field: 'openingBalance',
+          message: 'Opening Balance is required for STANDALONE stations',
+        });
+      }
+
+      if (currentCounter === null) {
+        this.addError(row, {
+          code: 'CURRENT_COUNTER_REQUIRED',
+          field: 'currentCounter',
+          message: 'Current Counter is required for STANDALONE stations',
+        });
+      }
+    }
+
+    if (structureType === StationStructureType.SHARED_TANK) {
+      if (parentStationId) {
+        this.addError(row, {
+          code: 'PARENT_NOT_ALLOWED',
+          field: 'parentStationId',
+          message: 'SHARED_TANK stations cannot have a parent station',
+        });
+      }
+
+      if (openingBalance === null) {
+        this.addError(row, {
+          code: 'OPENING_BALANCE_REQUIRED',
+          field: 'openingBalance',
+          message: 'Opening Balance is required for SHARED_TANK stations',
+        });
+      }
+
+      if (currentCounter !== null && currentCounter !== 0) {
+        this.addError(row, {
+          code: 'SHARED_TANK_COUNTER_NOT_ALLOWED',
+          field: 'currentCounter',
+          message: 'SHARED_TANK stations do not have a direct counter',
+        });
+      }
+    }
+
+    if (structureType === StationStructureType.DISPENSER) {
+      if (!parentStationId) {
+        this.addError(row, {
+          code: 'PARENT_STATION_REQUIRED',
+          field: 'parentStationId',
+          message: 'Parent Station ID is required for DISPENSER stations',
+        });
+      }
+
+      if (stationId && parentStationId && stationId === parentStationId) {
+        this.addError(row, {
+          code: 'PARENT_STATION_SELF_REFERENCE',
+          field: 'parentStationId',
+          message: 'A DISPENSER cannot reference itself as its parent station',
+        });
+      }
+
+      if (openingBalance !== null && openingBalance !== 0) {
+        this.addError(row, {
+          code: 'DISPENSER_OPENING_BALANCE_NOT_ALLOWED',
+          field: 'openingBalance',
+          message: 'DISPENSER stations do not own stock opening balance',
+        });
+      }
+
+      if (capacity !== null && capacity !== 0) {
+        this.addError(row, {
+          code: 'DISPENSER_CAPACITY_NOT_ALLOWED',
+          field: 'capacity',
+          message: 'DISPENSER stations do not own stock capacity',
+        });
+      }
+
+      if (currentCounter === null) {
+        this.addError(row, {
+          code: 'CURRENT_COUNTER_REQUIRED',
+          field: 'currentCounter',
+          message: 'Current Counter is required for DISPENSER stations',
+        });
+      }
     }
 
     return row;
+  }
+
+  private applyParentStationValidation(
+    row: ValidatedStationRow,
+    uploadedRowByStationId: Map<string, ValidatedStationRow>,
+    existingStationByCode: Map<
+      string,
+      {
+        id: string;
+        stationId: string;
+        structureType: StationStructureType;
+        projectId: string | null;
+        status: unknown;
+        deletedAt: Date | null;
+      }
+    >,
+  ) {
+    const structureType = this.getNormalizedString(row, 'structureType');
+    if (structureType !== StationStructureType.DISPENSER) return;
+
+    const parentStationId = this.getNormalizedString(row, 'parentStationId');
+    if (!parentStationId) return;
+
+    const rowProjectId = this.getNormalizedString(row, 'projectId');
+    const uploadedParent = uploadedRowByStationId.get(parentStationId);
+
+    if (uploadedParent) {
+      const parentStructureType =
+        this.getNormalizedString(uploadedParent, 'structureType');
+      const parentProjectId =
+        this.getNormalizedString(uploadedParent, 'projectId');
+
+      if (parentStructureType !== StationStructureType.SHARED_TANK) {
+        this.addError(row, {
+          code: 'PARENT_MUST_BE_SHARED_TANK',
+          field: 'parentStationId',
+          message: 'DISPENSER parent must be a SHARED_TANK',
+        });
+      }
+
+      if (
+        rowProjectId &&
+        parentProjectId &&
+        rowProjectId !== parentProjectId
+      ) {
+        this.addError(row, {
+          code: 'PARENT_PROJECT_MISMATCH',
+          field: 'parentStationId',
+          message:
+            'DISPENSER and parent SHARED_TANK must belong to the same project',
+        });
+      }
+
+      row.computedData.parentStationSource = 'FILE';
+      row.computedData.parentStationId = parentStationId;
+      return;
+    }
+
+    const existingParent = existingStationByCode.get(parentStationId);
+
+    if (!existingParent || existingParent.deletedAt) {
+      this.addError(row, {
+        code: 'PARENT_STATION_NOT_FOUND',
+        field: 'parentStationId',
+        message:
+          'Parent Station ID must identify a SHARED_TANK in this company or another row in this file',
+      });
+      return;
+    }
+
+    if (existingParent.structureType !== StationStructureType.SHARED_TANK) {
+      this.addError(row, {
+        code: 'PARENT_MUST_BE_SHARED_TANK',
+        field: 'parentStationId',
+        message: 'DISPENSER parent must be a SHARED_TANK',
+      });
+    }
+
+    if (
+      rowProjectId &&
+      (existingParent.projectId || null) !== rowProjectId
+    ) {
+      this.addError(row, {
+        code: 'PARENT_PROJECT_MISMATCH',
+        field: 'parentStationId',
+        message:
+          'DISPENSER and parent SHARED_TANK must belong to the same project',
+      });
+    }
+
+    row.computedData.parentStationSource = 'DATABASE';
+    row.computedData.parentStationBackendId = existingParent.id;
+    row.computedData.parentStationId = parentStationId;
+  }
+
+  private normalizeStructureType(value: unknown): StationStructureType | null {
+    const normalized = String(value ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+
+    if (normalized === StationStructureType.STANDALONE) {
+      return StationStructureType.STANDALONE;
+    }
+
+    if (normalized === StationStructureType.SHARED_TANK) {
+      return StationStructureType.SHARED_TANK;
+    }
+
+    if (normalized === StationStructureType.DISPENSER) {
+      return StationStructureType.DISPENSER;
+    }
+
+    return null;
   }
 
   private applyDuplicateStationIdErrors(rows: ValidatedStationRow[]) {
@@ -489,12 +762,6 @@ export class StationImportValidationService {
   }
 
   private optionalNumber(value: unknown): number | null {
-    if (this.isBlank(value)) return null;
-    const number = Number(value);
-    return Number.isFinite(number) ? number : null;
-  }
-
-  private requiredNumber(value: unknown): number | null {
     if (this.isBlank(value)) return null;
     const number = Number(value);
     return Number.isFinite(number) ? number : null;

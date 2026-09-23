@@ -25,24 +25,24 @@ enum OperationPhotoCaptureSource {
 }
 
 model Company {
-  id                                String                          @id @default(cuid())
+  id                                String                           @id @default(cuid())
   name                              String
-  code                              String                          @unique
+  code                              String                           @unique
   country                           String?
   city                              String?
-  timezone                          String                          @default("Asia/Riyadh")
+  timezone                          String                           @default("Asia/Riyadh")
   logoUrl                           String?
-  subscriptionPlan                  String                          @default("trial")
-  isActive                          Boolean                         @default(true)
-  dataImportEnabled                 Boolean                         @default(false)
-  multiProjectEnabled               Boolean                         @default(false)
-  mobilePhotoSourcePolicy           MobilePhotoSourcePolicy         @default(CAMERA_ONLY)
-  saveCapturedPhotosToDeviceGallery Boolean                         @default(false)
-  stationNegativeTolerancePercent   Float                           @default(2)
-  currency                          String                          @default("SAR")
-  language                          String                          @default("EN-AR")
-  createdAt                         DateTime                        @default(now())
-  updatedAt                         DateTime                        @updatedAt
+  subscriptionPlan                  String                           @default("trial")
+  isActive                          Boolean                          @default(true)
+  dataImportEnabled                 Boolean                          @default(false)
+  multiProjectEnabled               Boolean                          @default(false)
+  mobilePhotoSourcePolicy           MobilePhotoSourcePolicy          @default(CAMERA_ONLY)
+  saveCapturedPhotosToDeviceGallery Boolean                          @default(false)
+  stationNegativeTolerancePercent   Float                            @default(2)
+  currency                          String                           @default("SAR")
+  language                          String                           @default("EN-AR")
+  createdAt                         DateTime                         @default(now())
+  updatedAt                         DateTime                         @updatedAt
   deletedAt                         DateTime?
   assets                            Asset[]
   assetActionRequests               AssetActionRequest[]
@@ -54,6 +54,7 @@ model Company {
   employeeTransferRequests          EmployeeTransferRequest[]
   operations                        Operation[]
   operationCorrections              OperationCorrection[]
+  operationStationCounterReadings   OperationStationCounterReading[]
   operationPhotoDrafts              OperationPhotoDraft[]
   projects                          Project[]
   projectFuelPriceHistory           ProjectFuelPriceHistory[]
@@ -674,38 +675,45 @@ model AssetAssignmentHistory {
 }
 
 model Station {
-  id                     String                     @id @default(cuid())
-  companyId              String
-  stationId              String
-  name                   String?
-  type                   String?
-  capacity               Float?
-  openingBalance         Float                      @default(0)
-  currentStock           Float                      @default(0)
-  currentCounter         Float                      @default(0)
-  status                 StationStatus              @default(ACTIVE)
-  projectId              String?
-  createdById            String?
-  createdAt              DateTime                   @default(now())
-  updatedAt              DateTime                   @updatedAt
-  deletedAt              DateTime?
-  currentCounterCycle    Int                        @default(1)
-  currentLifetimeCounter Float                      @default(0)
-  destinationOperations  Operation[]                @relation("OperationDestinationStation")
-  sourceOperations       Operation[]                @relation("OperationSourceStation")
-  company                Company                    @relation(fields: [companyId], references: [id])
-  createdBy              User?                      @relation("StationCreatedBy", fields: [createdById], references: [id])
-  project                Project?                   @relation(fields: [projectId], references: [id])
-  assignmentHistory      StationAssignmentHistory[]
-  counterResetHistory    StationCounterReset[]
-  stockMovements         StationStockMovement[]
-  transferRequests       StationTransferRequest[]
-  actionRequests         StationActionRequest[]
+  id                       String                           @id @default(cuid())
+  companyId                String
+  stationId                String
+  name                     String?
+  type                     String?
+  structureType            StationStructureType             @default(STANDALONE)
+  parentStationId          String?
+  capacity                 Float?
+  openingBalance           Float                            @default(0)
+  currentStock             Float                            @default(0)
+  currentCounter           Float                            @default(0)
+  status                   StationStatus                    @default(ACTIVE)
+  projectId                String?
+  createdById              String?
+  createdAt                DateTime                         @default(now())
+  updatedAt                DateTime                         @updatedAt
+  deletedAt                DateTime?
+  currentCounterCycle      Int                              @default(1)
+  currentLifetimeCounter   Float                            @default(0)
+  destinationOperations    Operation[]                      @relation("OperationDestinationStation")
+  sourceOperations         Operation[]                      @relation("OperationSourceStation")
+  company                  Company                          @relation(fields: [companyId], references: [id])
+  createdBy                User?                            @relation("StationCreatedBy", fields: [createdById], references: [id])
+  project                  Project?                         @relation(fields: [projectId], references: [id])
+  parentStation            Station?                         @relation("StationHierarchy", fields: [parentStationId], references: [id])
+  dispensers               Station[]                        @relation("StationHierarchy")
+  operationCounterReadings OperationStationCounterReading[]
+  assignmentHistory        StationAssignmentHistory[]
+  counterResetHistory      StationCounterReset[]
+  stockMovements           StationStockMovement[]
+  transferRequests         StationTransferRequest[]
+  actionRequests           StationActionRequest[]
 
   @@unique([companyId, stationId])
   @@index([companyId])
   @@index([projectId])
   @@index([status])
+  @@index([structureType])
+  @@index([parentStationId])
 }
 
 model StationCounterReset {
@@ -787,8 +795,8 @@ model Operation {
   locationAccuracy   Float?
   locationCapturedAt DateTime?
 
-  createdAt                         DateTime                 @default(now())
-  updatedAt                         DateTime                 @updatedAt
+  createdAt                         DateTime                         @default(now())
+  updatedAt                         DateTime                         @updatedAt
   fuelPriceHistoryId                String?
   pricePerLiterAtOperation          Float?
   totalCostAtOperation              Float?
@@ -808,15 +816,16 @@ model Operation {
   sourceProjectNameAtOperation      String?
   destinationProjectIdAtOperation   String?
   destinationProjectNameAtOperation String?
-  asset                             Asset?                   @relation(fields: [assetId], references: [id])
-  company                           Company                  @relation(fields: [companyId], references: [id])
-  destinationStation                Station?                 @relation("OperationDestinationStation", fields: [destinationStationId], references: [id])
-  fuelPriceHistory                  ProjectFuelPriceHistory? @relation(fields: [fuelPriceHistoryId], references: [id])
-  requestedBy                       User                     @relation("OperationRequestedBy", fields: [requestedByUserId], references: [id])
-  sourceStation                     Station?                 @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
+  asset                             Asset?                           @relation(fields: [assetId], references: [id])
+  company                           Company                          @relation(fields: [companyId], references: [id])
+  destinationStation                Station?                         @relation("OperationDestinationStation", fields: [destinationStationId], references: [id])
+  fuelPriceHistory                  ProjectFuelPriceHistory?         @relation(fields: [fuelPriceHistoryId], references: [id])
+  requestedBy                       User                             @relation("OperationRequestedBy", fields: [requestedByUserId], references: [id])
+  sourceStation                     Station?                         @relation("OperationSourceStation", fields: [sourceStationId], references: [id])
   approvals                         OperationApproval[]
   corrections                       OperationCorrection[]
   photoDrafts                       OperationPhotoDraft[]
+  stationCounterReadings            OperationStationCounterReading[]
 
   @@unique([companyId, operationNo])
   @@unique([companyId, clientOperationId])
@@ -838,6 +847,26 @@ model Operation {
   @@index([createdAt])
   @@index([companyId, createdAt])
   @@index([companyId, status, createdAt])
+}
+
+model OperationStationCounterReading {
+  id                 String    @id @default(cuid())
+  operationId        String
+  companyId          String
+  stationId          String
+  counterValue       Float
+  lifetimeCounter    Float?
+  counterCycleNumber Int?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  operation          Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+  company            Company   @relation(fields: [companyId], references: [id])
+  station            Station   @relation(fields: [stationId], references: [id])
+
+  @@unique([operationId, stationId])
+  @@index([companyId])
+  @@index([stationId])
+  @@index([createdAt])
 }
 
 model OperationPhotoDraft {
@@ -1105,6 +1134,12 @@ enum AssetStatus {
 enum StationAssignmentType {
   INITIAL_ASSIGNMENT
   TRANSFER
+}
+
+enum StationStructureType {
+  STANDALONE
+  SHARED_TANK
+  DISPENSER
 }
 
 enum StationStatus {

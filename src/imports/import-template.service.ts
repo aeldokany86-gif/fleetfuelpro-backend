@@ -65,7 +65,7 @@ const ASSET_COLUMNS = [
 ] as const;
 
 const STATIONS_TEMPLATE_TYPE = 'STATIONS';
-const STATIONS_SCHEMA_VERSION = 1;
+const STATIONS_SCHEMA_VERSION = 2;
 const STATIONS_MAX_ROWS = 500;
 
 const STATION_COLUMNS = [
@@ -91,9 +91,24 @@ const STATION_COLUMNS = [
     ar: 'نوع المحطة',
   },
   {
+    canonicalField: 'structureType',
+    required: true,
+    type: 'enum',
+    en: 'Structure Type',
+    ar: 'نوع الهيكل',
+  },
+  {
+    canonicalField: 'parentStationId',
+    required: false,
+    type: 'text',
+    en: 'Parent Station ID',
+    ar: 'كود المحطة الرئيسية',
+  },
+  {
     canonicalField: 'capacity',
     required: false,
     type: 'number',
+    minInclusive: 0,
     en: 'Capacity',
     ar: 'السعة',
   },
@@ -106,7 +121,7 @@ const STATION_COLUMNS = [
   },
   {
     canonicalField: 'openingBalance',
-    required: true,
+    required: false,
     type: 'number',
     minInclusive: 0,
     en: 'Opening Balance',
@@ -114,7 +129,7 @@ const STATION_COLUMNS = [
   },
   {
     canonicalField: 'currentCounter',
-    required: true,
+    required: false,
     type: 'number',
     minInclusive: 0,
     en: 'Current Counter',
@@ -643,25 +658,27 @@ export class ImportTemplateService {
     const instructionsText = isArabic
       ? [
           '1. أدخل البيانات في ورقة "المحطات" فقط ولا تغيّر أسماء الأعمدة.',
-          '2. الحقول المطلوبة: كود المحطة، كود المشروع، الرصيد الافتتاحي، العداد الحالي.',
-          '3. كود المحطة وكود المشروع لا يتأثران بحالة الأحرف؛ مثال ST001 و st001 يعتبران نفس الكود.',
-          '4. يجب أن يشير كود المشروع إلى مشروع نشط داخل نفس الشركة.',
-          '5. اسم المحطة ونوع المحطة والسعة حقول اختيارية.',
-          '6. الرصيد الافتتاحي والعداد الحالي يجب أن يكونا صفرًا أو أكبر.',
-          '7. كل محطة مستوردة تُنشأ تلقائيًا بحالة ACTIVE، ويبدأ المخزون الحالي من الرصيد الافتتاحي.',
-          '8. الحد الأقصى للاستيراد في هذه النسخة هو 500 محطة.',
-          '9. لا تحذف أو تعدل ورقة النظام المخفية _fleetfuel_meta.',
+          '2. نوع الهيكل مطلوب ويجب أن يكون STANDALONE أو SHARED_TANK أو DISPENSER.',
+          '3. STANDALONE: أدخل الرصيد الافتتاحي والعداد الحالي، واترك كود المحطة الرئيسية فارغًا.',
+          '4. SHARED_TANK: أدخل الرصيد الافتتاحي والسعة عند الحاجة، واترك العداد الحالي وكود المحطة الرئيسية فارغين.',
+          '5. DISPENSER: أدخل كود المحطة الرئيسية والعداد الحالي، واترك الرصيد الافتتاحي والسعة فارغين.',
+          '6. يمكن أن تكون المحطة الرئيسية في نفس الملف أو موجودة مسبقًا، ويجب أن تكون SHARED_TANK داخل نفس الشركة ونفس المشروع.',
+          '7. كود المحطة وكود المشروع لا يتأثران بحالة الأحرف، ويجب أن يشير كود المشروع إلى مشروع نشط داخل نفس الشركة.',
+          '8. كل محطة مستوردة تُنشأ تلقائيًا بحالة ACTIVE.',
+          '9. الحد الأقصى للاستيراد في هذه النسخة هو 500 محطة.',
+          '10. لا تحذف أو تعدل ورقة النظام المخفية _fleetfuel_meta.',
         ]
       : [
           '1. Enter data only in the "Stations" sheet and do not rename the columns.',
-          '2. Required fields: Station ID, Project Code, Opening Balance, Current Counter.',
-          '3. Station ID and Project Code are case-insensitive; for example ST001 and st001 identify the same code.',
-          '4. Project Code must identify an active project in the same company.',
-          '5. Station Name, Station Type, and Capacity are optional.',
-          '6. Opening Balance and Current Counter must be zero or positive numbers.',
-          '7. Every imported station is created automatically with status ACTIVE, and current stock starts from Opening Balance.',
-          '8. The maximum import size in this version is 500 stations.',
-          '9. Do not delete or modify the hidden system sheet _fleetfuel_meta.',
+          '2. Structure Type is required and must be STANDALONE, SHARED_TANK, or DISPENSER.',
+          '3. STANDALONE: enter Opening Balance and Current Counter; leave Parent Station ID blank.',
+          '4. SHARED_TANK: enter Opening Balance and Capacity when applicable; leave Current Counter and Parent Station ID blank.',
+          '5. DISPENSER: enter Parent Station ID and Current Counter; leave Opening Balance and Capacity blank.',
+          '6. The parent may be another row in the same file or an existing station, but it must be a SHARED_TANK in the same company and project.',
+          '7. Station ID and Project Code are case-insensitive, and Project Code must identify an active project in the same company.',
+          '8. Every imported station is created automatically with status ACTIVE.',
+          '9. The maximum import size in this version is 500 stations.',
+          '10. Do not delete or modify the hidden system sheet _fleetfuel_meta.',
         ];
 
     instructionsText.forEach((text, index) => {
@@ -685,7 +702,8 @@ export class ImportTemplateService {
       key: column.canonicalField,
       width:
         column.canonicalField === 'stationName' ||
-        column.canonicalField === 'stationType'
+        column.canonicalField === 'stationType' ||
+        column.canonicalField === 'parentStationId'
           ? 26
           : 20,
     }));
@@ -705,7 +723,11 @@ export class ImportTemplateService {
     };
 
     // Preserve IDs as text in Excel. Numeric operational values remain numeric.
-    for (const field of ['stationId', 'projectCode'] as const) {
+    for (const field of [
+      'stationId',
+      'parentStationId',
+      'projectCode',
+    ] as const) {
       const columnIndex =
         STATION_COLUMNS.findIndex((column) => column.canonicalField === field) + 1;
       stations.getColumn(columnIndex).numFmt = '@';
@@ -713,6 +735,24 @@ export class ImportTemplateService {
       for (let row = 2; row <= STATIONS_MAX_ROWS + 1; row += 1) {
         stations.getCell(row, columnIndex).numFmt = '@';
       }
+    }
+
+    const structureTypeColumnIndex =
+      STATION_COLUMNS.findIndex(
+        (column) => column.canonicalField === 'structureType',
+      ) + 1;
+
+    for (let row = 2; row <= STATIONS_MAX_ROWS + 1; row += 1) {
+      stations.getCell(row, structureTypeColumnIndex).dataValidation = {
+        type: 'list',
+        allowBlank: false,
+        formulae: ['"STANDALONE,SHARED_TANK,DISPENSER"'],
+        showErrorMessage: true,
+        errorTitle: isArabic ? 'قيمة غير صحيحة' : 'Invalid value',
+        error: isArabic
+          ? 'اختر STANDALONE أو SHARED_TANK أو DISPENSER.'
+          : 'Select STANDALONE, SHARED_TANK, or DISPENSER.',
+      };
     }
 
     const meta = workbook.addWorksheet('_fleetfuel_meta');
@@ -726,7 +766,9 @@ export class ImportTemplateService {
       ['maxRows', STATIONS_MAX_ROWS],
       ['executionMode', 'ALL_OR_NOTHING'],
       ['defaultStatus', 'ACTIVE'],
-      [],
+      ['structureType.STANDALONE', 'STANDALONE'],
+      ['structureType.SHARED_TANK', 'SHARED_TANK'],
+      ['structureType.DISPENSER', 'DISPENSER'],
       [],
       ['columnHeader', 'canonicalField', 'required', 'type', 'rules'],
       ...STATION_COLUMNS.map((column) => [
