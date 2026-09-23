@@ -1095,6 +1095,282 @@ export class OperationsService {
     };
   }
 
+async getMobileDashboard(
+  request?: RequestLike,
+  options?: {
+    projectId?: string;
+    utcOffsetMinutes?: string | number;
+  },
+) {
+  /*
+    Mobile executive dashboard.
+
+    Scope:
+    - Admin / TopManagement: company-wide.
+    - Manager: managed projects only; optional projectId may narrow to one managed project.
+    - Supervisor / Operator / Officer are intentionally not allowed.
+
+    Consumption:
+    - COMPLETED DIRECT_REFUEL + EXTERNAL_DIRECT_REFUEL only.
+    - Quantity comes from the historical operation quantity.
+    - Cost comes from totalCostAtOperation, preserving the historical cost snapshot.
+
+    Time windows:
+    - KPIs + table: current local day and last 7 local calendar days.
+    - Trend + asset-type distribution: last 3 local calendar months through now.
+    - utcOffsetMinutes is supplied by the mobile device only to define local
+      calendar-day boundaries; it never affects authorization or project scope.
+  */
+  const currentUser = await this.resolveAuthenticatedCurrentUser(request);
+
+  if (!currentUser.companyId) {
+    throw new UnauthorizedException(
+      'Authenticated user company was not found.',
+    );
+  }
+
+  if (!['Admin', 'TopManagement', 'Manager'].includes(currentUser.role)) {
+    throw new ForbiddenException(
+      'Mobile dashboard is available to Admin, Top Management, and Manager only.',
+    );
+  }
+
+  const requestedProjectId = String(options?.projectId || '').trim();
+
+  let scopedProjectIds: string[] | null = null;
+  let scopeMode: 'COMPANY' | 'MANAGED_PROJECTS' | 'PROJECT' = 'COMPANY';
+
+  if (currentUser.role === 'Manager') {
+    const managedProjectIds = Array.from(
+      new Set((currentUser.managedProjectIds || []).filter(Boolean)),
+    );
+
+    if (requestedProjectId) {
+      if (!managedProjectIds.includes(requestedProjectId)) {
+        throw new ForbiddenException(
+          'Manager cannot view dashboard data for this project.',
+        );
+      }
+
+      scopedProjectIds = [requestedProjectId];
+      scopeMode = 'PROJECT';
+    } else {
+      scopedProjectIds = managedProjectIds;
+      scopeMode = 'MANAGED_PROJECTS';
+    }
+  }
+
+  const rawOffset = Number(options?.utcOffsetMinutes ?? 0);
+  const utcOffsetMinutes =
+    Number.isFinite(rawOffset) && rawOffset >= -840 && rawOffset <= 840
+      ? Math.trunc(rawOffset)
+      : 0;
+  const offsetMs = utcOffsetMinutes * 60 * 1000;
+
+  const now = new Date();
+
+  const shiftedNow = new Date(now.getTime() + offsetMs);
+  const shiftedTodayStart = new Date(shiftedNow);
+  shiftedTodayStart.setUTCHours(0, 0, 0, 0);
+
+  const todayStart = new Date(shiftedTodayStart.getTime() - offsetMs);
+  const tomorrowStart = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+
+  const last7Start = new Date(
+    todayStart.getTime() - 6 * 24 * 60 * 60 * 1000,
+  );
+
+  const shiftedTrendStart = new Date(shiftedTodayStart);
+  shiftedTrendStart.setUTCMonth(shiftedTrendStart.getUTCMonth() - 3);
+  const trendStart = new Date(shiftedTrendStart.getTime() - offsetMs);
+
+  const operations = await (this.prisma as any).operation.findMany({
+    where: {
+      companyId: currentUser.companyId,
+      status: 'COMPLETED',
+      type: {
+        in: ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'],
+      },
+      occurredAt: {
+        gte: trendStart,
+        lte: now,
+      },
+      ...(scopedProjectIds
+        ? scopedProjectIds.length
+          ? {
+              projectIdAtOperation: {
+                in: scopedProjectIds,
+              },
+            }
+          : {
+              // A Manager with no managed projects must see no company data.
+              id: '__NO_RESULTS__',
+            }
+        : {}),
+    },
+    select: {
+      quantity: true,
+      totalCostAtOperation: true,
+      occurredAt: true,
+      asset: {
+        select: {
+          type: true,
+        },
+      },
+    },
+    orderBy: {
+      occurredAt: 'asc',
+    },
+  });
+
+  const toLocalDateKey = (value: Date | string) => {
+    const date = value instanceof Date ? value : new Date(value);
+    return new Date(date.getTime() + offsetMs).toISOString().slice(0, 10);
+  };
+
+  const sumRows = (rows: any[]) => ({
+    quantity: rows.reduce(
+      (sum: number, row: any) => sum + Number(row.quantity || 0),
+      0,
+    ),
+    cost: rows.reduce(
+      (sum: number, row: any) =>
+        sum + Number(row.totalCostAtOperation || 0),
+      0,
+    ),
+  });
+
+  const todayRows = operations.filter((operation: any) => {
+    const occurredAt = new Date(operation.occurredAt);
+    return occurredAt >= todayStart && occurredAt < tomorrowStart;
+  });
+
+  const last7Rows = operations.filter(
+    (operation: any) => new Date(operation.occurredAt) >= last7Start,
+  );
+
+  const todayTotals = sumRows(todayRows);
+  const last7Totals = sumRows(last7Rows);
+
+  const daily7Map = new Map<
+    string,
+    { date: string; quantity: number; cost: number }
+  >();
+
+  for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+    const dayStart = new Date(
+      last7Start.getTime() + dayIndex * 24 * 60 * 60 * 1000,
+    );
+    const dateKey = toLocalDateKey(dayStart);
+    daily7Map.set(dateKey, {
+      date: dateKey,
+      quantity: 0,
+      cost: 0,
+    });
+  }
+
+  for (const operation of last7Rows) {
+    const dateKey = toLocalDateKey(operation.occurredAt);
+    const bucket = daily7Map.get(dateKey);
+    if (!bucket) continue;
+
+    bucket.quantity += Number(operation.quantity || 0);
+    bucket.cost += Number(operation.totalCostAtOperation || 0);
+  }
+
+  const dailyConsumption = Array.from(daily7Map.values())
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .map((row) => ({
+      date: row.date,
+      quantity: Number(row.quantity.toFixed(2)),
+      cost: Number(row.cost.toFixed(2)),
+    }));
+
+  const trendMap = new Map<
+    string,
+    { date: string; quantity: number }
+  >();
+
+  const trendDays = Math.floor(
+    (todayStart.getTime() - trendStart.getTime()) /
+      (24 * 60 * 60 * 1000),
+  );
+
+  for (let dayIndex = 0; dayIndex <= trendDays; dayIndex += 1) {
+    const dayStart = new Date(
+      trendStart.getTime() + dayIndex * 24 * 60 * 60 * 1000,
+    );
+    const dateKey = toLocalDateKey(dayStart);
+    trendMap.set(dateKey, {
+      date: dateKey,
+      quantity: 0,
+    });
+  }
+
+  for (const operation of operations) {
+    const dateKey = toLocalDateKey(operation.occurredAt);
+    const bucket = trendMap.get(dateKey);
+    if (!bucket) continue;
+
+    bucket.quantity += Number(operation.quantity || 0);
+  }
+
+  const consumptionTrend = Array.from(trendMap.values())
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((row) => ({
+      date: row.date,
+      quantity: Number(row.quantity.toFixed(2)),
+    }));
+
+  const assetTypeMap = new Map<string, number>();
+
+  for (const operation of operations) {
+    const assetType = String(operation.asset?.type || '').trim() || 'Unknown';
+    assetTypeMap.set(
+      assetType,
+      (assetTypeMap.get(assetType) || 0) + Number(operation.quantity || 0),
+    );
+  }
+
+  const assetTypeDistribution = Array.from(assetTypeMap.entries())
+    .map(([assetType, quantity]) => ({
+      assetType,
+      quantity: Number(quantity.toFixed(2)),
+    }))
+    .sort((a, b) => b.quantity - a.quantity);
+
+  return {
+    generatedAt: now.toISOString(),
+    utcOffsetMinutes,
+    scope: {
+      role: currentUser.role,
+      mode: scopeMode,
+      projectId:
+        scopeMode === 'PROJECT' ? scopedProjectIds?.[0] || null : null,
+      projectCount:
+        scopedProjectIds == null ? null : scopedProjectIds.length,
+    },
+    windows: {
+      todayFrom: todayStart.toISOString(),
+      todayTo: tomorrowStart.toISOString(),
+      last7DaysFrom: last7Start.toISOString(),
+      trendFrom: trendStart.toISOString(),
+      trendTo: now.toISOString(),
+    },
+    kpis: {
+      todayQuantity: Number(todayTotals.quantity.toFixed(2)),
+      todayCost: Number(todayTotals.cost.toFixed(2)),
+      last7DaysQuantity: Number(last7Totals.quantity.toFixed(2)),
+      last7DaysCost: Number(last7Totals.cost.toFixed(2)),
+      dailyAverageQuantity: Number((last7Totals.quantity / 7).toFixed(2)),
+      dailyAverageCost: Number((last7Totals.cost / 7).toFixed(2)),
+    },
+    dailyConsumption,
+    consumptionTrend,
+    assetTypeDistribution,
+  };
+}
+
 async getMobileMyOperations(request?: RequestLike) {
   /*
     Mobile "My Operations" history.

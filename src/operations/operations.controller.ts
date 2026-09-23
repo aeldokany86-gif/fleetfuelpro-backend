@@ -48,6 +48,19 @@ export class OperationsController {
     return this.operationsService.getMobileMyOperations(req);
   }
 
+  @Get('mobile-dashboard')
+  @UseGuards(AuthGuard('jwt'))
+  getMobileDashboard(
+    @Req() req: any,
+    @Query('projectId') projectId?: string,
+    @Query('utcOffsetMinutes') utcOffsetMinutes?: string,
+  ) {
+    return this.operationsService.getMobileDashboard(req, {
+      projectId,
+      utcOffsetMinutes,
+    });
+  }
+
   @Get('events/stream')
   @UseGuards(AuthGuard('jwt'))
   async streamOperationEvents(@Req() req: any, @Res() res: Response) {
