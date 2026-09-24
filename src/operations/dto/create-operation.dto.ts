@@ -55,6 +55,15 @@ export class OperationDispenserReadingDto {
   counter!: number;
 }
 
+export class OperationDispenserAllocationDto {
+  @IsString()
+  stationId!: string;
+
+  @IsNumber()
+  @Min(0)
+  quantity!: number;
+}
+
 export class CreateOperationDto {
   @IsEnum(OperationTypeDto)
   type!: OperationTypeDto;
@@ -148,6 +157,17 @@ export class CreateOperationDto {
   @ValidateNested({ each: true })
   @Type(() => OperationDispenserReadingDto)
   dispenserReadings?: OperationDispenserReadingDto[];
+
+  /*
+    Source-side quantity split used when a SHARED_TANK is selected as the
+    operation source. One row is supplied for every active child dispenser.
+    The backend validates that the sum exactly matches quantity.
+  */
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => OperationDispenserAllocationDto)
+  dispenserAllocations?: OperationDispenserAllocationDto[];
 
   @IsOptional()
   @IsString()
