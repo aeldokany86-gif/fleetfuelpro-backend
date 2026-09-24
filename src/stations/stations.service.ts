@@ -1044,9 +1044,18 @@ export class StationsService {
         stationId: true,
         name: true,
         companyId: true,
+        structureType: true,
+        parentStationId: true,
         currentCounter: true,
         currentLifetimeCounter: true,
         currentCounterCycle: true,
+        parentStation: {
+          select: {
+            id: true,
+            stationId: true,
+            name: true,
+          },
+        },
         project: {
           select: {
             id: true,
@@ -1090,7 +1099,7 @@ export class StationsService {
 
     const stationIds = stations.map((station) => station.id);
 
-    const [candidateOperations, resets, corrections] = await Promise.all([
+    const [candidateOperations, dispenserReadings, resets, corrections] = await Promise.all([
       eventType === 'RESET' || eventType === 'CORRECTION'
         ? Promise.resolve([])
         : this.prisma.operation.findMany({
@@ -1128,6 +1137,46 @@ export class StationsService {
                   id: true,
                   fullName: true,
                   email: true,
+                },
+              },
+            },
+          }),
+      eventType === 'RESET' || eventType === 'CORRECTION'
+        ? Promise.resolve([])
+        : (this.prisma as any).operationStationCounterReading.findMany({
+            where: {
+              stationId: { in: stationIds },
+              operation: { status: 'COMPLETED' },
+            },
+            select: {
+              id: true,
+              stationId: true,
+              counterValue: true,
+              createdAt: true,
+              operation: {
+                select: {
+                  id: true,
+                  companyId: true,
+                  operationNo: true,
+                  type: true,
+                  status: true,
+                  notes: true,
+                  projectIdAtOperation: true,
+                  projectNameAtOperation: true,
+                  sourceProjectIdAtOperation: true,
+                  sourceProjectNameAtOperation: true,
+                  destinationProjectIdAtOperation: true,
+                  destinationProjectNameAtOperation: true,
+                  occurredAt: true,
+                  completedAt: true,
+                  createdAt: true,
+                  requestedBy: {
+                    select: {
+                      id: true,
+                      fullName: true,
+                      email: true,
+                    },
+                  },
                 },
               },
             },
@@ -1290,6 +1339,19 @@ export class StationsService {
       }
     }
 
+    for (const reading of dispenserReadings as any[]) {
+      const operation = reading.operation;
+      if (!operation) continue;
+
+      eventsByStation.get(reading.stationId)?.push({
+        kind: 'DISPENSER_READING' as const,
+        at: this.getOperationCounterDate(operation),
+        createdAt: reading.createdAt,
+        id: reading.id,
+        item: reading,
+      });
+    }
+
     for (const reset of resets as any[]) {
       eventsByStation.get(reset.stationId)?.push({
         kind: 'RESET' as const,
@@ -1329,7 +1391,7 @@ export class StationsService {
         if (effectiveTimeDiff !== 0) return effectiveTimeDiff;
 
         if (a.kind !== b.kind) {
-          const priority = { RESET: 1, OPERATION: 2, CORRECTION: 3 };
+          const priority = { RESET: 1, OPERATION: 2, DISPENSER_READING: 2, CORRECTION: 3 };
           return (priority[a.kind] || 9) - (priority[b.kind] || 9);
         }
 
@@ -1410,6 +1472,9 @@ export class StationsService {
                 stationId: station.stationId,
                 name: station.name,
                 companyId: station.companyId,
+                structureType: station.structureType,
+                parentStationId: station.parentStationId,
+                parentStation: station.parentStation,
                 project: getStationProjectAt(station, event.at),
               },
               counterBefore: storedOldCounter,
@@ -1451,6 +1516,9 @@ export class StationsService {
                 stationId: station.stationId,
                 name: station.name,
                 companyId: station.companyId,
+                structureType: station.structureType,
+                parentStationId: station.parentStationId,
+                parentStation: station.parentStation,
                 project: getOperationStationProject(
                   operation,
                   station,
@@ -1478,16 +1546,22 @@ export class StationsService {
           continue;
         }
 
-        const operation = event.item;
-        const reading = Number(operation.stationCounter);
-        const storedLifetime =
-          operation.lifetimeCounter === null
+        const isDispenserReading = event.kind === 'DISPENSER_READING';
+        const readingRecord = isDispenserReading ? event.item : null;
+        const operation = isDispenserReading ? readingRecord?.operation : event.item;
+        const reading = Number(
+          isDispenserReading ? readingRecord?.counterValue : operation?.stationCounter,
+        );
+        const storedLifetime = isDispenserReading
+          ? null
+          : operation?.lifetimeCounter === null
             ? null
-            : Number(operation.lifetimeCounter);
-        const storedCycle =
-          operation.stationCounterCycleNumber === null
+            : Number(operation?.lifetimeCounter);
+        const storedCycle = isDispenserReading
+          ? null
+          : operation?.stationCounterCycleNumber === null
             ? null
-            : Number(operation.stationCounterCycleNumber);
+            : Number(operation?.stationCounterCycleNumber);
 
         let expectedLifetime: number;
         let deltaCounter: number;
@@ -1516,20 +1590,22 @@ export class StationsService {
           }
         }
 
-        if (storedLifetime === null) {
-          diagnostics.push('Stored lifetime counter is missing');
-        } else if (storedLifetime !== expectedLifetime) {
-          diagnostics.push(
-            `Stored lifetime (${storedLifetime}) does not match expected lifetime (${expectedLifetime})`,
-          );
-        }
+        if (!isDispenserReading) {
+          if (storedLifetime === null) {
+            diagnostics.push('Stored lifetime counter is missing');
+          } else if (storedLifetime !== expectedLifetime) {
+            diagnostics.push(
+              `Stored lifetime (${storedLifetime}) does not match expected lifetime (${expectedLifetime})`,
+            );
+          }
 
-        if (storedCycle === null) {
-          diagnostics.push('Stored counter cycle number is missing');
-        } else if (storedCycle !== currentCycle) {
-          diagnostics.push(
-            `Stored cycle (${storedCycle}) does not match expected cycle (${currentCycle})`,
-          );
+          if (storedCycle === null) {
+            diagnostics.push('Stored counter cycle number is missing');
+          } else if (storedCycle !== currentCycle) {
+            diagnostics.push(
+              `Stored cycle (${storedCycle}) does not match expected cycle (${currentCycle})`,
+            );
+          }
         }
 
         const lifetimeBefore = previousLifetime;
@@ -1541,7 +1617,7 @@ export class StationsService {
           (!dateTo || eventDate <= dateTo)
         ) {
           rows.push({
-            eventId: operation.id,
+            eventId: isDispenserReading ? readingRecord.id : operation.id,
             eventDate,
             eventType: 'OPERATION',
             referenceNo: operation.operationNo,
@@ -1552,6 +1628,9 @@ export class StationsService {
               stationId: station.stationId,
               name: station.name,
               companyId: station.companyId,
+              structureType: station.structureType,
+              parentStationId: station.parentStationId,
+              parentStation: station.parentStation,
               project: getOperationStationProject(
                 operation,
                 station,
@@ -1563,10 +1642,10 @@ export class StationsService {
             counterAfter: reading,
             deltaCounter,
             lifetimeBefore,
-            lifetimeAfter: storedLifetime,
+            lifetimeAfter: isDispenserReading ? expectedLifetime : storedLifetime,
             expectedLifetimeAfter: expectedLifetime,
             counterCycleBefore: currentCycle,
-            counterCycleAfter: storedCycle,
+            counterCycleAfter: isDispenserReading ? currentCycle : storedCycle,
             performedBy: operation.requestedBy,
             notes: operation.notes,
             diagnostics,
@@ -1586,7 +1665,7 @@ export class StationsService {
       if (dateDiff !== 0) return dateDiff;
 
       if (a.eventType !== b.eventType) {
-        const priority = { RESET: 1, OPERATION: 2, CORRECTION: 3 };
+        const priority = { RESET: 1, OPERATION: 2, DISPENSER_READING: 2, CORRECTION: 3 };
         return (priority[a.eventType] || 9) - (priority[b.eventType] || 9);
       }
 
@@ -3158,6 +3237,15 @@ export class StationsService {
             stationId: true,
             name: true,
             deletedAt: true,
+            structureType: true,
+            parentStationId: true,
+            dispensers: {
+              where: { deletedAt: null },
+              select: {
+                id: true,
+                status: true,
+              },
+            },
           },
         },
         fromProject: {
@@ -3220,6 +3308,10 @@ export class StationsService {
         transferRef: request.id,
         requestDate: request.createdAt,
         station: request.station,
+        childDispenserCount:
+          request.station?.structureType === 'SHARED_TANK'
+            ? request.station?.dispensers?.length || 0
+            : 0,
         fromProject: request.fromProject,
         toProject: request.toProject,
         stockAtTransfer: Number(request.stockAtTransfer || 0),

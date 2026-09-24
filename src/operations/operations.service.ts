@@ -1375,44 +1375,103 @@ async getMobileDashboard(
   shiftedTrendStart.setUTCMonth(shiftedTrendStart.getUTCMonth() - 3);
   const trendStart = new Date(shiftedTrendStart.getTime() - offsetMs);
 
-  const operations = await (this.prisma as any).operation.findMany({
-    where: {
-      companyId: currentUser.companyId,
-      status: 'COMPLETED',
-      type: {
-        in: ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'],
+  const [operations, stockStationsRaw] = await Promise.all([
+    (this.prisma as any).operation.findMany({
+      where: {
+        companyId: currentUser.companyId,
+        status: 'COMPLETED',
+        type: {
+          in: ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'],
+        },
+        occurredAt: {
+          gte: trendStart,
+          lte: now,
+        },
+        ...(scopedProjectIds
+          ? scopedProjectIds.length
+            ? {
+                projectIdAtOperation: {
+                  in: scopedProjectIds,
+                },
+              }
+            : {
+                // A Manager with no managed projects must see no company data.
+                id: '__NO_RESULTS__',
+              }
+          : {}),
       },
-      occurredAt: {
-        gte: trendStart,
-        lte: now,
-      },
-      ...(scopedProjectIds
-        ? scopedProjectIds.length
-          ? {
-              projectIdAtOperation: {
-                in: scopedProjectIds,
-              },
-            }
-          : {
-              // A Manager with no managed projects must see no company data.
-              id: '__NO_RESULTS__',
-            }
-        : {}),
-    },
-    select: {
-      quantity: true,
-      totalCostAtOperation: true,
-      occurredAt: true,
-      asset: {
-        select: {
-          type: true,
+      select: {
+        quantity: true,
+        totalCostAtOperation: true,
+        occurredAt: true,
+        asset: {
+          select: {
+            type: true,
+          },
         },
       },
-    },
-    orderBy: {
-      occurredAt: 'asc',
-    },
-  });
+      orderBy: {
+        occurredAt: 'asc',
+      },
+    }),
+    scopedProjectIds && scopedProjectIds.length === 0
+      ? Promise.resolve([])
+      : (this.prisma as any).station.findMany({
+          where: {
+            companyId: currentUser.companyId,
+            deletedAt: null,
+            status: 'ACTIVE',
+            ...(scopedProjectIds
+              ? {
+                  projectId: {
+                    in: scopedProjectIds,
+                  },
+                }
+              : {}),
+          },
+          select: {
+            id: true,
+            stationId: true,
+            name: true,
+            projectId: true,
+            structureType: true,
+            currentStock: true,
+            project: {
+              select: {
+                id: true,
+                name: true,
+                code: true,
+              },
+            },
+          },
+          orderBy: [{ stationId: 'asc' }, { name: 'asc' }],
+        }),
+  ]);
+
+  const stockStations = stockStationsRaw
+    .filter(
+      (station: any) =>
+        String(station.structureType || 'STANDALONE').toUpperCase() !==
+        'DISPENSER',
+    )
+    .map((station: any) => ({
+      id: station.id,
+      stationId: station.stationId,
+      name: station.name,
+      projectId: station.projectId,
+      projectName:
+        station.project?.name ||
+        station.project?.code ||
+        station.projectId ||
+        '',
+      structureType: station.structureType || 'STANDALONE',
+      currentStock: Number(station.currentStock || 0),
+    }));
+
+  const currentStockTotal = stockStations.reduce(
+    (sum: number, station: any) => sum + Number(station.currentStock || 0),
+    0,
+  );
 
   const toLocalDateKey = (value: Date | string) => {
     const date = value instanceof Date ? value : new Date(value);
@@ -1555,7 +1614,9 @@ async getMobileDashboard(
       last7DaysCost: Number(last7Totals.cost.toFixed(2)),
       dailyAverageQuantity: Number((last7Totals.quantity / 7).toFixed(2)),
       dailyAverageCost: Number((last7Totals.cost / 7).toFixed(2)),
+      currentStockTotal: Number(currentStockTotal.toFixed(2)),
     },
+    stockStations,
     dailyConsumption,
     consumptionTrend,
     assetTypeDistribution,
