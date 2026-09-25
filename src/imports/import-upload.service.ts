@@ -56,6 +56,8 @@ const STATIONS_CANONICAL_FIELDS = [
   'stationId',
   'stationName',
   'stationType',
+  'structureType',
+  'parentStationId',
   'capacity',
   'projectCode',
   'openingBalance',
@@ -603,6 +605,16 @@ export class ImportUploadService {
       );
 
       if (!columnHeader && !canonicalField) {
+        continue;
+      }
+
+      // Station templates contain extra metadata rows for structure types, so
+      // the mapping header is not at the same fixed row as the other templates.
+      // Ignore the mapping header wherever it appears and read only real mappings.
+      if (
+        columnHeader === 'columnHeader' &&
+        canonicalField === 'canonicalField'
+      ) {
         continue;
       }
 
