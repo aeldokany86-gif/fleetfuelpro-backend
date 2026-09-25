@@ -1917,6 +1917,648 @@ async getStationOperationsHistory(
   };
 }
 
+
+async getAssetOperationsHistory(
+  assetId: string,
+  options: {
+    page?: string | number;
+    pageSize?: string | number;
+    dateFrom?: string;
+    dateTo?: string;
+    refuelType?: string;
+    projectIds?: string;
+    utcOffsetMinutes?: string | number;
+  } = {},
+  request?: RequestLike,
+) {
+  const currentUser = await this.resolveCurrentUser(
+    {
+      type: 'DIRECT_REFUEL' as any,
+      quantity: 1,
+    } as CreateOperationDto,
+    request,
+  );
+
+  if (!currentUser.existsInDatabase || !currentUser.companyId) {
+    throw new UnauthorizedException('Real database user is required.');
+  }
+
+  const requestedAssetId = String(assetId || '').trim();
+  if (!requestedAssetId) {
+    throw new BadRequestException('assetId is required.');
+  }
+
+  const parsedPage = Number(options.page ?? 1);
+  const parsedPageSize = Number(options.pageSize ?? 25);
+  const page =
+    Number.isFinite(parsedPage) && parsedPage > 0 ? Math.floor(parsedPage) : 1;
+  const pageSize =
+    Number.isFinite(parsedPageSize) && parsedPageSize > 0
+      ? Math.min(100, Math.floor(parsedPageSize))
+      : 25;
+
+  const asset = await (this.prisma as any).asset.findFirst({
+    where: {
+      companyId: currentUser.companyId,
+      OR: [{ id: requestedAssetId }, { assetId: requestedAssetId }],
+    },
+    select: {
+      id: true,
+      assetId: true,
+      type: true,
+      projectId: true,
+      currentOdometer: true,
+      currentLifetimeOdometer: true,
+      currentMeterCycle: true,
+    },
+  });
+
+  if (!asset) {
+    throw new NotFoundException('Asset was not found.');
+  }
+
+  const scopedRoles: NormalizedRole[] = [
+    'Manager',
+    'Officer',
+    'Operator',
+    'Supervisor',
+  ];
+  const needsProjectScope = scopedRoles.includes(currentUser.role);
+  const accessibleProjectIds =
+    currentUser.role === 'Manager'
+      ? currentUser.managedProjectIds
+      : needsProjectScope
+        ? currentUser.assignedProjectIds
+        : [];
+
+  const requestedProjectIds = String(options.projectIds || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  if (needsProjectScope) {
+    const forbiddenProject = requestedProjectIds.find(
+      (projectId) => !accessibleProjectIds.includes(projectId),
+    );
+    if (forbiddenProject) {
+      throw new ForbiddenException(
+        'You cannot view operation history for the requested project.',
+      );
+    }
+  }
+
+  const effectiveProjectIds = requestedProjectIds.length
+    ? requestedProjectIds
+    : needsProjectScope
+      ? accessibleProjectIds
+      : [];
+
+  const rawOffset = Number(options.utcOffsetMinutes ?? 0);
+  const utcOffsetMinutes =
+    Number.isFinite(rawOffset) && rawOffset >= -840 && rawOffset <= 840
+      ? Math.trunc(rawOffset)
+      : 0;
+  const offsetMs = utcOffsetMinutes * 60 * 1000;
+
+  const localDayBoundary = (value: string, endOfDay = false) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(
+        endOfDay ? 'dateTo is invalid' : 'dateFrom is invalid',
+      );
+    }
+    const start = new Date(parsed.getTime() - offsetMs);
+    return endOfDay
+      ? new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1)
+      : start;
+  };
+
+  const occurredAt: Record<string, Date> = {};
+  if (options.dateFrom) {
+    occurredAt.gte = localDayBoundary(String(options.dateFrom), false);
+  }
+  if (options.dateTo) {
+    occurredAt.lte = localDayBoundary(String(options.dateTo), true);
+  }
+
+  const refuelType = String(options.refuelType || 'ALL')
+    .trim()
+    .toUpperCase();
+
+  if (!['ALL', 'DIRECT', 'EXTERNAL'].includes(refuelType)) {
+    throw new BadRequestException('refuelType is invalid.');
+  }
+
+  const operationTypes =
+    refuelType === 'DIRECT'
+      ? ['DIRECT_REFUEL']
+      : refuelType === 'EXTERNAL'
+        ? ['EXTERNAL_DIRECT_REFUEL']
+        : ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'];
+
+  const projectScopeCondition =
+    effectiveProjectIds.length > 0
+      ? {
+          OR: [
+            { projectIdAtOperation: { in: effectiveProjectIds } },
+            { sourceProjectIdAtOperation: { in: effectiveProjectIds } },
+            { destinationProjectIdAtOperation: { in: effectiveProjectIds } },
+            {
+              projectIdAtOperation: null,
+              asset: {
+                is: {
+                  projectId: { in: effectiveProjectIds },
+                },
+              },
+            },
+          ],
+        }
+      : needsProjectScope
+        ? { id: '__NO_RESULTS__' }
+        : {};
+
+  const where = {
+    companyId: currentUser.companyId,
+    status: 'COMPLETED',
+    assetId: asset.id,
+    type: { in: operationTypes },
+    ...(Object.keys(occurredAt).length ? { occurredAt } : {}),
+    AND: [projectScopeCondition],
+  };
+
+  const [total, operations] = await Promise.all([
+    (this.prisma as any).operation.count({ where }),
+    (this.prisma as any).operation.findMany({
+      where,
+      include: this.buildOperationListInclude(),
+      orderBy: [
+        { occurredAt: 'desc' },
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  return {
+    asset,
+    operations,
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages,
+      hasPreviousPage: page > 1,
+      hasNextPage: page < totalPages,
+    },
+  };
+}
+
+async getOperationsDashboard(
+  request: RequestLike | undefined,
+  filters: {
+    dateFrom?: string;
+    dateTo?: string;
+    refuelType?: string;
+    assetIds?: string;
+    assetTypes?: string;
+    projectIds?: string;
+    utcOffsetMinutes?: string | number;
+  } = {},
+) {
+  const currentUser = await this.resolveCurrentUser(
+    {
+      type: 'DIRECT_REFUEL' as any,
+      quantity: 1,
+    } as CreateOperationDto,
+    request,
+  );
+
+  if (!currentUser.existsInDatabase || !currentUser.companyId) {
+    throw new UnauthorizedException('Real database user is required.');
+  }
+
+  const splitList = (value?: string) =>
+    String(value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const requestedAssetIds = splitList(filters.assetIds);
+  const requestedAssetTypes = splitList(filters.assetTypes);
+  const requestedProjectIds = splitList(filters.projectIds);
+
+  const scopedRoles: NormalizedRole[] = [
+    'Manager',
+    'Officer',
+    'Operator',
+    'Supervisor',
+  ];
+  const needsProjectScope = scopedRoles.includes(currentUser.role);
+  const accessibleProjectIds =
+    currentUser.role === 'Manager'
+      ? currentUser.managedProjectIds
+      : needsProjectScope
+        ? currentUser.assignedProjectIds
+        : [];
+
+  if (needsProjectScope) {
+    const forbiddenProject = requestedProjectIds.find(
+      (projectId) => !accessibleProjectIds.includes(projectId),
+    );
+    if (forbiddenProject) {
+      throw new ForbiddenException(
+        'You cannot view dashboard data for the requested project.',
+      );
+    }
+  }
+
+  const effectiveProjectIds = requestedProjectIds.length
+    ? requestedProjectIds
+    : needsProjectScope
+      ? accessibleProjectIds
+      : [];
+
+  const rawOffset = Number(filters.utcOffsetMinutes ?? 0);
+  const utcOffsetMinutes =
+    Number.isFinite(rawOffset) && rawOffset >= -840 && rawOffset <= 840
+      ? Math.trunc(rawOffset)
+      : 0;
+  const offsetMs = utcOffsetMinutes * 60 * 1000;
+
+  const localDayBoundary = (value: string, endOfDay = false) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(
+        endOfDay ? 'dateTo is invalid' : 'dateFrom is invalid',
+      );
+    }
+    const start = new Date(parsed.getTime() - offsetMs);
+    return endOfDay
+      ? new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1)
+      : start;
+  };
+
+  const occurredAt: Record<string, Date> = {};
+  if (filters.dateFrom) {
+    occurredAt.gte = localDayBoundary(String(filters.dateFrom), false);
+  }
+  if (filters.dateTo) {
+    occurredAt.lte = localDayBoundary(String(filters.dateTo), true);
+  }
+
+  const refuelType = String(filters.refuelType || 'ALL')
+    .trim()
+    .toUpperCase();
+
+  if (!['ALL', 'DIRECT', 'EXTERNAL'].includes(refuelType)) {
+    throw new BadRequestException('refuelType is invalid.');
+  }
+
+  const operationTypes =
+    refuelType === 'DIRECT'
+      ? ['DIRECT_REFUEL']
+      : refuelType === 'EXTERNAL'
+        ? ['EXTERNAL_DIRECT_REFUEL']
+        : ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'];
+
+  const projectScopeCondition =
+    effectiveProjectIds.length > 0
+      ? {
+          OR: [
+            { projectIdAtOperation: { in: effectiveProjectIds } },
+            {
+              projectIdAtOperation: null,
+              asset: {
+                is: {
+                  projectId: { in: effectiveProjectIds },
+                },
+              },
+            },
+          ],
+        }
+      : needsProjectScope
+        ? { id: '__NO_RESULTS__' }
+        : {};
+
+  // Important: this query intentionally selects only the compact fields needed
+  // for aggregation. Raw operations are never returned to the browser.
+  const baseOperations = await (this.prisma as any).operation.findMany({
+    where: {
+      companyId: currentUser.companyId,
+      status: 'COMPLETED',
+      type: { in: operationTypes },
+      ...(Object.keys(occurredAt).length ? { occurredAt } : {}),
+      ...projectScopeCondition,
+    },
+    select: {
+      id: true,
+      assetId: true,
+      quantity: true,
+      totalCostAtOperation: true,
+      occurredAt: true,
+      projectIdAtOperation: true,
+      projectNameAtOperation: true,
+      asset: {
+        select: {
+          id: true,
+          assetId: true,
+          type: true,
+          projectId: true,
+          currentOdometer: true,
+          currentLifetimeOdometer: true,
+          currentMeterCycle: true,
+          project: {
+            select: {
+              id: true,
+              name: true,
+              code: true,
+            },
+          },
+        },
+      },
+    },
+    orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
+  });
+
+  const toLocalDateKey = (value: Date | string) => {
+    const date = value instanceof Date ? value : new Date(value);
+    return new Date(date.getTime() + offsetMs).toISOString().slice(0, 10);
+  };
+
+  const assetOptionMap = new Map<string, any>();
+  const assetTypeOptionSet = new Set<string>();
+  const projectOptionMap = new Map<string, any>();
+
+  for (const operation of baseOperations) {
+    if (operation.asset?.id) {
+      assetOptionMap.set(operation.asset.id, {
+        id: operation.asset.id,
+        assetId: operation.asset.assetId || operation.asset.id,
+        type: operation.asset.type || '',
+      });
+    }
+
+    if (operation.asset?.type) {
+      assetTypeOptionSet.add(String(operation.asset.type));
+    }
+
+    const operationProjectId =
+      operation.projectIdAtOperation || operation.asset?.projectId || null;
+    const operationProjectName =
+      operation.projectNameAtOperation ||
+      operation.asset?.project?.name ||
+      operation.asset?.project?.code ||
+      operationProjectId ||
+      "";
+
+    if (operationProjectId) {
+      projectOptionMap.set(operationProjectId, {
+        id: operationProjectId,
+        name: operationProjectName,
+      });
+    }
+  }
+
+  const selectedOperations = baseOperations.filter((operation: any) => {
+    if (
+      requestedAssetIds.length &&
+      !requestedAssetIds.includes(String(operation.assetId || ''))
+    ) {
+      return false;
+    }
+
+    if (
+      requestedAssetTypes.length &&
+      !requestedAssetTypes.includes(String(operation.asset?.type || ''))
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  const summary = {
+    operations: selectedOperations.length,
+    activeEquipment: new Set(
+      selectedOperations.map((operation: any) => operation.assetId).filter(Boolean),
+    ).size,
+    totalQuantity: selectedOperations.reduce(
+      (sum: number, operation: any) =>
+        sum + Number(operation.quantity || 0),
+      0,
+    ),
+    totalCost: selectedOperations.reduce(
+      (sum: number, operation: any) =>
+        sum + Number(operation.totalCostAtOperation || 0),
+      0,
+    ),
+  };
+
+  const dailyMap = new Map<
+    string,
+    { dateKey: string; qtyLiters: number; totalCost: number }
+  >();
+
+  for (const operation of selectedOperations) {
+    const dateKey = toLocalDateKey(operation.occurredAt);
+    const current = dailyMap.get(dateKey) || {
+      dateKey,
+      qtyLiters: 0,
+      totalCost: 0,
+    };
+
+    current.qtyLiters += Number(operation.quantity || 0);
+    current.totalCost += Number(operation.totalCostAtOperation || 0);
+    dailyMap.set(dateKey, current);
+  }
+
+  const dailyConsumptionSummary = Array.from(dailyMap.values()).sort(
+    (a, b) => b.dateKey.localeCompare(a.dateKey),
+  );
+
+  const availableDates = Array.from(dailyMap.keys()).sort();
+  const firstDateKey = filters.dateFrom || availableDates[0] || '';
+  const lastDateKey =
+    filters.dateTo || availableDates[availableDates.length - 1] || '';
+
+  const dailyData: Array<{ date: string; value: number }> = [];
+  if (firstDateKey && lastDateKey) {
+    const cursor = new Date(`${firstDateKey}T00:00:00.000Z`);
+    const end = new Date(`${lastDateKey}T00:00:00.000Z`);
+
+    if (!Number.isNaN(cursor.getTime()) && !Number.isNaN(end.getTime())) {
+      while (cursor <= end) {
+        const dateKey = cursor.toISOString().slice(0, 10);
+        dailyData.push({
+          date: dateKey,
+          value: Number(dailyMap.get(dateKey)?.qtyLiters || 0),
+        });
+        cursor.setUTCDate(cursor.getUTCDate() + 1);
+      }
+    }
+  }
+
+  const equipmentTypeMap = new Map<
+    string,
+    { equipmentType: string; qtyLiters: number; totalCost: number }
+  >();
+
+  const equipmentMap = new Map<
+    string,
+    {
+      equipmentBackendId: string;
+      equipmentNo: string;
+      equipmentType: string;
+      fuelConsumption: number;
+      totalCost: number;
+      projectsSet: Set<string>;
+      currentOdometer: number;
+    }
+  >();
+
+  for (const operation of selectedOperations) {
+    const asset = operation.asset;
+    if (!asset?.id) continue;
+
+    const equipmentType = String(asset.type || 'Unknown');
+    const typeBucket = equipmentTypeMap.get(equipmentType) || {
+      equipmentType,
+      qtyLiters: 0,
+      totalCost: 0,
+    };
+    typeBucket.qtyLiters += Number(operation.quantity || 0);
+    typeBucket.totalCost += Number(operation.totalCostAtOperation || 0);
+    equipmentTypeMap.set(equipmentType, typeBucket);
+
+    const equipmentBucket = equipmentMap.get(asset.id) || {
+      equipmentBackendId: asset.id,
+      equipmentNo: asset.assetId || asset.id,
+      equipmentType: asset.type || '-',
+      fuelConsumption: 0,
+      totalCost: 0,
+      projectsSet: new Set<string>(),
+      currentOdometer: Number(asset.currentOdometer || 0),
+    };
+
+    equipmentBucket.fuelConsumption += Number(operation.quantity || 0);
+    equipmentBucket.totalCost += Number(operation.totalCostAtOperation || 0);
+
+    const projectLabel =
+      operation.projectNameAtOperation ||
+      operation.asset?.project?.name ||
+      operation.asset?.project?.code ||
+      "";
+    if (projectLabel) {
+      equipmentBucket.projectsSet.add(projectLabel);
+    }
+
+    equipmentMap.set(asset.id, equipmentBucket);
+  }
+
+  const equipmentIds = Array.from(equipmentMap.keys());
+
+  const lifetimeGroups = equipmentIds.length
+    ? await (this.prisma as any).operation.groupBy({
+        by: ['assetId'],
+        where: {
+          companyId: currentUser.companyId,
+          status: 'COMPLETED',
+          type: {
+            in: ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'],
+          },
+          assetId: { in: equipmentIds },
+        },
+        _sum: {
+          quantity: true,
+        },
+        _min: {
+          lifetimeOdometer: true,
+          odometer: true,
+        },
+        _max: {
+          lifetimeOdometer: true,
+          odometer: true,
+        },
+      })
+    : [];
+
+  const lifetimeMap = new Map<string, any>(
+    lifetimeGroups.map(
+      (row: any) => [String(row.assetId), row] as [string, any],
+    ),
+  );
+
+  const equipmentSummary = Array.from(equipmentMap.values())
+    .map((item) => {
+      const lifetime = lifetimeMap.get(item.equipmentBackendId);
+      const firstLifetime =
+        lifetime?._min?.lifetimeOdometer == null
+          ? Number(lifetime?._min?.odometer || 0)
+          : Number(lifetime._min.lifetimeOdometer);
+      const lastLifetime =
+        lifetime?._max?.lifetimeOdometer == null
+          ? Number(lifetime?._max?.odometer || 0)
+          : Number(lifetime._max.lifetimeOdometer);
+      const lifetimeDistance = Math.max(0, lastLifetime - firstLifetime);
+      const lifetimeFuelConsumption = Number(lifetime?._sum?.quantity || 0);
+
+      return {
+        equipmentBackendId: item.equipmentBackendId,
+        equipmentNo: item.equipmentNo,
+        project: item.projectsSet.size
+          ? Array.from(item.projectsSet).join(', ')
+          : '-',
+        equipmentType: item.equipmentType,
+        lastOdometer: item.currentOdometer,
+        fuelConsumption: item.fuelConsumption,
+        totalCost: item.totalCost,
+        distance: lifetimeDistance,
+        efficiency:
+          lifetimeDistance > 0
+            ? (lifetimeFuelConsumption / lifetimeDistance).toFixed(2)
+            : '-',
+      };
+    })
+    .sort((a, b) => b.fuelConsumption - a.fuelConsumption);
+
+  const equipmentTypeConsumptionSummary = Array.from(
+    equipmentTypeMap.values(),
+  ).sort((a, b) => b.qtyLiters - a.qtyLiters);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    summary,
+    equipmentSummary,
+    equipmentTypeConsumptionSummary,
+    dailyConsumptionSummary,
+    dailyData:
+      dailyData.length > 0
+        ? dailyData
+        : dailyConsumptionSummary
+            .slice()
+            .reverse()
+            .map((row) => ({
+              date: row.dateKey,
+              value: row.qtyLiters,
+            })),
+    filterOptions: {
+      assets: Array.from(assetOptionMap.values()).sort((a, b) =>
+        String(a.assetId).localeCompare(String(b.assetId)),
+      ),
+      assetTypes: Array.from(assetTypeOptionSet).sort((a, b) =>
+        a.localeCompare(b),
+      ),
+      projects: Array.from(projectOptionMap.values()).sort((a, b) =>
+        String(a.name).localeCompare(String(b.name)),
+      ),
+    },
+  };
+}
+
 async findPendingApprovals(request?: RequestLike) {
   const startedAt = Date.now();
 

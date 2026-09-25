@@ -121,6 +121,58 @@ getStationOperationsHistory(
   );
 }
 
+
+@Get('dashboard')
+@UseGuards(AuthGuard('jwt'))
+getOperationsDashboard(
+  @Req() req: any,
+  @Query('dateFrom') dateFrom?: string,
+  @Query('dateTo') dateTo?: string,
+  @Query('refuelType') refuelType?: string,
+  @Query('assetIds') assetIds?: string,
+  @Query('assetTypes') assetTypes?: string,
+  @Query('projectIds') projectIds?: string,
+  @Query('utcOffsetMinutes') utcOffsetMinutes?: string,
+) {
+  return this.operationsService.getOperationsDashboard(req, {
+    dateFrom,
+    dateTo,
+    refuelType,
+    assetIds,
+    assetTypes,
+    projectIds,
+    utcOffsetMinutes,
+  });
+}
+
+@Get('asset/:assetId/history')
+@UseGuards(AuthGuard('jwt'))
+getAssetOperationsHistory(
+  @Param('assetId') assetId: string,
+  @Query('page') page: string | undefined,
+  @Query('pageSize') pageSize: string | undefined,
+  @Query('dateFrom') dateFrom?: string,
+  @Query('dateTo') dateTo?: string,
+  @Query('refuelType') refuelType?: string,
+  @Query('projectIds') projectIds?: string,
+  @Query('utcOffsetMinutes') utcOffsetMinutes?: string,
+  @Req() req?: any,
+) {
+  return this.operationsService.getAssetOperationsHistory(
+    assetId,
+    {
+      page,
+      pageSize,
+      dateFrom,
+      dateTo,
+      refuelType,
+      projectIds,
+      utcOffsetMinutes,
+    },
+    req,
+  );
+}
+
 @Get()
 findAll(@Req() req: any) {
   return this.operationsService.findAll(req);
