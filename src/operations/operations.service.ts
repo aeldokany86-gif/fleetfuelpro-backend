@@ -2632,6 +2632,7 @@ async getWarehouseOperationsReport(
     assetId?: string;
     dateFrom?: string;
     dateTo?: string;
+    utcOffsetMinutes?: string | number;
   },
 ) {
   const currentUser = await this.resolveCurrentUser(
@@ -2645,21 +2646,34 @@ async getWarehouseOperationsReport(
 
   const occurredAt: Record<string, Date> = {};
 
-  if (filters.dateFrom) {
-    const from = new Date(filters.dateFrom);
-    if (Number.isNaN(from.getTime())) {
-      throw new BadRequestException('dateFrom is invalid');
+  const rawOffset = Number(filters.utcOffsetMinutes ?? 0);
+  const utcOffsetMinutes =
+    Number.isFinite(rawOffset) && rawOffset >= -840 && rawOffset <= 840
+      ? Math.trunc(rawOffset)
+      : 0;
+  const offsetMs = utcOffsetMinutes * 60 * 1000;
+
+  const localDayBoundary = (value: string, endOfDay = false) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(
+        endOfDay ? 'dateTo is invalid' : 'dateFrom is invalid',
+      );
     }
-    occurredAt.gte = from;
+
+    const start = new Date(parsed.getTime() - offsetMs);
+
+    return endOfDay
+      ? new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1)
+      : start;
+  };
+
+  if (filters.dateFrom) {
+    occurredAt.gte = localDayBoundary(String(filters.dateFrom), false);
   }
 
   if (filters.dateTo) {
-    const to = new Date(filters.dateTo);
-    if (Number.isNaN(to.getTime())) {
-      throw new BadRequestException('dateTo is invalid');
-    }
-    to.setHours(23, 59, 59, 999);
-    occurredAt.lte = to;
+    occurredAt.lte = localDayBoundary(String(filters.dateTo), true);
   }
 
   const requestedType = String(filters.type || '').trim().toUpperCase();

@@ -192,6 +192,7 @@ warehouseReport(
   @Query('assetId') assetId?: string,
   @Query('dateFrom') dateFrom?: string,
   @Query('dateTo') dateTo?: string,
+  @Query('utcOffsetMinutes') utcOffsetMinutes?: string,
 ) {
   return this.operationsService.getWarehouseOperationsReport(req, {
     type,
@@ -199,6 +200,7 @@ warehouseReport(
     assetId,
     dateFrom,
     dateTo,
+    utcOffsetMinutes,
   });
 }
 
