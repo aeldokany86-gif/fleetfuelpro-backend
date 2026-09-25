@@ -65,7 +65,7 @@ const ASSET_COLUMNS = [
 ] as const;
 
 const STATIONS_TEMPLATE_TYPE = 'STATIONS';
-const STATIONS_SCHEMA_VERSION = 2;
+const STATIONS_SCHEMA_VERSION = 3;
 const STATIONS_MAX_ROWS = 500;
 
 const STATION_COLUMNS = [
@@ -128,12 +128,12 @@ const STATION_COLUMNS = [
     ar: 'الرصيد الافتتاحي',
   },
   {
-    canonicalField: 'currentCounter',
+    canonicalField: 'openingCounter',
     required: false,
     type: 'number',
     minInclusive: 0,
-    en: 'Current Counter',
-    ar: 'العداد الحالي',
+    en: 'Opening Counter',
+    ar: 'العداد الافتتاحي',
   },
 ] as const;
 
@@ -659,9 +659,9 @@ export class ImportTemplateService {
       ? [
           '1. أدخل البيانات في ورقة "المحطات" فقط ولا تغيّر أسماء الأعمدة.',
           '2. نوع الهيكل مطلوب ويجب أن يكون STANDALONE أو SHARED_TANK أو DISPENSER.',
-          '3. STANDALONE: أدخل الرصيد الافتتاحي والعداد الحالي، واترك كود المحطة الرئيسية فارغًا.',
-          '4. SHARED_TANK: أدخل الرصيد الافتتاحي والسعة عند الحاجة، واترك العداد الحالي وكود المحطة الرئيسية فارغين.',
-          '5. DISPENSER: أدخل كود المحطة الرئيسية والعداد الحالي، واترك الرصيد الافتتاحي والسعة فارغين.',
+          '3. STANDALONE: أدخل الرصيد الافتتاحي والعداد الافتتاحي، واترك كود المحطة الرئيسية فارغًا.',
+          '4. SHARED_TANK: أدخل الرصيد الافتتاحي والسعة عند الحاجة، واترك العداد الافتتاحي وكود المحطة الرئيسية فارغين.',
+          '5. DISPENSER: أدخل كود المحطة الرئيسية والعداد الافتتاحي، واترك الرصيد الافتتاحي والسعة فارغين.',
           '6. يمكن أن تكون المحطة الرئيسية في نفس الملف أو موجودة مسبقًا، ويجب أن تكون SHARED_TANK داخل نفس الشركة ونفس المشروع.',
           '7. كود المحطة وكود المشروع لا يتأثران بحالة الأحرف، ويجب أن يشير كود المشروع إلى مشروع نشط داخل نفس الشركة.',
           '8. كل محطة مستوردة تُنشأ تلقائيًا بحالة ACTIVE.',
@@ -671,9 +671,9 @@ export class ImportTemplateService {
       : [
           '1. Enter data only in the "Stations" sheet and do not rename the columns.',
           '2. Structure Type is required and must be STANDALONE, SHARED_TANK, or DISPENSER.',
-          '3. STANDALONE: enter Opening Balance and Current Counter; leave Parent Station ID blank.',
-          '4. SHARED_TANK: enter Opening Balance and Capacity when applicable; leave Current Counter and Parent Station ID blank.',
-          '5. DISPENSER: enter Parent Station ID and Current Counter; leave Opening Balance and Capacity blank.',
+          '3. STANDALONE: enter Opening Balance and Opening Counter; leave Parent Station ID blank.',
+          '4. SHARED_TANK: enter Opening Balance and Capacity when applicable; leave Opening Counter and Parent Station ID blank.',
+          '5. DISPENSER: enter Parent Station ID and Opening Counter; leave Opening Balance and Capacity blank.',
           '6. The parent may be another row in the same file or an existing station, but it must be a SHARED_TANK in the same company and project.',
           '7. Station ID and Project Code are case-insensitive, and Project Code must identify an active project in the same company.',
           '8. Every imported station is created automatically with status ACTIVE.',

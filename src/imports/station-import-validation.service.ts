@@ -416,7 +416,7 @@ export class StationImportValidationService {
 
     const capacity = this.optionalNumber(source.capacity);
     const openingBalance = this.optionalNumber(source.openingBalance);
-    const currentCounter = this.optionalNumber(source.currentCounter);
+    const openingCounter = this.optionalNumber(source.openingCounter);
 
     const row: ValidatedStationRow = {
       id,
@@ -430,7 +430,7 @@ export class StationImportValidationService {
         capacity: capacity ?? '',
         projectCode,
         openingBalance: openingBalance ?? '',
-        currentCounter: currentCounter ?? '',
+        openingCounter: openingCounter ?? '',
         status: 'ACTIVE',
       },
       computedData: {
@@ -442,7 +442,7 @@ export class StationImportValidationService {
         currentLifetimeCounter:
           structureType === StationStructureType.SHARED_TANK
             ? 0
-            : currentCounter ?? '',
+            : openingCounter ?? '',
         currentCounterCycle: 1,
       },
       errors: [],
@@ -503,17 +503,17 @@ export class StationImportValidationService {
       });
     }
 
-    if (!this.isBlank(source.currentCounter) && currentCounter === null) {
+    if (!this.isBlank(source.openingCounter) && openingCounter === null) {
       this.addError(row, {
-        code: 'INVALID_CURRENT_COUNTER',
-        field: 'currentCounter',
-        message: 'Current Counter must be a valid number when provided',
+        code: 'INVALID_OPENING_COUNTER',
+        field: 'openingCounter',
+        message: 'Opening Counter must be a valid number when provided',
       });
-    } else if (currentCounter !== null && currentCounter < 0) {
+    } else if (openingCounter !== null && openingCounter < 0) {
       this.addError(row, {
-        code: 'NEGATIVE_CURRENT_COUNTER',
-        field: 'currentCounter',
-        message: 'Current Counter must be zero or positive',
+        code: 'NEGATIVE_OPENING_COUNTER',
+        field: 'openingCounter',
+        message: 'Opening Counter must be zero or positive',
       });
     }
 
@@ -534,11 +534,11 @@ export class StationImportValidationService {
         });
       }
 
-      if (currentCounter === null) {
+      if (openingCounter === null) {
         this.addError(row, {
-          code: 'CURRENT_COUNTER_REQUIRED',
-          field: 'currentCounter',
-          message: 'Current Counter is required for STANDALONE stations',
+          code: 'OPENING_COUNTER_REQUIRED',
+          field: 'openingCounter',
+          message: 'Opening Counter is required for STANDALONE stations',
         });
       }
     }
@@ -560,10 +560,10 @@ export class StationImportValidationService {
         });
       }
 
-      if (currentCounter !== null && currentCounter !== 0) {
+      if (openingCounter !== null && openingCounter !== 0) {
         this.addError(row, {
           code: 'SHARED_TANK_COUNTER_NOT_ALLOWED',
-          field: 'currentCounter',
+          field: 'openingCounter',
           message: 'SHARED_TANK stations do not have a direct counter',
         });
       }
@@ -602,11 +602,11 @@ export class StationImportValidationService {
         });
       }
 
-      if (currentCounter === null) {
+      if (openingCounter === null) {
         this.addError(row, {
-          code: 'CURRENT_COUNTER_REQUIRED',
-          field: 'currentCounter',
-          message: 'Current Counter is required for DISPENSER stations',
+          code: 'OPENING_COUNTER_REQUIRED',
+          field: 'openingCounter',
+          message: 'Opening Counter is required for DISPENSER stations',
         });
       }
     }

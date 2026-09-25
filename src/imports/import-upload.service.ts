@@ -27,7 +27,7 @@ const ASSETS_SCHEMA_VERSION = 1;
 const ASSETS_MAX_ROWS = 500;
 const ASSETS_EXECUTION_MODE = 'ALL_OR_NOTHING';
 const STATIONS_TEMPLATE_TYPE = 'STATIONS';
-const STATIONS_SCHEMA_VERSION = 1;
+const STATIONS_SCHEMA_VERSION = 3;
 const STATIONS_MAX_ROWS = 500;
 const STATIONS_EXECUTION_MODE = 'ALL_OR_NOTHING';
 
@@ -59,7 +59,7 @@ const STATIONS_CANONICAL_FIELDS = [
   'capacity',
   'projectCode',
   'openingBalance',
-  'currentCounter',
+  'openingCounter',
 ] as const;
 
 const EMPLOYEES_CANONICAL_FIELDS = [

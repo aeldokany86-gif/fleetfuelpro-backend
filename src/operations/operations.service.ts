@@ -146,6 +146,12 @@ export class OperationsService {
           counterValue: true,
           lifetimeCounter: true,
           counterCycleNumber: true,
+          counterBefore: true,
+          counterAfter: true,
+          lifetimeBefore: true,
+          lifetimeAfter: true,
+          counterCycleBefore: true,
+          counterCycleAfter: true,
           createdAt: true,
           station: {
             select: {
@@ -2286,6 +2292,26 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
           );
 
 
+          if (
+            dto.stationCounter !== undefined &&
+            dto.stationCounter !== null &&
+            entities.destinationStation &&
+            this.getStationStructureType(entities.destinationStation) === 'STANDALONE' &&
+            ['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'].includes(type)
+          ) {
+            await (tx as any).operationStationCounterReading.createMany({
+              data: [
+                {
+                  operationId: operation.id,
+                  companyId: currentUser.companyId!,
+                  stationId: entities.destinationStation.id,
+                  counterValue: Number(dto.stationCounter),
+                },
+              ],
+              skipDuplicates: true,
+            });
+          }
+
           if (Array.isArray(dto.dispenserReadings) && dto.dispenserReadings.length) {
             await (tx as any).operationStationCounterReading.createMany({
               data: dto.dispenserReadings.map((item) => ({
@@ -3272,63 +3298,544 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     }
   }
 
-  private async applySharedTankDispenserReadings(
+  private getOperationCounterEffectiveTime(operation: any) {
+    return new Date(operation?.occurredAt || operation?.createdAt || new Date());
+  }
+
+  private async hasLaterStandaloneCounterEvent(
+    tx: any,
+    stationId: string,
+    operation: any,
+  ) {
+    const effectiveAt = this.getOperationCounterEffectiveTime(operation);
+
+    const [laterOperation, laterReset] = await Promise.all([
+      tx.operation.findFirst({
+        where: {
+          id: { not: operation.id },
+          status: 'COMPLETED',
+          destinationStationId: stationId,
+          stationCounter: { not: null },
+          type: {
+            in: ['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'],
+          },
+          occurredAt: { gt: effectiveAt },
+        },
+        select: { id: true },
+      }),
+      tx.stationCounterReset.findFirst({
+        where: {
+          stationId,
+          effectiveAt: { gt: effectiveAt },
+        },
+        select: { id: true },
+      }),
+    ]);
+
+    return Boolean(laterOperation || laterReset);
+  }
+
+  private async hasLaterDispenserCounterEvent(
+    tx: any,
+    stationId: string,
+    operation: any,
+  ) {
+    const effectiveAt = this.getOperationCounterEffectiveTime(operation);
+
+    const [laterReading, laterReset] = await Promise.all([
+      (tx as any).operationStationCounterReading.findFirst({
+        where: {
+          stationId,
+          operationId: { not: operation.id },
+          operation: {
+            status: 'COMPLETED',
+            occurredAt: { gt: effectiveAt },
+          },
+        },
+        select: { id: true },
+      }),
+      tx.stationCounterReset.findFirst({
+        where: {
+          stationId,
+          effectiveAt: { gt: effectiveAt },
+        },
+        select: { id: true },
+      }),
+    ]);
+
+    return Boolean(laterReading || laterReset);
+  }
+
+  private async writeAppendOnlyStationCounterSnapshot(
+    tx: any,
+    operation: any,
+    stationId: string,
+    counterAfter: number,
+  ) {
+    const station = await tx.station.findUnique({
+      where: { id: stationId },
+    });
+
+    if (!station) {
+      throw new NotFoundException('Station counter owner was not found.');
+    }
+
+    const counterBefore = Number(station.currentCounter || 0);
+    const lifetimeBefore = this.getEffectiveStationLifetime(station);
+    const counterCycleBefore = Number(station.currentCounterCycle || 1);
+
+    if (!Number.isFinite(counterAfter) || counterAfter < 0) {
+      throw new BadRequestException('Station counter must be zero or positive.');
+    }
+
+    if (counterAfter < counterBefore) {
+      throw new BadRequestException(
+        `New station counter cannot be lower than the current counter-cycle reading (${counterBefore}).`,
+      );
+    }
+
+    const lifetimeAfter =
+      lifetimeBefore + (counterAfter - counterBefore);
+    const counterCycleAfter = counterCycleBefore;
+
+    await (tx as any).operationStationCounterReading.upsert({
+      where: {
+        operationId_stationId: {
+          operationId: operation.id,
+          stationId,
+        },
+      },
+      create: {
+        operationId: operation.id,
+        companyId: operation.companyId,
+        stationId,
+        counterValue: counterAfter,
+        lifetimeCounter: lifetimeAfter,
+        counterCycleNumber: counterCycleAfter,
+        counterBefore,
+        counterAfter,
+        lifetimeBefore,
+        lifetimeAfter,
+        counterCycleBefore,
+        counterCycleAfter,
+      },
+      update: {
+        counterValue: counterAfter,
+        lifetimeCounter: lifetimeAfter,
+        counterCycleNumber: counterCycleAfter,
+        counterBefore,
+        counterAfter,
+        lifetimeBefore,
+        lifetimeAfter,
+        counterCycleBefore,
+        counterCycleAfter,
+      },
+    });
+
+    await tx.station.update({
+      where: { id: stationId },
+      data: {
+        currentCounter: counterAfter,
+        currentLifetimeCounter: lifetimeAfter,
+        currentCounterCycle: counterCycleAfter,
+      },
+    });
+
+    return {
+      lifetimeAfter,
+      counterCycleAfter,
+    };
+  }
+
+  private async rebuildStandaloneStationCounterHistory(
+    tx: any,
+    stationId: string,
+  ) {
+    const station = await tx.station.findUnique({
+      where: { id: stationId },
+    });
+
+    if (!station) {
+      throw new NotFoundException('Station was not found.');
+    }
+
+    if (station.openingCounter === null || station.openingCounter === undefined) {
+      throw new BadRequestException(
+        'A backdated station-counter operation cannot be applied until the station Opening Counter is populated.',
+      );
+    }
+
+    const [operations, resets] = await Promise.all([
+      tx.operation.findMany({
+        where: {
+          status: 'COMPLETED',
+          destinationStationId: stationId,
+          stationCounter: { not: null },
+          type: {
+            in: ['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'],
+          },
+        },
+        orderBy: [{ occurredAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        select: {
+          id: true,
+          companyId: true,
+          stationCounter: true,
+          occurredAt: true,
+          createdAt: true,
+        },
+      }),
+      tx.stationCounterReset.findMany({
+        where: { stationId },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      }),
+    ]);
+
+    const events = [
+      ...operations.map((item: any) => ({
+        kind: 'OPERATION' as const,
+        at: item.occurredAt || item.createdAt,
+        createdAt: item.createdAt,
+        id: item.id,
+        item,
+      })),
+      ...resets.map((item: any) => ({
+        kind: 'RESET' as const,
+        at: item.effectiveAt,
+        createdAt: item.createdAt,
+        id: item.id,
+        item,
+      })),
+    ].sort((a, b) => {
+      const atDiff = new Date(a.at).getTime() - new Date(b.at).getTime();
+      if (atDiff !== 0) return atDiff;
+      if (a.kind !== b.kind) return a.kind === 'RESET' ? -1 : 1;
+      const createdDiff =
+        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (createdDiff !== 0) return createdDiff;
+      return String(a.id).localeCompare(String(b.id));
+    });
+
+    let counter = Number(station.openingCounter || 0);
+    let lifetime = counter;
+    let cycle = 1;
+
+    for (const event of events) {
+      if (event.kind === 'RESET') {
+        const nextCounter = Number(event.item.newCounter || 0);
+
+        await tx.stationCounterReset.update({
+          where: { id: event.item.id },
+          data: {
+            oldCounter: counter,
+            lifetimeAtReset: lifetime,
+            oldCounterCycle: cycle,
+            newCounterCycle: cycle + 1,
+          },
+        });
+
+        cycle += 1;
+        counter = nextCounter;
+        continue;
+      }
+
+      const counterAfter = Number(event.item.stationCounter);
+
+      if (!Number.isFinite(counterAfter) || counterAfter < counter) {
+        throw new BadRequestException(
+          `Station counter (${counterAfter}) cannot be lower than the previous reading (${counter}) in counter cycle ${cycle}.`,
+        );
+      }
+
+      const counterBefore = counter;
+      const lifetimeBefore = lifetime;
+      const counterCycleBefore = cycle;
+
+      lifetime += counterAfter - counterBefore;
+      counter = counterAfter;
+
+      await (tx as any).operationStationCounterReading.upsert({
+        where: {
+          operationId_stationId: {
+            operationId: event.item.id,
+            stationId,
+          },
+        },
+        create: {
+          operationId: event.item.id,
+          companyId: event.item.companyId,
+          stationId,
+          counterValue: counterAfter,
+          lifetimeCounter: lifetime,
+          counterCycleNumber: cycle,
+          counterBefore,
+          counterAfter,
+          lifetimeBefore,
+          lifetimeAfter: lifetime,
+          counterCycleBefore,
+          counterCycleAfter: cycle,
+        },
+        update: {
+          counterValue: counterAfter,
+          lifetimeCounter: lifetime,
+          counterCycleNumber: cycle,
+          counterBefore,
+          counterAfter,
+          lifetimeBefore,
+          lifetimeAfter: lifetime,
+          counterCycleBefore,
+          counterCycleAfter: cycle,
+        },
+      });
+
+      await tx.operation.update({
+        where: { id: event.item.id },
+        data: {
+          lifetimeCounter: lifetime,
+          stationCounterCycleNumber: cycle,
+        },
+      });
+    }
+
+    await tx.station.update({
+      where: { id: stationId },
+      data: {
+        currentCounter: counter,
+        currentLifetimeCounter: lifetime,
+        currentCounterCycle: cycle,
+      },
+    });
+  }
+
+  private async rebuildDispenserCounterHistory(
+    tx: any,
+    stationId: string,
+  ) {
+    const station = await tx.station.findUnique({
+      where: { id: stationId },
+    });
+
+    if (!station || this.getStationStructureType(station) !== 'DISPENSER') {
+      throw new NotFoundException('Dispenser station was not found.');
+    }
+
+    if (station.openingCounter === null || station.openingCounter === undefined) {
+      throw new BadRequestException(
+        'A backdated dispenser-counter operation cannot be applied until the dispenser Opening Counter is populated.',
+      );
+    }
+
+    const [readings, resets] = await Promise.all([
+      (tx as any).operationStationCounterReading.findMany({
+        where: {
+          stationId,
+          operation: { status: 'COMPLETED' },
+        },
+        include: {
+          operation: {
+            select: {
+              id: true,
+              companyId: true,
+              occurredAt: true,
+              createdAt: true,
+            },
+          },
+        },
+      }),
+      tx.stationCounterReset.findMany({
+        where: { stationId },
+        orderBy: [{ effectiveAt: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      }),
+    ]);
+
+    const events = [
+      ...readings.map((item: any) => ({
+        kind: 'READING' as const,
+        at:
+          item.operation?.occurredAt ||
+          item.operation?.createdAt ||
+          item.createdAt,
+        createdAt: item.operation?.createdAt || item.createdAt,
+        id: item.id,
+        item,
+      })),
+      ...resets.map((item: any) => ({
+        kind: 'RESET' as const,
+        at: item.effectiveAt,
+        createdAt: item.createdAt,
+        id: item.id,
+        item,
+      })),
+    ].sort((a, b) => {
+      const atDiff = new Date(a.at).getTime() - new Date(b.at).getTime();
+      if (atDiff !== 0) return atDiff;
+      if (a.kind !== b.kind) return a.kind === 'RESET' ? -1 : 1;
+      const createdDiff =
+        new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (createdDiff !== 0) return createdDiff;
+      return String(a.id).localeCompare(String(b.id));
+    });
+
+    let counter = Number(station.openingCounter || 0);
+    let lifetime = counter;
+    let cycle = 1;
+
+    for (const event of events) {
+      if (event.kind === 'RESET') {
+        const nextCounter = Number(event.item.newCounter || 0);
+
+        await tx.stationCounterReset.update({
+          where: { id: event.item.id },
+          data: {
+            oldCounter: counter,
+            lifetimeAtReset: lifetime,
+            oldCounterCycle: cycle,
+            newCounterCycle: cycle + 1,
+          },
+        });
+
+        cycle += 1;
+        counter = nextCounter;
+        continue;
+      }
+
+      const counterAfter = Number(event.item.counterValue);
+
+      if (!Number.isFinite(counterAfter) || counterAfter < counter) {
+        throw new BadRequestException(
+          `Dispenser counter (${counterAfter}) cannot be lower than the previous reading (${counter}) in counter cycle ${cycle}.`,
+        );
+      }
+
+      const counterBefore = counter;
+      const lifetimeBefore = lifetime;
+      const counterCycleBefore = cycle;
+
+      lifetime += counterAfter - counterBefore;
+      counter = counterAfter;
+
+      await (tx as any).operationStationCounterReading.update({
+        where: { id: event.item.id },
+        data: {
+          lifetimeCounter: lifetime,
+          counterCycleNumber: cycle,
+          counterBefore,
+          counterAfter,
+          lifetimeBefore,
+          lifetimeAfter: lifetime,
+          counterCycleBefore,
+          counterCycleAfter: cycle,
+        },
+      });
+    }
+
+    await tx.station.update({
+      where: { id: stationId },
+      data: {
+        currentCounter: counter,
+        currentLifetimeCounter: lifetime,
+        currentCounterCycle: cycle,
+      },
+    });
+  }
+
+  private async applyCompletedStationCounterSnapshots(
     tx: any,
     operation: any,
     dto: CreateOperationDto,
+    entities: LoadedOperationEntities,
   ) {
     if (
-      !['EXTERNAL_SUPPLY', 'INTERNAL_TRANSFER', 'EXTERNAL_TRANSFER'].includes(
+      !['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'].includes(
         String(operation.type || '').toUpperCase(),
-      ) ||
-      !Array.isArray(dto.dispenserReadings) ||
-      dto.dispenserReadings.length === 0
+      )
     ) {
       return;
     }
 
-    for (const reading of dto.dispenserReadings) {
-      const dispenser = await tx.station.findFirst({
-        where: {
-          id: String(reading.stationId),
-          companyId: operation.companyId,
-          deletedAt: null,
-          structureType: 'DISPENSER',
-          parentStationId: operation.destinationStationId,
-        },
-      });
+    const destinationStation = await tx.station.findUnique({
+      where: { id: operation.destinationStationId },
+    });
 
-      if (!dispenser) {
-        throw new BadRequestException(
-          'A destination dispenser reading no longer belongs to the selected SHARED_TANK.',
-        );
-      }
+    if (!destinationStation) {
+      throw new NotFoundException('Destination station was not found.');
+    }
 
-      const snapshot = this.calculateStationLifetimeSnapshot(
-        dispenser,
-        Number(reading.counter),
+    if (
+      this.getStationStructureType(destinationStation) === 'STANDALONE' &&
+      dto.stationCounter !== undefined &&
+      dto.stationCounter !== null
+    ) {
+      const hasLaterEvent = await this.hasLaterStandaloneCounterEvent(
+        tx,
+        destinationStation.id,
+        operation,
       );
 
-      await tx.station.update({
-        where: { id: dispenser.id },
-        data: {
-          currentCounter: Number(reading.counter),
-          currentLifetimeCounter: snapshot.lifetimeCounter,
-          currentCounterCycle: snapshot.stationCounterCycleNumber,
-        },
-      });
+      if (hasLaterEvent) {
+        await this.rebuildStandaloneStationCounterHistory(
+          tx,
+          destinationStation.id,
+        );
+      } else {
+        const snapshot = await this.writeAppendOnlyStationCounterSnapshot(
+          tx,
+          operation,
+          destinationStation.id,
+          Number(dto.stationCounter),
+        );
 
-      await (tx as any).operationStationCounterReading.updateMany({
-        where: {
-          operationId: operation.id,
-          stationId: dispenser.id,
-        },
-        data: {
-          counterValue: Number(reading.counter),
-          lifetimeCounter: snapshot.lifetimeCounter,
-          counterCycleNumber: snapshot.stationCounterCycleNumber,
-        },
-      });
+        await tx.operation.update({
+          where: { id: operation.id },
+          data: {
+            lifetimeCounter: snapshot.lifetimeAfter,
+            stationCounterCycleNumber: snapshot.counterCycleAfter,
+          },
+        });
+      }
+
+      return;
+    }
+
+    if (
+      this.getStationStructureType(destinationStation) === 'SHARED_TANK' &&
+      Array.isArray(dto.dispenserReadings) &&
+      dto.dispenserReadings.length > 0
+    ) {
+      for (const reading of dto.dispenserReadings) {
+        const stationId = String(reading.stationId);
+        const dispenser = await tx.station.findFirst({
+          where: {
+            id: stationId,
+            companyId: operation.companyId,
+            deletedAt: null,
+            structureType: 'DISPENSER',
+            parentStationId: destinationStation.id,
+          },
+        });
+
+        if (!dispenser) {
+          throw new BadRequestException(
+            'A destination dispenser reading no longer belongs to the selected SHARED_TANK.',
+          );
+        }
+
+        const hasLaterEvent = await this.hasLaterDispenserCounterEvent(
+          tx,
+          dispenser.id,
+          operation,
+        );
+
+        if (hasLaterEvent) {
+          await this.rebuildDispenserCounterHistory(tx, dispenser.id);
+        } else {
+          await this.writeAppendOnlyStationCounterSnapshot(
+            tx,
+            operation,
+            dispenser.id,
+            Number(reading.counter),
+          );
+        }
+      }
     }
   }
 
@@ -3820,7 +4327,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         currentUser,
       });
 
-      await this.applySharedTankDispenserReadings(tx, operation, dto);
+      await this.applyCompletedStationCounterSnapshots(
+        tx,
+        operation,
+        dto,
+        entities,
+      );
       return;
     }
 
@@ -3834,7 +4346,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         currentUser,
       });
 
-      await this.applySharedTankDispenserReadings(tx, operation, dto);
+      await this.applyCompletedStationCounterSnapshots(
+        tx,
+        operation,
+        dto,
+        entities,
+      );
       return;
     }
 
@@ -3857,7 +4374,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         currentUser,
       });
 
-      await this.applySharedTankDispenserReadings(tx, operation, dto);
+      await this.applyCompletedStationCounterSnapshots(
+        tx,
+        operation,
+        dto,
+        entities,
+      );
     }
   }
 
@@ -3876,11 +4398,6 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     if (!station) throw new BadRequestException('Station is required for stock movement.');
 
     const movementQuantity = Number(quantity || 0);
-    const counterStationId = this.getOperationCounterStationId(operation);
-    const shouldApplyCounter =
-      operation.stationCounter != null &&
-      counterStationId === station.id &&
-      this.getStationStructureType(station) === 'STANDALONE';
 
     /*
       Stock protection is enforced after the atomic database increment/decrement
@@ -3894,22 +4411,6 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       where: { id: station.id },
       data: {
         currentStock: { increment: movementQuantity },
-        ...(shouldApplyCounter
-          ? {
-              currentCounter: Number(operation.stationCounter),
-              currentLifetimeCounter:
-                operation.lifetimeCounter == null
-                  ? this.calculateStationLifetimeSnapshot(
-                      station,
-                      Number(operation.stationCounter),
-                    ).lifetimeCounter
-                  : Number(operation.lifetimeCounter),
-              currentCounterCycle:
-                operation.stationCounterCycleNumber == null
-                  ? Number(station.currentCounterCycle || 1)
-                  : Number(operation.stationCounterCycleNumber),
-            }
-          : {}),
       },
       select: {
         currentStock: true,
@@ -4306,27 +4807,6 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       );
     }
 
-    const counterStation =
-      type === 'INTERNAL_TRANSFER' ||
-      type === 'EXTERNAL_SUPPLY' ||
-      type === 'EXTERNAL_TRANSFER'
-        ? entities.destinationStation
-        : null;
-
-    if (
-      counterStation &&
-      this.getStationStructureType(counterStation) === 'STANDALONE' &&
-      dto.stationCounter !== undefined &&
-      dto.stationCounter !== null
-    ) {
-      Object.assign(
-        snapshot,
-        this.calculateStationLifetimeSnapshot(
-          counterStation,
-          Number(dto.stationCounter),
-        ),
-      );
-    }
 
     return snapshot;
   }

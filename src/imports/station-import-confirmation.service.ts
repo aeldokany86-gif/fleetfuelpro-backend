@@ -82,7 +82,7 @@ export class StationImportConfirmationService {
       const projectId = this.requiredString(data.projectId);
       const capacity = this.optionalNumber(data.capacity);
       const openingBalance = this.optionalNumber(data.openingBalance);
-      const currentCounter = this.optionalNumber(data.currentCounter);
+      const openingCounter = this.optionalNumber(data.openingCounter);
 
       if (!stationId || !structureType || !projectCode || !projectId) {
         this.fail(
@@ -119,18 +119,18 @@ export class StationImportConfirmationService {
       }
 
       if (
-        currentCounter !== null &&
-        (!Number.isFinite(currentCounter) || currentCounter < 0)
+        openingCounter !== null &&
+        (!Number.isFinite(openingCounter) || openingCounter < 0)
       ) {
         this.fail(
           'BATCH_SNAPSHOT_INVALID',
-          `Validated current counter is invalid at Excel row ${row.rowNumber}`,
+          `Validated opening counter is invalid at Excel row ${row.rowNumber}`,
         );
       }
 
       if (
         structureType === StationStructureType.STANDALONE &&
-        (openingBalance === null || currentCounter === null || parentStationCode)
+        (openingBalance === null || openingCounter === null || parentStationCode)
       ) {
         this.fail(
           'BATCH_SNAPSHOT_INVALID',
@@ -143,7 +143,7 @@ export class StationImportConfirmationService {
         (
           openingBalance === null ||
           parentStationCode ||
-          (currentCounter !== null && currentCounter !== 0)
+          (openingCounter !== null && openingCounter !== 0)
         )
       ) {
         this.fail(
@@ -156,7 +156,7 @@ export class StationImportConfirmationService {
         structureType === StationStructureType.DISPENSER &&
         (
           !parentStationCode ||
-          currentCounter === null ||
+          openingCounter === null ||
           (openingBalance !== null && openingBalance !== 0) ||
           (capacity !== null && capacity !== 0)
         )
@@ -187,10 +187,10 @@ export class StationImportConfirmationService {
           structureType === StationStructureType.DISPENSER
             ? 0
             : openingBalance ?? 0,
-        currentCounter:
+        openingCounter:
           structureType === StationStructureType.SHARED_TANK
             ? 0
-            : currentCounter ?? 0,
+            : openingCounter ?? 0,
       };
     });
 
@@ -364,7 +364,7 @@ export class StationImportConfirmationService {
                 parentStationId: null,
                 capacity: row.capacity,
                 openingBalance: row.openingBalance,
-                currentCounter: row.currentCounter,
+                openingCounter: row.openingCounter,
                 projectId: row.projectId,
                 status: StationStatus.ACTIVE,
                 createdById: context.actor.id,
@@ -435,7 +435,7 @@ export class StationImportConfirmationService {
                 parentStationId: parent.id,
                 capacity: null,
                 openingBalance: 0,
-                currentCounter: row.currentCounter,
+                openingCounter: row.openingCounter,
                 projectId: row.projectId,
                 status: StationStatus.ACTIVE,
                 createdById: context.actor.id,
