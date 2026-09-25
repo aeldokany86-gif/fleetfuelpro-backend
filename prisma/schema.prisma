@@ -685,6 +685,7 @@ model Station {
   parentStationId               String?
   capacity                      Float?
   openingBalance                Float                            @default(0)
+  openingCounter                Float?
   currentStock                  Float                            @default(0)
   currentCounter                Float                            @default(0)
   status                        StationStatus                    @default(ACTIVE)
@@ -860,6 +861,12 @@ model OperationStationCounterReading {
   counterValue       Float
   lifetimeCounter    Float?
   counterCycleNumber Int?
+  counterBefore      Float?
+  counterAfter       Float?
+  lifetimeBefore     Float?
+  lifetimeAfter      Float?
+  counterCycleBefore Int?
+  counterCycleAfter  Int?
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
   operation          Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)

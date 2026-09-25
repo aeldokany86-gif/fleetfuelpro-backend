@@ -445,6 +445,7 @@ export class StationsService {
     parentStationId?: string;
     capacity?: number;
     openingBalance?: number;
+    openingCounter?: number;
     currentCounter?: number;
     projectId?: string;
     status?: string;
@@ -511,9 +512,14 @@ export class StationsService {
         body.openingBalance,
       );
 
+    const openingCounter =
+      this.stationCreationDomainService.normalizeOpeningCounter(
+        body.openingCounter ?? body.currentCounter,
+      );
+
     const currentCounter =
       this.stationCreationDomainService.normalizeCurrentCounter(
-        body.currentCounter,
+        body.currentCounter ?? openingCounter,
       );
 
     const capacity =
@@ -532,6 +538,7 @@ export class StationsService {
           parentStationId: body.parentStationId || null,
           capacity,
           openingBalance,
+          openingCounter,
           currentCounter,
           projectId: body.projectId || null,
           status: body.status,

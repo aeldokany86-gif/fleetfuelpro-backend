@@ -18,6 +18,7 @@ export type CreateStationDomainInput = {
   parentStationId?: string | null;
   capacity?: number | null;
   openingBalance?: number | null;
+  openingCounter?: number | null;
   currentCounter?: number | null;
   projectId?: string | null;
   status?: string | StationStatus | null;
@@ -87,6 +88,18 @@ export class StationCreationDomainService {
     return openingBalance;
   }
 
+  normalizeOpeningCounter(value?: number | null) {
+    const openingCounter = Number(value ?? 0);
+
+    if (!Number.isFinite(openingCounter) || openingCounter < 0) {
+      throw new BadRequestException(
+        'Opening counter must be a valid zero or positive number',
+      );
+    }
+
+    return openingCounter;
+  }
+
   normalizeCurrentCounter(value?: number | null) {
     const currentCounter = Number(value ?? 0);
 
@@ -127,8 +140,11 @@ export class StationCreationDomainService {
     const requestedOpeningBalance = this.normalizeOpeningBalance(
       input.openingBalance,
     );
+    const requestedOpeningCounter = this.normalizeOpeningCounter(
+      input.openingCounter ?? input.currentCounter,
+    );
     const requestedCurrentCounter = this.normalizeCurrentCounter(
-      input.currentCounter,
+      input.currentCounter ?? requestedOpeningCounter,
     );
     const requestedCapacity = this.normalizeCapacity(input.capacity);
     const parentStationId = this.normalizeOptionalText(input.parentStationId);
@@ -172,7 +188,7 @@ export class StationCreationDomainService {
 
     if (
       structureType === StationStructureType.SHARED_TANK &&
-      requestedCurrentCounter !== 0
+      (requestedOpeningCounter !== 0 || requestedCurrentCounter !== 0)
     ) {
       throw new BadRequestException(
         'SHARED_TANK stations do not have a direct station counter',
@@ -217,6 +233,10 @@ export class StationCreationDomainService {
       structureType === StationStructureType.DISPENSER
         ? 0
         : requestedOpeningBalance;
+    const openingCounter =
+      structureType === StationStructureType.SHARED_TANK
+        ? 0
+        : requestedOpeningCounter;
     const currentCounter =
       structureType === StationStructureType.SHARED_TANK
         ? 0
@@ -236,6 +256,7 @@ export class StationCreationDomainService {
         parentStationId,
         capacity,
         openingBalance,
+        openingCounter,
         currentStock: openingBalance,
         currentCounter,
         currentLifetimeCounter: currentCounter,
