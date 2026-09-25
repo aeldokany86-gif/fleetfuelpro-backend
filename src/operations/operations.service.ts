@@ -1774,6 +1774,149 @@ async findAll(request?: RequestLike) {
   return operations;
 }
 
+async getStationOperationsHistory(
+  stationId: string,
+  pagination: {
+    page?: string | number;
+    pageSize?: string | number;
+  } = {},
+  request?: RequestLike,
+) {
+  const currentUser = await this.resolveCurrentUser(
+    {
+      type: 'DIRECT_REFUEL' as any,
+      quantity: 1,
+    } as CreateOperationDto,
+    request,
+  );
+
+  if (!currentUser.existsInDatabase || !currentUser.companyId) {
+    throw new UnauthorizedException('Real database user is required.');
+  }
+
+  const requestedStationId = String(stationId || '').trim();
+  if (!requestedStationId) {
+    throw new BadRequestException('stationId is required.');
+  }
+
+  const parsedPage = Number(pagination.page ?? 1);
+  const parsedPageSize = Number(pagination.pageSize ?? 100);
+
+  const page =
+    Number.isFinite(parsedPage) && parsedPage > 0
+      ? Math.floor(parsedPage)
+      : 1;
+
+  const pageSize =
+    Number.isFinite(parsedPageSize) && parsedPageSize > 0
+      ? Math.min(100, Math.floor(parsedPageSize))
+      : 100;
+
+  const station = await (this.prisma as any).station.findFirst({
+    where: {
+      companyId: currentUser.companyId,
+      deletedAt: null,
+      OR: [
+        { id: requestedStationId },
+        { stationId: requestedStationId },
+      ],
+    },
+    select: {
+      id: true,
+      stationId: true,
+      projectId: true,
+      structureType: true,
+      parentStationId: true,
+    },
+  });
+
+  if (!station) {
+    throw new NotFoundException('Station was not found.');
+  }
+
+  const scopedRoles: NormalizedRole[] = [
+    'Manager',
+    'Officer',
+    'Operator',
+    'Supervisor',
+  ];
+
+  if (scopedRoles.includes(currentUser.role)) {
+    const accessibleProjectIds =
+      currentUser.role === 'Manager'
+        ? currentUser.managedProjectIds
+        : currentUser.assignedProjectIds;
+
+    if (
+      station.projectId &&
+      !accessibleProjectIds.includes(station.projectId)
+    ) {
+      throw new ForbiddenException(
+        'You cannot view operation history for this station.',
+      );
+    }
+  }
+
+  const where = {
+    companyId: currentUser.companyId,
+    status: 'COMPLETED',
+    OR: [
+      { sourceStationId: station.id },
+      { destinationStationId: station.id },
+      {
+        stationCounterReadings: {
+          some: {
+            stationId: station.id,
+          },
+        },
+      },
+      {
+        dispenserAllocations: {
+          some: {
+            stationId: station.id,
+          },
+        },
+      },
+    ],
+  };
+
+  const [total, operations] = await Promise.all([
+    (this.prisma as any).operation.count({ where }),
+    (this.prisma as any).operation.findMany({
+      where,
+      include: this.buildOperationListInclude(),
+      orderBy: [
+        { occurredAt: 'desc' },
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+    }),
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  return {
+    station: {
+      id: station.id,
+      stationId: station.stationId,
+      projectId: station.projectId,
+      structureType: station.structureType,
+      parentStationId: station.parentStationId,
+    },
+    operations,
+    pagination: {
+      page,
+      pageSize,
+      total,
+      totalPages,
+      hasPreviousPage: page > 1,
+      hasNextPage: page < totalPages,
+    },
+  };
+}
+
 async findPendingApprovals(request?: RequestLike) {
   const startedAt = Date.now();
 

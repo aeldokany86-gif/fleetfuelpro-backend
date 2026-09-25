@@ -103,6 +103,24 @@ export class OperationsController {
     req.once('aborted', cleanup);
   }
 
+@Get('station/:stationId/history')
+@UseGuards(AuthGuard('jwt'))
+getStationOperationsHistory(
+  @Param('stationId') stationId: string,
+  @Query('page') page: string | undefined,
+  @Query('pageSize') pageSize: string | undefined,
+  @Req() req: any,
+) {
+  return this.operationsService.getStationOperationsHistory(
+    stationId,
+    {
+      page,
+      pageSize,
+    },
+    req,
+  );
+}
+
 @Get()
 findAll(@Req() req: any) {
   return this.operationsService.findAll(req);
