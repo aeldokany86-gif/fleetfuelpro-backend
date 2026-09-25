@@ -137,6 +137,10 @@ export class StationsService {
     return this.normalizeRoleName(roleName) === 'OFFICER';
   }
 
+  private isSupervisorRole(roleName: string) {
+    return this.normalizeRoleName(roleName) === 'SUPERVISOR';
+  }
+
   private isManagerRole(roleName: string) {
     return this.normalizeRoleName(roleName) === 'MANAGER';
   }
@@ -2386,6 +2390,21 @@ export class StationsService {
       if (station.project.projectManagerId !== body.requestedByUserId) {
         throw new BadRequestException(
           'Only the assigned Project Manager can submit an inventory adjustment request for this station',
+        );
+      }
+    } else if (actionType === 'ZERO_BALANCE') {
+      if (
+        !this.isOfficerRole(requesterRoleName) &&
+        !this.isSupervisorRole(requesterRoleName)
+      ) {
+        throw new BadRequestException(
+          'Only Officer or Supervisor can submit a zero balance request',
+        );
+      }
+
+      if (!station.project.projectManagerId) {
+        throw new BadRequestException(
+          'Station project has no assigned Project Manager',
         );
       }
     } else {
