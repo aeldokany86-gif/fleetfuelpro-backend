@@ -1077,6 +1077,7 @@ export class StationsService {
         companyId: true,
         structureType: true,
         parentStationId: true,
+        openingCounter: true,
         currentCounter: true,
         currentLifetimeCounter: true,
         currentCounterCycle: true,
@@ -1183,6 +1184,14 @@ export class StationsService {
               id: true,
               stationId: true,
               counterValue: true,
+              lifetimeCounter: true,
+              counterCycleNumber: true,
+              counterBefore: true,
+              counterAfter: true,
+              lifetimeBefore: true,
+              lifetimeAfter: true,
+              counterCycleBefore: true,
+              counterCycleAfter: true,
               createdAt: true,
               operation: {
                 select: {
@@ -1305,6 +1314,13 @@ export class StationsService {
       stations.map((station) => [station.id, station]),
     );
 
+    const counterReadingMap = new Map(
+      (dispenserReadings as any[]).map((reading: any) => [
+        `${reading.operation?.id || ''}:${reading.stationId}`,
+        reading,
+      ]),
+    );
+
     const getStationProjectAt = (station: any, eventAt: Date | string) => {
       const eventTime = new Date(eventAt).getTime();
       const assignments = station?.assignmentHistory || [];
@@ -1372,7 +1388,17 @@ export class StationsService {
 
     for (const reading of dispenserReadings as any[]) {
       const operation = reading.operation;
-      if (!operation) continue;
+      const readingStation = stationMap.get(reading.stationId);
+
+      if (!operation || !readingStation) continue;
+
+      // Stage 2 persists counter snapshots for both STANDALONE stations and
+      // DISPENSER stations in OperationStationCounterReading. STANDALONE
+      // operations are already represented by candidateOperations above, so
+      // only physical DISPENSER rows become separate timeline events here.
+      if (this.getStationStructureType(readingStation) !== 'DISPENSER') {
+        continue;
+      }
 
       eventsByStation.get(reading.stationId)?.push({
         kind: 'DISPENSER_READING' as const,
@@ -1433,11 +1459,20 @@ export class StationsService {
         return String(a.id).localeCompare(String(b.id));
       });
 
-      let previousCounter: number | null = null;
-      let previousLifetime = 0;
+      const hasOpeningCounter =
+        station.openingCounter !== null &&
+        station.openingCounter !== undefined &&
+        Number.isFinite(Number(station.openingCounter));
+
+      const openingCounter = hasOpeningCounter
+        ? Number(station.openingCounter)
+        : null;
+
+      let previousCounter: number | null = openingCounter;
+      let previousLifetime = openingCounter ?? 0;
       let currentCycle = 1;
-      let cycleStartCounter: number | null = null;
-      let lifetimeAtCycleStart = 0;
+      let cycleStartCounter: number | null = openingCounter;
+      let lifetimeAtCycleStart = openingCounter ?? 0;
 
       for (const event of stationEvents) {
         const eventDate = new Date(event.at);
@@ -1580,19 +1615,134 @@ export class StationsService {
         const isDispenserReading = event.kind === 'DISPENSER_READING';
         const readingRecord = isDispenserReading ? event.item : null;
         const operation = isDispenserReading ? readingRecord?.operation : event.item;
+
+        const persistedSnapshot = isDispenserReading
+          ? readingRecord
+          : counterReadingMap.get(`${operation?.id || ''}:${station.id}`) || null;
+
+        const hasCompleteSnapshot =
+          persistedSnapshot &&
+          persistedSnapshot.counterBefore !== null &&
+          persistedSnapshot.counterBefore !== undefined &&
+          persistedSnapshot.counterAfter !== null &&
+          persistedSnapshot.counterAfter !== undefined &&
+          persistedSnapshot.lifetimeBefore !== null &&
+          persistedSnapshot.lifetimeBefore !== undefined &&
+          persistedSnapshot.lifetimeAfter !== null &&
+          persistedSnapshot.lifetimeAfter !== undefined &&
+          persistedSnapshot.counterCycleBefore !== null &&
+          persistedSnapshot.counterCycleBefore !== undefined &&
+          persistedSnapshot.counterCycleAfter !== null &&
+          persistedSnapshot.counterCycleAfter !== undefined;
+
+        if (hasCompleteSnapshot) {
+          const snapshotCounterBefore = Number(persistedSnapshot.counterBefore);
+          const snapshotCounterAfter = Number(persistedSnapshot.counterAfter);
+          const snapshotLifetimeBefore = Number(persistedSnapshot.lifetimeBefore);
+          const snapshotLifetimeAfter = Number(persistedSnapshot.lifetimeAfter);
+          const snapshotCycleBefore = Number(persistedSnapshot.counterCycleBefore);
+          const snapshotCycleAfter = Number(persistedSnapshot.counterCycleAfter);
+
+          if (
+            previousCounter !== null &&
+            snapshotCounterBefore !== previousCounter
+          ) {
+            diagnostics.push(
+              `Persisted counterBefore (${snapshotCounterBefore}) does not match previous timeline reading (${previousCounter})`,
+            );
+          }
+
+          if (snapshotLifetimeBefore !== previousLifetime) {
+            diagnostics.push(
+              `Persisted lifetimeBefore (${snapshotLifetimeBefore}) does not match previous timeline lifetime (${previousLifetime})`,
+            );
+          }
+
+          if (snapshotCycleBefore !== currentCycle) {
+            diagnostics.push(
+              `Persisted counterCycleBefore (${snapshotCycleBefore}) does not match timeline cycle (${currentCycle})`,
+            );
+          }
+
+          previousCounter = snapshotCounterAfter;
+          previousLifetime = snapshotLifetimeAfter;
+          currentCycle = snapshotCycleAfter;
+
+          if (snapshotCycleAfter !== snapshotCycleBefore) {
+            cycleStartCounter = snapshotCounterAfter;
+            lifetimeAtCycleStart = snapshotLifetimeAfter;
+          }
+
+          if (
+            (!dateFrom || eventDate >= dateFrom) &&
+            (!dateTo || eventDate <= dateTo)
+          ) {
+            rows.push({
+              eventId: isDispenserReading ? persistedSnapshot.id : operation.id,
+              eventDate,
+              eventType: 'OPERATION',
+              referenceNo: operation.operationNo,
+              operationType: operation.type,
+              operationStatus: operation.status,
+              station: {
+                id: station.id,
+                stationId: station.stationId,
+                name: station.name,
+                companyId: station.companyId,
+                structureType: station.structureType,
+                parentStationId: station.parentStationId,
+                parentStation: station.parentStation,
+                project: getOperationStationProject(
+                  operation,
+                  station,
+                  operation?.occurredAt || operation?.createdAt,
+                ),
+              },
+              counterBefore: snapshotCounterBefore,
+              counterAfter: snapshotCounterAfter,
+              deltaCounter: snapshotCounterAfter - snapshotCounterBefore,
+              lifetimeBefore: snapshotLifetimeBefore,
+              lifetimeAfter: snapshotLifetimeAfter,
+              expectedLifetimeAfter: snapshotLifetimeAfter,
+              counterCycleBefore: snapshotCycleBefore,
+              counterCycleAfter: snapshotCycleAfter,
+              performedBy: operation.requestedBy,
+              notes: operation.notes,
+              diagnostics,
+              hasIssue: diagnostics.length > 0,
+            });
+          }
+
+          continue;
+        }
+
+        // Transitional fallback for legacy records that have not yet been
+        // backfilled into OperationStationCounterReading.
         const reading = Number(
-          isDispenserReading ? readingRecord?.counterValue : operation?.stationCounter,
+          isDispenserReading
+            ? readingRecord?.counterValue
+            : operation?.stationCounter,
         );
+
         const storedLifetime = isDispenserReading
-          ? null
-          : operation?.lifetimeCounter === null
+          ? readingRecord?.lifetimeCounter === null ||
+            readingRecord?.lifetimeCounter === undefined
             ? null
-            : Number(operation?.lifetimeCounter);
+            : Number(readingRecord.lifetimeCounter)
+          : operation?.lifetimeCounter === null ||
+              operation?.lifetimeCounter === undefined
+            ? null
+            : Number(operation.lifetimeCounter);
+
         const storedCycle = isDispenserReading
-          ? null
-          : operation?.stationCounterCycleNumber === null
+          ? readingRecord?.counterCycleNumber === null ||
+            readingRecord?.counterCycleNumber === undefined
             ? null
-            : Number(operation?.stationCounterCycleNumber);
+            : Number(readingRecord.counterCycleNumber)
+          : operation?.stationCounterCycleNumber === null ||
+              operation?.stationCounterCycleNumber === undefined
+            ? null
+            : Number(operation.stationCounterCycleNumber);
 
         let expectedLifetime: number;
         let deltaCounter: number;
@@ -1621,25 +1771,25 @@ export class StationsService {
           }
         }
 
-        if (!isDispenserReading) {
-          if (storedLifetime === null) {
-            diagnostics.push('Stored lifetime counter is missing');
-          } else if (storedLifetime !== expectedLifetime) {
-            diagnostics.push(
-              `Stored lifetime (${storedLifetime}) does not match expected lifetime (${expectedLifetime})`,
-            );
-          }
-
-          if (storedCycle === null) {
-            diagnostics.push('Stored counter cycle number is missing');
-          } else if (storedCycle !== currentCycle) {
-            diagnostics.push(
-              `Stored cycle (${storedCycle}) does not match expected cycle (${currentCycle})`,
-            );
-          }
+        if (storedLifetime === null) {
+          diagnostics.push('Persisted station counter snapshot is missing');
+        } else if (storedLifetime !== expectedLifetime) {
+          diagnostics.push(
+            `Stored lifetime (${storedLifetime}) does not match expected lifetime (${expectedLifetime})`,
+          );
         }
 
+        if (storedCycle === null) {
+          diagnostics.push('Stored counter cycle number is missing');
+        } else if (storedCycle !== currentCycle) {
+          diagnostics.push(
+            `Stored cycle (${storedCycle}) does not match expected cycle (${currentCycle})`,
+          );
+        }
+
+        const counterBefore = previousCounter;
         const lifetimeBefore = previousLifetime;
+
         previousCounter = reading;
         previousLifetime = expectedLifetime;
 
@@ -1668,15 +1818,14 @@ export class StationsService {
                 operation?.occurredAt || operation?.createdAt,
               ),
             },
-            counterBefore:
-              previousCounter === reading ? reading - deltaCounter : null,
+            counterBefore,
             counterAfter: reading,
             deltaCounter,
             lifetimeBefore,
-            lifetimeAfter: isDispenserReading ? expectedLifetime : storedLifetime,
+            lifetimeAfter: storedLifetime ?? expectedLifetime,
             expectedLifetimeAfter: expectedLifetime,
             counterCycleBefore: currentCycle,
-            counterCycleAfter: isDispenserReading ? currentCycle : storedCycle,
+            counterCycleAfter: storedCycle ?? currentCycle,
             performedBy: operation.requestedBy,
             notes: operation.notes,
             diagnostics,
