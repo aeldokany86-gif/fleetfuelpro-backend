@@ -1982,6 +1982,322 @@ async findPendingApprovals(request?: RequestLike) {
   return operations;
 }
 
+async getWarehouseOperationsReport(
+  request: RequestLike | undefined,
+  filters: {
+    type?: string;
+    stationId?: string;
+    assetId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  },
+) {
+  const currentUser = await this.resolveCurrentUser(
+    { type: 'DIRECT_REFUEL' as any, quantity: 1 } as CreateOperationDto,
+    request,
+  );
+
+  if (!currentUser.existsInDatabase || !currentUser.companyId) {
+    throw new UnauthorizedException('Real database user is required.');
+  }
+
+  const occurredAt: Record<string, Date> = {};
+
+  if (filters.dateFrom) {
+    const from = new Date(filters.dateFrom);
+    if (Number.isNaN(from.getTime())) {
+      throw new BadRequestException('dateFrom is invalid');
+    }
+    occurredAt.gte = from;
+  }
+
+  if (filters.dateTo) {
+    const to = new Date(filters.dateTo);
+    if (Number.isNaN(to.getTime())) {
+      throw new BadRequestException('dateTo is invalid');
+    }
+    to.setHours(23, 59, 59, 999);
+    occurredAt.lte = to;
+  }
+
+  const requestedType = String(filters.type || '').trim().toUpperCase();
+  const allowedTypes: NormalizedOperationType[] = [
+    'DIRECT_REFUEL',
+    'EXTERNAL_DIRECT_REFUEL',
+    'INTERNAL_TRANSFER',
+    'EXTERNAL_SUPPLY',
+    'EXTERNAL_TRANSFER',
+  ];
+
+  if (
+    requestedType &&
+    !allowedTypes.includes(requestedType as NormalizedOperationType)
+  ) {
+    throw new BadRequestException('type is invalid');
+  }
+
+  const accessibleProjectIds =
+    currentUser.role === 'Manager'
+      ? currentUser.managedProjectIds
+      : ['Officer', 'Operator', 'Supervisor'].includes(currentUser.role)
+        ? currentUser.assignedProjectIds
+        : [];
+
+  const needsProjectScope = [
+    'Manager',
+    'Officer',
+    'Operator',
+    'Supervisor',
+  ].includes(currentUser.role);
+
+  let resolvedStation: any = null;
+  if (filters.stationId) {
+    const requestedStation = String(filters.stationId).trim();
+
+    resolvedStation = await (this.prisma as any).station.findFirst({
+      where: {
+        companyId: currentUser.companyId,
+        OR: [{ id: requestedStation }, { stationId: requestedStation }],
+      },
+      select: {
+        id: true,
+        stationId: true,
+        projectId: true,
+        structureType: true,
+        parentStationId: true,
+      },
+    });
+
+    if (!resolvedStation) {
+      throw new NotFoundException('Station was not found.');
+    }
+
+    if (
+      needsProjectScope &&
+      resolvedStation.projectId &&
+      !accessibleProjectIds.includes(resolvedStation.projectId)
+    ) {
+      throw new ForbiddenException(
+        'You cannot view warehouse operations for this station.',
+      );
+    }
+
+    if (
+      String(resolvedStation.structureType || '').toUpperCase() ===
+        'DISPENSER' &&
+      resolvedStation.parentStationId
+    ) {
+      const parentStation = await (this.prisma as any).station.findFirst({
+        where: {
+          id: resolvedStation.parentStationId,
+          companyId: currentUser.companyId,
+        },
+        select: {
+          id: true,
+          stationId: true,
+          projectId: true,
+          structureType: true,
+          parentStationId: true,
+        },
+      });
+
+      if (parentStation) {
+        resolvedStation = parentStation;
+      }
+    }
+  }
+
+  let resolvedAsset: any = null;
+  if (filters.assetId) {
+    const requestedAsset = String(filters.assetId).trim();
+
+    resolvedAsset = await (this.prisma as any).asset.findFirst({
+      where: {
+        companyId: currentUser.companyId,
+        OR: [{ id: requestedAsset }, { assetId: requestedAsset }],
+      },
+      select: {
+        id: true,
+        assetId: true,
+        projectId: true,
+      },
+    });
+
+    if (!resolvedAsset) {
+      throw new NotFoundException('Asset was not found.');
+    }
+
+    if (
+      needsProjectScope &&
+      resolvedAsset.projectId &&
+      !accessibleProjectIds.includes(resolvedAsset.projectId)
+    ) {
+      throw new ForbiddenException(
+        'You cannot view warehouse operations for this asset.',
+      );
+    }
+  }
+
+  const scopeCondition = needsProjectScope
+    ? accessibleProjectIds.length
+      ? {
+          OR: [
+            { projectIdAtOperation: { in: accessibleProjectIds } },
+            { sourceProjectIdAtOperation: { in: accessibleProjectIds } },
+            { destinationProjectIdAtOperation: { in: accessibleProjectIds } },
+          ],
+        }
+      : { id: '__NO_RESULTS__' }
+    : {};
+
+  const stationCondition = resolvedStation
+    ? {
+        OR: [
+          { sourceStationId: resolvedStation.id },
+          { destinationStationId: resolvedStation.id },
+        ],
+      }
+    : {};
+
+  const operations = await (this.prisma as any).operation.findMany({
+    where: {
+      companyId: currentUser.companyId,
+      status: 'COMPLETED',
+      ...(requestedType ? { type: requestedType } : {}),
+      ...(resolvedAsset ? { assetId: resolvedAsset.id } : {}),
+      ...(Object.keys(occurredAt).length ? { occurredAt } : {}),
+      AND: [scopeCondition, stationCondition],
+    },
+    select: {
+      id: true,
+      operationNo: true,
+      type: true,
+      quantity: true,
+      occurredAt: true,
+      externalStationName: true,
+      sourceStationId: true,
+      destinationStationId: true,
+      assetId: true,
+      sourceStation: {
+        select: {
+          id: true,
+          stationId: true,
+          name: true,
+          structureType: true,
+          parentStationId: true,
+          parentStation: {
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+              structureType: true,
+            },
+          },
+        },
+      },
+      destinationStation: {
+        select: {
+          id: true,
+          stationId: true,
+          name: true,
+          structureType: true,
+          parentStationId: true,
+          parentStation: {
+            select: {
+              id: true,
+              stationId: true,
+              name: true,
+              structureType: true,
+            },
+          },
+        },
+      },
+      asset: {
+        select: {
+          id: true,
+          assetId: true,
+          type: true,
+          category: true,
+        },
+      },
+    },
+    orderBy: [{ occurredAt: 'desc' }, { createdAt: 'desc' }],
+    take: 5000,
+  });
+
+  const getWarehouseStationLabel = (station: any) => {
+    if (!station) return '';
+
+    const isDispenser =
+      String(station.structureType || '').toUpperCase() === 'DISPENSER';
+
+    const visibleStation =
+      isDispenser && station.parentStation ? station.parentStation : station;
+
+    return (
+      visibleStation.stationId ||
+      visibleStation.name ||
+      visibleStation.id ||
+      ''
+    );
+  };
+
+  const rows = operations.map((operation: any) => {
+    const operationType = this.normalizeOperationType(operation.type);
+
+    const sourceStationLabel = getWarehouseStationLabel(
+      operation.sourceStation,
+    );
+    const destinationStationLabel = getWarehouseStationLabel(
+      operation.destinationStation,
+    );
+    const assetLabel = operation.asset?.assetId || operation.asset?.id || '';
+
+    let source = sourceStationLabel || '-';
+    let destination = destinationStationLabel || assetLabel || '-';
+
+    if (operationType === 'EXTERNAL_SUPPLY') {
+      source = operation.externalStationName || 'External Supplier';
+      destination = destinationStationLabel || '-';
+    } else if (operationType === 'EXTERNAL_DIRECT_REFUEL') {
+      source = operation.externalStationName || 'External Station';
+      destination = assetLabel || '-';
+    } else if (operationType === 'DIRECT_REFUEL') {
+      source = sourceStationLabel || '-';
+      destination = assetLabel || '-';
+    } else if (
+      operationType === 'INTERNAL_TRANSFER' ||
+      operationType === 'EXTERNAL_TRANSFER'
+    ) {
+      source = sourceStationLabel || '-';
+      destination = destinationStationLabel || '-';
+    }
+
+    return {
+      id: operation.id,
+      operationNo: operation.operationNo,
+      occurredAt: operation.occurredAt,
+      type: operation.type,
+      source,
+      destination,
+      quantity: Number(operation.quantity || 0),
+      assetType: operation.asset?.type || '',
+      assetCategory: operation.asset?.category || '',
+    };
+  });
+
+  return {
+    rows,
+    summary: {
+      operations: rows.length,
+      totalQuantity: rows.reduce(
+        (sum: number, row: any) => sum + Number(row.quantity || 0),
+        0,
+      ),
+    },
+  };
+}
+
 async getSummaryReport(request: RequestLike | undefined, filters: {
   projectId?: string;
   assetId?: string;

@@ -131,6 +131,25 @@ findPendingApprovals(@Req() req: any) {
   return this.operationsService.findPendingApprovals(req);
 }
 
+@Get('report/warehouse')
+@UseGuards(AuthGuard('jwt'))
+warehouseReport(
+  @Req() req: any,
+  @Query('type') type?: string,
+  @Query('stationId') stationId?: string,
+  @Query('assetId') assetId?: string,
+  @Query('dateFrom') dateFrom?: string,
+  @Query('dateTo') dateTo?: string,
+) {
+  return this.operationsService.getWarehouseOperationsReport(req, {
+    type,
+    stationId,
+    assetId,
+    dateFrom,
+    dateTo,
+  });
+}
+
 @Get('report/summary')
 summaryReport(
   @Req() req: any,
