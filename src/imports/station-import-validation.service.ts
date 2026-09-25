@@ -439,6 +439,10 @@ export class StationImportValidationService {
           structureType === StationStructureType.DISPENSER
             ? 0
             : openingBalance ?? '',
+        currentCounter:
+          structureType === StationStructureType.SHARED_TANK
+            ? 0
+            : openingCounter ?? '',
         currentLifetimeCounter:
           structureType === StationStructureType.SHARED_TANK
             ? 0
