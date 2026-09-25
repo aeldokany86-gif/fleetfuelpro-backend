@@ -2423,9 +2423,21 @@ export class StationsService {
     }
 
     if (actionType === 'ZERO_BALANCE') {
-      if (Number(station.currentStock || 0) === 0) {
+      const currentStockSnapshot = Number(station.currentStock || 0);
+
+      if (!Number.isFinite(currentStockSnapshot)) {
+        throw new BadRequestException('Current station stock is invalid');
+      }
+
+      if (currentStockSnapshot === 0) {
         throw new BadRequestException('Current station stock is already zero');
       }
+
+      // Preserve the exact stock amount that the requester intended to clear.
+      // The later approval applies only the inverse of this snapshot, so any
+      // supply or dispensing that happens after the request remains untouched.
+      requestedActualStock = currentStockSnapshot;
+
       movementAt = body.movementAt
         ? this.parseOptionalDate(body.movementAt)
         : new Date();
@@ -2852,15 +2864,27 @@ export class StationsService {
 
         if (actionType === 'ZERO_BALANCE') {
           const balanceBefore = Number(station.currentStock || 0);
+          const requestedBalanceToZero = Number(request.requestedActualStock);
 
-          if (balanceBefore === 0) {
+          if (!Number.isFinite(requestedBalanceToZero)) {
             throw new BadRequestException(
-              'Current station stock is already zero',
+              'Zero balance request has no valid stock snapshot. Create a new request.',
             );
           }
 
+          if (requestedBalanceToZero === 0) {
+            throw new BadRequestException(
+              'Zero balance request snapshot is already zero. Create a new request.',
+            );
+          }
+
+          if (!Number.isFinite(balanceBefore)) {
+            throw new BadRequestException('Current station stock is invalid');
+          }
+
           const movementAt = request.movementAt || now;
-          const quantity = -balanceBefore;
+          const quantity = -requestedBalanceToZero;
+          const balanceAfter = balanceBefore + quantity;
 
           const movement = await tx.stationStockMovement.create({
             data: {
@@ -2869,7 +2893,7 @@ export class StationsService {
               movementType: 'ZERO_BALANCE' as any,
               quantity,
               balanceBefore,
-              balanceAfter: 0,
+              balanceAfter,
               referenceType: 'STATION_ACTION_REQUEST',
               referenceId: request.id,
               reason: request.reason,
@@ -2883,7 +2907,7 @@ export class StationsService {
               id: station.id,
             },
             data: {
-              currentStock: 0,
+              currentStock: balanceAfter,
             },
             include: {
               company: true,
@@ -2895,7 +2919,8 @@ export class StationsService {
             station: updatedStation,
             movement,
             balanceBefore,
-            balanceAfter: 0,
+            requestedBalanceToZero,
+            balanceAfter,
           };
         } else if (actionType === 'INVENTORY_ADJUSTMENT') {
           const actualStock = Number(request.requestedActualStock);
