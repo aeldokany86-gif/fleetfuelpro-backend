@@ -2381,13 +2381,19 @@ export class StationsService {
     const requesterRoleName = requester.role?.name || '';
 
     if (actionType === 'INVENTORY_ADJUSTMENT') {
-      if (!this.isManagerRole(requesterRoleName)) {
+      if (
+        !this.isManagerRole(requesterRoleName) &&
+        !this.isOfficerRole(requesterRoleName)
+      ) {
         throw new BadRequestException(
-          'Only the assigned Project Manager can submit an inventory adjustment request',
+          'Only the assigned Project Manager or Officer can submit an inventory adjustment request',
         );
       }
 
-      if (station.project.projectManagerId !== body.requestedByUserId) {
+      if (
+        this.isManagerRole(requesterRoleName) &&
+        station.project.projectManagerId !== body.requestedByUserId
+      ) {
         throw new BadRequestException(
           'Only the assigned Project Manager can submit an inventory adjustment request for this station',
         );
@@ -2582,7 +2588,7 @@ export class StationsService {
       }
     } else {
       await this.sendWorkflowApprovalRequiredBestEffort({
-        recipientUserId: station.project.projectManagerId,
+        recipientUserId: station.project.projectManagerId!,
         entityType: workflowType,
         entityId: createdRequest.id,
         workflowType,
