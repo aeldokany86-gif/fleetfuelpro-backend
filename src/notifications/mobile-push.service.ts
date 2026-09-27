@@ -30,6 +30,14 @@ type UnregisterDeviceInput = {
   installationId?: string;
 };
 
+type BroadcastScope = 'ADMIN_ONLY' | 'ALL_ACTIVE_USERS';
+
+type ManualBroadcastInput = {
+  scope?: BroadcastScope;
+  messageAr?: string;
+  messageEn?: string;
+};
+
 export type PushMessage = {
   title: string;
   body: string;
@@ -201,7 +209,7 @@ export class MobilePushService {
     return { ok: true };
   }
 
-  async sendTestPush(jwtUser?: JwtRequestUser) {
+  private ensureAdminRole(jwtUser?: JwtRequestUser) {
     const roleName = String(jwtUser?.roleName || '')
       .trim()
       .toLowerCase()
@@ -209,9 +217,134 @@ export class MobilePushService {
 
     if (roleName !== 'admin') {
       throw new ForbiddenException(
-        'Only Admin can send a mobile push test notification.',
+        'Only Admin can use the mobile push broadcast center.',
       );
     }
+  }
+
+  async sendManualBroadcast(
+    input: ManualBroadcastInput,
+    jwtUser?: JwtRequestUser,
+  ) {
+    this.ensureAdminRole(jwtUser);
+
+    const currentUser = await this.resolveCurrentUser(jwtUser);
+
+    const scope = String(input?.scope || '')
+      .trim()
+      .toUpperCase() as BroadcastScope;
+
+    if (!['ADMIN_ONLY', 'ALL_ACTIVE_USERS'].includes(scope)) {
+      throw new BadRequestException(
+        'Broadcast scope must be ADMIN_ONLY or ALL_ACTIVE_USERS.',
+      );
+    }
+
+    const messageAr = String(input?.messageAr || '').trim();
+    const messageEn = String(input?.messageEn || '').trim();
+
+    if (!messageAr || !messageEn) {
+      throw new BadRequestException(
+        'Arabic and English broadcast messages are required.',
+      );
+    }
+
+    if (messageAr.length > 500 || messageEn.length > 500) {
+      throw new BadRequestException(
+        'Broadcast messages must not exceed 500 characters.',
+      );
+    }
+
+    const recipients =
+      scope === 'ADMIN_ONLY'
+        ? [
+            {
+              id: currentUser.id,
+              preferredLanguage: currentUser.preferredLanguage,
+            },
+          ]
+        : await this.prisma.user.findMany({
+            where: {
+              companyId: currentUser.companyId,
+              deletedAt: null,
+              isActive: true,
+            },
+            select: {
+              id: true,
+              preferredLanguage: true,
+            },
+            orderBy: [{ fullName: 'asc' }],
+          });
+
+    let registeredDevices = 0;
+    let accepted = 0;
+    let failed = 0;
+    let usersWithDevices = 0;
+    let usersWithoutDevices = 0;
+    let deliveryErrors = 0;
+
+    // Keep concurrency controlled in case a company has a large user base.
+    const batchSize = 20;
+
+    for (let start = 0; start < recipients.length; start += batchSize) {
+      const batch = recipients.slice(start, start + batchSize);
+
+      const results = await Promise.allSettled(
+        batch.map(async (recipient) => {
+          const language = normalizeNotificationLanguage(
+            recipient.preferredLanguage,
+          );
+
+          const body = language === 'ar' ? messageAr : messageEn;
+
+          return this.sendToUser(recipient.id, {
+            title: 'Fleet Fuel PRO',
+            body,
+            data: {
+              type: 'BROADCAST_NOTIFICATION',
+              screen: 'notifications',
+              scope,
+            },
+            sound: 'default',
+          });
+        }),
+      );
+
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          deliveryErrors += 1;
+          continue;
+        }
+
+        const deviceCount = Number(result.value.registeredDevices || 0);
+
+        registeredDevices += deviceCount;
+        accepted += Number(result.value.accepted || 0);
+        failed += Number(result.value.failed || 0);
+
+        if (deviceCount > 0) {
+          usersWithDevices += 1;
+        } else {
+          usersWithoutDevices += 1;
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      scope,
+      targetedUsers: recipients.length,
+      usersWithDevices,
+      usersWithoutDevices,
+      registeredDevices,
+      accepted,
+      failed,
+      deliveryErrors,
+    };
+  }
+
+  async sendTestPush(jwtUser?: JwtRequestUser) {
+    this.ensureAdminRole(jwtUser);
 
     const user = await this.resolveCurrentUser(jwtUser);
     const language = normalizeNotificationLanguage(user.preferredLanguage);

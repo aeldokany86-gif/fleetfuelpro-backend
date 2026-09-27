@@ -33,6 +33,12 @@ type UnregisterDeviceBody = {
   installationId?: string;
 };
 
+type ManualBroadcastBody = {
+  scope?: 'ADMIN_ONLY' | 'ALL_ACTIVE_USERS';
+  messageAr?: string;
+  messageEn?: string;
+};
+
 @Controller('mobile/notifications')
 @UseGuards(AuthGuard('jwt'))
 export class MobilePushController {
@@ -52,6 +58,14 @@ export class MobilePushController {
     @Req() request: JwtRequest,
   ) {
     return this.mobilePushService.unregisterDevice(body, request.user);
+  }
+
+  @Post('broadcast')
+  async sendManualBroadcast(
+    @Body() body: ManualBroadcastBody,
+    @Req() request: JwtRequest,
+  ) {
+    return this.mobilePushService.sendManualBroadcast(body, request.user);
   }
 
   @Post('test')
