@@ -2719,6 +2719,7 @@ async getOperationsDashboardMap(
       occurredAt: true,
       assetId: true,
       fuelerEmployeeIdAtOperation: true,
+      fuelerNameAtOperation: true,
       requestedByUserId: true,
       locationLatitude: true,
       locationLongitude: true,
@@ -2779,6 +2780,7 @@ async getOperationsDashboardMap(
     points: selectedOperations.map((operation: any) => ({
       operationNo: operation.operationNo,
       occurredAt: operation.occurredAt,
+      fuelerName: operation.fuelerNameAtOperation || null,
       assetIdentifier: operation.asset?.assetId || null,
       stationIdentifier:
         operation.type === 'EXTERNAL_DIRECT_REFUEL'
