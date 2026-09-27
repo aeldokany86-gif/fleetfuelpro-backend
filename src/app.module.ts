@@ -19,6 +19,7 @@ import { UploadsModule } from './uploads/uploads.module';
 import { ImportsModule } from './imports/imports.module';
 import { MobileApprovalsModule } from './mobile-approvals/mobile-approvals.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { CompanyIntegrationModule } from './integrations/company-integration.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { NotificationsModule } from './notifications/notifications.module';
     ImportsModule,
     MobileApprovalsModule,
     NotificationsModule,
+    CompanyIntegrationModule,
   ],
   controllers: [AppController, EmployeesController],
   providers: [AppService, EmployeesService],

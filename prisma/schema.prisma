@@ -69,6 +69,50 @@ model Company {
   importBatches                     ImportBatch[]
   mobilePushTokens                  MobilePushToken[]
   notifications                     Notification[]
+  integrationSettings               CompanyIntegrationSettings?
+}
+
+model CompanyIntegrationSettings {
+  id        String  @id @default(cuid())
+  companyId String  @unique
+  enabled   Boolean @default(false)
+
+  operationsSummaryEnabled Boolean @default(false)
+  operationsDetailsEnabled Boolean @default(false)
+  costDataEnabled          Boolean @default(false)
+  stockReadEnabled         Boolean @default(false)
+  stockMovementsEnabled    Boolean @default(false)
+
+  webhooksEnabled Boolean @default(false)
+
+  externalMappingEnabled       Boolean @default(false)
+  externalMappingManualEnabled Boolean @default(false)
+  externalMappingImportEnabled Boolean @default(false)
+
+  clientLimit Int @default(5)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company       Company                          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  webhookEvents CompanyIntegrationWebhookEvent[]
+
+  @@index([enabled])
+}
+
+model CompanyIntegrationWebhookEvent {
+  id                           String   @id @default(cuid())
+  companyIntegrationSettingsId String
+  eventType                    String
+  enabled                      Boolean  @default(false)
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
+
+  settings CompanyIntegrationSettings @relation(fields: [companyIntegrationSettingsId], references: [id], onDelete: Cascade)
+
+  @@unique([companyIntegrationSettingsId, eventType])
+  @@index([companyIntegrationSettingsId])
+  @@index([eventType])
 }
 
 enum ImportType {
