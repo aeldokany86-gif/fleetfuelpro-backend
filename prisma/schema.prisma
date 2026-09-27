@@ -70,6 +70,49 @@ model Company {
   mobilePushTokens                  MobilePushToken[]
   notifications                     Notification[]
   integrationSettings               CompanyIntegrationSettings?
+  integrationClients                IntegrationClient[]
+}
+
+enum IntegrationClientStatus {
+  ACTIVE
+  DISABLED
+}
+
+model IntegrationClient {
+  id        String                  @id @default(cuid())
+  companyId String
+  name      String
+  status    IntegrationClientStatus @default(ACTIVE)
+
+  clientId   String @unique
+  apiKeyHash String
+  keyPrefix  String
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  lastUsedAt DateTime?
+
+  company Company                  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  scopes  IntegrationClientScope[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+  @@index([companyId, status])
+}
+
+model IntegrationClientScope {
+  id                  String   @id @default(cuid())
+  integrationClientId String
+  scope               String
+  enabled             Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  integrationClient IntegrationClient @relation(fields: [integrationClientId], references: [id], onDelete: Cascade)
+
+  @@unique([integrationClientId, scope])
+  @@index([integrationClientId])
+  @@index([scope])
 }
 
 model CompanyIntegrationSettings {
