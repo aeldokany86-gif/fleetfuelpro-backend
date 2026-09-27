@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -201,6 +202,17 @@ export class MobilePushService {
   }
 
   async sendTestPush(jwtUser?: JwtRequestUser) {
+    const roleName = String(jwtUser?.roleName || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/g, '');
+
+    if (roleName !== 'admin') {
+      throw new ForbiddenException(
+        'Only Admin can send a mobile push test notification.',
+      );
+    }
+
     const user = await this.resolveCurrentUser(jwtUser);
     const language = normalizeNotificationLanguage(user.preferredLanguage);
     const message = getMobilePushTestMessage(language);
