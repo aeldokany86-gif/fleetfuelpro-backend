@@ -393,7 +393,13 @@ export class ExternalIntegrationService {
     );
   }
 
-  async getCurrentStock(integration: IntegrationContext) {
+  async getCurrentStock(
+    integration: IntegrationContext,
+    filters: {
+      projectId?: string;
+      stationId?: string;
+    } = {},
+  ) {
     if (!integration?.companyId) {
       throw new BadRequestException(
         'Integration company context is missing',
@@ -418,12 +424,90 @@ export class ExternalIntegrationService {
       throw new BadRequestException('Integration company was not found');
     }
 
+    const projectId = String(filters.projectId || '').trim();
+    const stationId = String(filters.stationId || '').trim();
+
+    if (stationId && !projectId) {
+      throw new BadRequestException(
+        'projectId is required when stationId is provided',
+      );
+    }
+
+    let selectedProject: {
+      id: string;
+      code: string;
+      name: string;
+    } | null = null;
+
+    if (projectId) {
+      selectedProject = await this.prisma.project.findFirst({
+        where: {
+          id: projectId,
+          companyId: integration.companyId,
+          deletedAt: null,
+          isActive: true,
+        },
+        select: {
+          id: true,
+          code: true,
+          name: true,
+        },
+      });
+
+      if (!selectedProject) {
+        throw new BadRequestException(
+          'Selected project is invalid or inactive for this company',
+        );
+      }
+    }
+
+    let selectedStation: {
+      id: string;
+      stationId: string;
+      name: string;
+      projectId: string | null;
+      structureType: string | null;
+    } | null = null;
+
+    if (stationId) {
+      selectedStation = await (this.prisma as any).station.findFirst({
+        where: {
+          id: stationId,
+          companyId: integration.companyId,
+          deletedAt: null,
+          status: 'ACTIVE',
+          NOT: {
+            structureType: 'DISPENSER',
+          },
+        },
+        select: {
+          id: true,
+          stationId: true,
+          name: true,
+          projectId: true,
+          structureType: true,
+        },
+      });
+
+      if (!selectedStation) {
+        throw new BadRequestException(
+          'Selected station is invalid, inactive, or not an inventory-owner station',
+        );
+      }
+
+      if (selectedStation.projectId !== projectId) {
+        throw new BadRequestException(
+          'Selected station does not belong to the selected project',
+        );
+      }
+    }
+
     /*
       Inventory ownership rule:
       DISPENSER rows are intentionally excluded because their fuel stock belongs
       to the parent SHARED_TANK. Including both would double-count inventory.
     */
-    const stations = await this.prisma.station.findMany({
+    const stations = await (this.prisma as any).station.findMany({
       where: {
         companyId: integration.companyId,
         deletedAt: null,
@@ -431,6 +515,8 @@ export class ExternalIntegrationService {
         NOT: {
           structureType: 'DISPENSER',
         },
+        ...(projectId ? { projectId } : {}),
+        ...(stationId ? { id: stationId } : {}),
       },
       select: {
         id: true,
@@ -467,7 +553,7 @@ export class ExternalIntegrationService {
       }
     >();
 
-    const stationRows = stations.map((station) => {
+    const stationRows = stations.map((station: any) => {
       const currentStock = Number(station.currentStock || 0);
       const capacity =
         station.capacity === null || station.capacity === undefined
@@ -541,6 +627,14 @@ export class ExternalIntegrationService {
       client: {
         clientId: integration.clientId || null,
         name: integration.clientName || null,
+      },
+      filters: {
+        projectId: projectId || null,
+        projectCode: selectedProject?.code || null,
+        projectName: selectedProject?.name || null,
+        stationId: stationId || null,
+        stationCode: selectedStation?.stationId || null,
+        stationName: selectedStation?.name || null,
       },
       totals: {
         currentStock: totalCurrentStock,

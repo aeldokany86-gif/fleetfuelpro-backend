@@ -39,9 +39,17 @@ export class ExternalIntegrationController {
 
   @Get('stock')
   @RequireIntegrationScope('stock.read')
-  getCurrentStock(@Req() req: any) {
+  getCurrentStock(
+    @Req() req: any,
+    @Query('projectId') projectId?: string,
+    @Query('stationId') stationId?: string,
+  ) {
     return this.externalIntegrationService.getCurrentStock(
       req.integration,
+      {
+        projectId,
+        stationId,
+      },
     );
   }
 }
