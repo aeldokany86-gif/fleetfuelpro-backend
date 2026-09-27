@@ -145,6 +145,32 @@ getOperationsDashboard(
   });
 }
 
+
+@Get('dashboard/map')
+@UseGuards(AuthGuard('jwt'))
+getOperationsDashboardMap(
+  @Req() req: any,
+  @Query('dateFrom') dateFrom?: string,
+  @Query('dateTo') dateTo?: string,
+  @Query('refuelType') refuelType?: string,
+  @Query('assetIds') assetIds?: string,
+  @Query('assetTypes') assetTypes?: string,
+  @Query('projectIds') projectIds?: string,
+  @Query('utcOffsetMinutes') utcOffsetMinutes?: string,
+  @Query('mode') mode?: string,
+) {
+  return this.operationsService.getOperationsDashboardMap(req, {
+    dateFrom,
+    dateTo,
+    refuelType,
+    assetIds,
+    assetTypes,
+    projectIds,
+    utcOffsetMinutes,
+    mode,
+  });
+}
+
 @Get('asset/:assetId/history')
 @UseGuards(AuthGuard('jwt'))
 getAssetOperationsHistory(

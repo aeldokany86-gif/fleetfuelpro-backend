@@ -2559,6 +2559,237 @@ async getOperationsDashboard(
   };
 }
 
+
+async getOperationsDashboardMap(
+  request: RequestLike | undefined,
+  filters: {
+    dateFrom?: string;
+    dateTo?: string;
+    refuelType?: string;
+    assetIds?: string;
+    assetTypes?: string;
+    projectIds?: string;
+    utcOffsetMinutes?: string | number;
+    mode?: string;
+  } = {},
+) {
+  const currentUser = await this.resolveCurrentUser(
+    {
+      type: 'DIRECT_REFUEL' as any,
+      quantity: 1,
+    } as CreateOperationDto,
+    request,
+  );
+
+  if (!currentUser.existsInDatabase || !currentUser.companyId) {
+    throw new UnauthorizedException('Real database user is required.');
+  }
+
+  const splitList = (value?: string) =>
+    String(value || '')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+  const requestedAssetIds = splitList(filters.assetIds);
+  const requestedAssetTypes = splitList(filters.assetTypes);
+  const requestedProjectIds = splitList(filters.projectIds);
+
+  const scopedRoles: NormalizedRole[] = [
+    'Manager',
+    'Officer',
+    'Operator',
+    'Supervisor',
+  ];
+  const needsProjectScope = scopedRoles.includes(currentUser.role);
+  const accessibleProjectIds =
+    currentUser.role === 'Manager'
+      ? currentUser.managedProjectIds
+      : needsProjectScope
+        ? currentUser.assignedProjectIds
+        : [];
+
+  if (needsProjectScope) {
+    const forbiddenProject = requestedProjectIds.find(
+      (projectId) => !accessibleProjectIds.includes(projectId),
+    );
+    if (forbiddenProject) {
+      throw new ForbiddenException(
+        'You cannot view dashboard map data for the requested project.',
+      );
+    }
+  }
+
+  const effectiveProjectIds = requestedProjectIds.length
+    ? requestedProjectIds
+    : needsProjectScope
+      ? accessibleProjectIds
+      : [];
+
+  const rawOffset = Number(filters.utcOffsetMinutes ?? 0);
+  const utcOffsetMinutes =
+    Number.isFinite(rawOffset) && rawOffset >= -840 && rawOffset <= 840
+      ? Math.trunc(rawOffset)
+      : 0;
+  const offsetMs = utcOffsetMinutes * 60 * 1000;
+
+  const localDayBoundary = (value: string, endOfDay = false) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BadRequestException(
+        endOfDay ? 'dateTo is invalid' : 'dateFrom is invalid',
+      );
+    }
+    const start = new Date(parsed.getTime() - offsetMs);
+    return endOfDay
+      ? new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1)
+      : start;
+  };
+
+  // Map rule:
+  // - No date filter: current local day.
+  // - One selected day: that day.
+  // - Date range: only the last day of the selected range.
+  const now = new Date();
+  const currentLocalDateKey = new Date(now.getTime() + offsetMs)
+    .toISOString()
+    .slice(0, 10);
+  const mapDateKey = String(
+    filters.dateTo || filters.dateFrom || currentLocalDateKey,
+  );
+  const occurredAt = {
+    gte: localDayBoundary(mapDateKey, false),
+    lte: localDayBoundary(mapDateKey, true),
+  };
+
+  const refuelType = String(filters.refuelType || 'ALL')
+    .trim()
+    .toUpperCase();
+  if (!['ALL', 'DIRECT', 'EXTERNAL'].includes(refuelType)) {
+    throw new BadRequestException('refuelType is invalid.');
+  }
+
+  const operationTypes =
+    refuelType === 'DIRECT'
+      ? ['DIRECT_REFUEL']
+      : refuelType === 'EXTERNAL'
+        ? ['EXTERNAL_DIRECT_REFUEL']
+        : ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'];
+
+  const mode = String(filters.mode || 'LATEST_BY_FUELER')
+    .trim()
+    .toUpperCase();
+  if (!['LATEST_BY_FUELER', 'ALL_OPERATIONS'].includes(mode)) {
+    throw new BadRequestException('mode is invalid.');
+  }
+
+  const projectScopeCondition =
+    effectiveProjectIds.length > 0
+      ? {
+          OR: [
+            { projectIdAtOperation: { in: effectiveProjectIds } },
+            {
+              projectIdAtOperation: null,
+              asset: {
+                is: {
+                  projectId: { in: effectiveProjectIds },
+                },
+              },
+            },
+          ],
+        }
+      : needsProjectScope
+        ? { id: '__NO_RESULTS__' }
+        : {};
+
+  const operations = await (this.prisma as any).operation.findMany({
+    where: {
+      companyId: currentUser.companyId,
+      status: 'COMPLETED',
+      type: { in: operationTypes },
+      occurredAt,
+      locationLatitude: { not: null },
+      locationLongitude: { not: null },
+      ...projectScopeCondition,
+    },
+    select: {
+      id: true,
+      operationNo: true,
+      type: true,
+      occurredAt: true,
+      assetId: true,
+      fuelerEmployeeIdAtOperation: true,
+      requestedByUserId: true,
+      locationLatitude: true,
+      locationLongitude: true,
+      asset: {
+        select: {
+          assetId: true,
+          type: true,
+        },
+      },
+      sourceStation: {
+        select: {
+          stationId: true,
+        },
+      },
+    },
+    orderBy: [{ occurredAt: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+  });
+
+  const filteredOperations = operations.filter((operation: any) => {
+    if (
+      requestedAssetIds.length &&
+      !requestedAssetIds.includes(String(operation.assetId || ''))
+    ) {
+      return false;
+    }
+
+    if (
+      requestedAssetTypes.length &&
+      !requestedAssetTypes.includes(String(operation.asset?.type || ''))
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  const selectedOperations =
+    mode === 'ALL_OPERATIONS'
+      ? filteredOperations
+      : Array.from(
+          filteredOperations.reduce((map: Map<string, any>, operation: any) => {
+            const fuelerKey = String(
+              operation.fuelerEmployeeIdAtOperation ||
+                operation.requestedByUserId ||
+                operation.id,
+            );
+            if (!map.has(fuelerKey)) {
+              map.set(fuelerKey, operation);
+            }
+            return map;
+          }, new Map<string, any>()).values(),
+        );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    mapDate: mapDateKey,
+    mode,
+    points: selectedOperations.map((operation: any) => ({
+      operationNo: operation.operationNo,
+      occurredAt: operation.occurredAt,
+      assetIdentifier: operation.asset?.assetId || null,
+      stationIdentifier:
+        operation.type === 'EXTERNAL_DIRECT_REFUEL'
+          ? 'EXTERNAL_STATION'
+          : operation.sourceStation?.stationId || null,
+      latitude: Number(operation.locationLatitude),
+      longitude: Number(operation.locationLongitude),
+    })),
+  };
+}
+
 async findPendingApprovals(request?: RequestLike) {
   const startedAt = Date.now();
 
