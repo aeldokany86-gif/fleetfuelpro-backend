@@ -20,6 +20,7 @@ import { ImportsModule } from './imports/imports.module';
 import { MobileApprovalsModule } from './mobile-approvals/mobile-approvals.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { CompanyIntegrationModule } from './integrations/company-integration.module';
+import { TelemetryModule } from './telemetry/telemetry.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { CompanyIntegrationModule } from './integrations/company-integration.mod
     MobileApprovalsModule,
     NotificationsModule,
     CompanyIntegrationModule,
+    TelemetryModule,
   ],
   controllers: [AppController, EmployeesController],
   providers: [AppService, EmployeesService],

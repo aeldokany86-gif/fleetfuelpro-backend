@@ -71,6 +71,10 @@ model Company {
   notifications                     Notification[]
   integrationSettings               CompanyIntegrationSettings?
   integrationClients                IntegrationClient[]
+  telemetryDevices                  TelemetryDevice[]
+  telemetryRawMessages              TelemetryRawMessage[]
+  telemetrySensorDefinitions        TelemetrySensorDefinition[]
+  assetTelemetryReadings            AssetTelemetryReading[]
 }
 
 enum IntegrationClientStatus {
@@ -613,11 +617,156 @@ model Asset {
   odometerResetHistory    AssetOdometerReset[]
   transferRequests        AssetTransferRequest[]
   operations              Operation[]
+  telemetryDevices        TelemetryDevice[]
+  telemetryReadings       AssetTelemetryReading[]
 
   @@unique([companyId, assetId])
   @@index([companyId])
   @@index([projectId])
   @@index([status])
+}
+
+enum TelemetryDeviceStatus {
+  ACTIVE
+  INACTIVE
+  OFFLINE
+  MAINTENANCE
+}
+
+enum TelemetryTransport {
+  MQTT
+  TCP
+  UDP
+  HTTP
+  HTTPS
+  OTHER
+}
+
+enum TelemetryDataSource {
+  ECU_CAN
+  GNSS
+  DEVICE
+  EXTERNAL_SENSOR
+  CALCULATED
+  UNKNOWN
+}
+
+enum TelemetryParseStatus {
+  RECEIVED
+  PARSED
+  PARTIALLY_PARSED
+  FAILED
+}
+
+model TelemetryDevice {
+  id              String                @id @default(cuid())
+  companyId       String
+  assetId         String?
+  vendor          String
+  model           String?
+  hardwareId      String
+  protocol        String?
+  transport       TelemetryTransport?
+  status          TelemetryDeviceStatus @default(ACTIVE)
+  firmwareVersion String?
+  lastSeenAt      DateTime?
+  metadata        Json?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+  deletedAt       DateTime?
+
+  company     Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  asset       Asset?                  @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  rawMessages TelemetryRawMessage[]
+  readings    AssetTelemetryReading[]
+
+  @@unique([vendor, hardwareId])
+  @@index([companyId])
+  @@index([assetId])
+  @@index([companyId, status])
+  @@index([lastSeenAt])
+}
+
+model TelemetryRawMessage {
+  id              String               @id @default(cuid())
+  companyId       String
+  deviceId        String?
+  transport       TelemetryTransport
+  topic           String?
+  payload         Bytes
+  protocolVersion String?
+  parseStatus     TelemetryParseStatus @default(RECEIVED)
+  checksumValid   Boolean?
+  readingAt       DateTime?
+  receivedAt      DateTime             @default(now())
+  parseError      String?
+  metadata        Json?
+
+  company  Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  device   TelemetryDevice?        @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  readings AssetTelemetryReading[]
+
+  @@index([companyId, receivedAt])
+  @@index([deviceId, receivedAt])
+  @@index([parseStatus])
+}
+
+model TelemetrySensorDefinition {
+  id             String              @id @default(cuid())
+  companyId      String?
+  vendor         String
+  protocol       String?
+  vendorSensorId String
+  parameterCode  String
+  displayName    String?
+  unit           String?
+  multiplier     Float?
+  offset         Float?
+  dataSource     TelemetryDataSource @default(UNKNOWN)
+  metadata       Json?
+  isActive       Boolean             @default(true)
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  company  Company?                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  readings AssetTelemetryReading[]
+
+  @@unique([companyId, vendor, protocol, vendorSensorId])
+  @@index([vendor, vendorSensorId])
+  @@index([parameterCode])
+  @@index([companyId])
+}
+
+model AssetTelemetryReading {
+  id                 String              @id @default(cuid())
+  companyId          String
+  assetId            String
+  deviceId           String
+  rawMessageId       String?
+  sensorDefinitionId String?
+  vendorSensorId     String
+  parameterCode      String
+  rawValue           Json?
+  numericValue       Float?
+  textValue          String?
+  jsonValue          Json?
+  unit               String?
+  dataSource         TelemetryDataSource @default(UNKNOWN)
+  readingAt          DateTime
+  receivedAt         DateTime            @default(now())
+  metadata           Json?
+
+  company          Company                    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  asset            Asset                      @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  device           TelemetryDevice            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  rawMessage       TelemetryRawMessage?       @relation(fields: [rawMessageId], references: [id], onDelete: SetNull)
+  sensorDefinition TelemetrySensorDefinition? @relation(fields: [sensorDefinitionId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, readingAt])
+  @@index([assetId, parameterCode, readingAt])
+  @@index([deviceId, readingAt])
+  @@index([rawMessageId])
+  @@index([sensorDefinitionId])
 }
 
 model AssetOdometerReset {

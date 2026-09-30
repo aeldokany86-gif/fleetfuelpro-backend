@@ -1,0 +1,356 @@
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  Prisma,
+  TelemetryDeviceStatus,
+  TelemetryTransport,
+} from '@prisma/client';
+
+import { PrismaService } from '../prisma/prisma.service';
+
+@Injectable()
+export class TelemetryDeviceService {
+  constructor(private readonly prisma: PrismaService) {}
+
+  private normalizeRequired(value: string | undefined, fieldName: string) {
+    const normalized = String(value || '').trim();
+
+    if (!normalized) {
+      throw new BadRequestException(`${fieldName} is required`);
+    }
+
+    return normalized;
+  }
+
+  private normalizeOptional(value: string | null | undefined) {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+
+    const normalized = String(value).trim();
+    return normalized || null;
+  }
+
+  private normalizeVendor(value: string | undefined) {
+    return this.normalizeRequired(value, 'Vendor').toUpperCase();
+  }
+
+  private normalizeHardwareId(value: string | undefined) {
+    return this.normalizeRequired(value, 'Hardware ID');
+  }
+
+  private async ensureCompany(companyId: string) {
+    const company = await this.prisma.company.findFirst({
+      where: {
+        id: companyId,
+        deletedAt: null,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        name: true,
+        code: true,
+      },
+    });
+
+    if (!company) {
+      throw new BadRequestException('Company not found or inactive');
+    }
+
+    return company;
+  }
+
+  private async ensureAsset(assetId: string, companyId: string) {
+    const asset = await this.prisma.asset.findFirst({
+      where: {
+        id: assetId,
+        companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        assetId: true,
+        type: true,
+        category: true,
+        companyId: true,
+        projectId: true,
+        status: true,
+      },
+    });
+
+    if (!asset) {
+      throw new BadRequestException(
+        'Asset not found, deleted, or does not belong to this company',
+      );
+    }
+
+    return asset;
+  }
+
+  private deviceInclude() {
+    return {
+      company: {
+        select: {
+          id: true,
+          name: true,
+          code: true,
+        },
+      },
+      asset: {
+        select: {
+          id: true,
+          assetId: true,
+          type: true,
+          category: true,
+          companyId: true,
+          projectId: true,
+          status: true,
+        },
+      },
+    } satisfies Prisma.TelemetryDeviceInclude;
+  }
+
+  async create(body: {
+    companyId: string;
+    assetId?: string | null;
+    vendor: string;
+    model?: string | null;
+    hardwareId: string;
+    protocol?: string | null;
+    transport?: TelemetryTransport | null;
+    status?: TelemetryDeviceStatus;
+    firmwareVersion?: string | null;
+    metadata?: Prisma.InputJsonValue | null;
+  }) {
+    const companyId = this.normalizeRequired(body.companyId, 'Company ID');
+    const vendor = this.normalizeVendor(body.vendor);
+    const hardwareId = this.normalizeHardwareId(body.hardwareId);
+    const assetId = this.normalizeOptional(body.assetId);
+
+    await this.ensureCompany(companyId);
+
+    if (assetId) {
+      await this.ensureAsset(assetId, companyId);
+    }
+
+    const duplicate = await this.prisma.telemetryDevice.findUnique({
+      where: {
+        vendor_hardwareId: {
+          vendor,
+          hardwareId,
+        },
+      },
+      select: {
+        id: true,
+        companyId: true,
+        assetId: true,
+        deletedAt: true,
+      },
+    });
+
+    if (duplicate) {
+      if (duplicate.deletedAt) {
+        throw new BadRequestException(
+          'This telemetry device was previously registered and cannot be registered again',
+        );
+      }
+
+      throw new BadRequestException(
+        'Telemetry device already exists for this vendor and hardware ID',
+      );
+    }
+
+    return this.prisma.telemetryDevice.create({
+      data: {
+        companyId,
+        assetId: assetId || null,
+        vendor,
+        model: this.normalizeOptional(body.model),
+        hardwareId,
+        protocol: this.normalizeOptional(body.protocol),
+        transport: body.transport ?? null,
+        status: body.status ?? TelemetryDeviceStatus.ACTIVE,
+        firmwareVersion: this.normalizeOptional(body.firmwareVersion),
+        ...(body.metadata !== undefined
+          ? {
+              metadata:
+                body.metadata === null
+                  ? Prisma.JsonNull
+                  : body.metadata,
+            }
+          : {}),
+      },
+      include: this.deviceInclude(),
+    });
+  }
+
+  async findAll(filters: {
+    companyId?: string;
+    assetId?: string;
+    vendor?: string;
+    status?: TelemetryDeviceStatus;
+  }) {
+    const companyId = String(filters.companyId || '').trim();
+    const assetId = String(filters.assetId || '').trim();
+    const vendor = String(filters.vendor || '').trim().toUpperCase();
+
+    return this.prisma.telemetryDevice.findMany({
+      where: {
+        deletedAt: null,
+        ...(companyId ? { companyId } : {}),
+        ...(assetId ? { assetId } : {}),
+        ...(vendor ? { vendor } : {}),
+        ...(filters.status ? { status: filters.status } : {}),
+      },
+      include: this.deviceInclude(),
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    });
+  }
+
+  async findOne(id: string) {
+    const deviceId = this.normalizeRequired(id, 'Telemetry device ID');
+
+    const device = await this.prisma.telemetryDevice.findFirst({
+      where: {
+        id: deviceId,
+        deletedAt: null,
+      },
+      include: this.deviceInclude(),
+    });
+
+    if (!device) {
+      throw new NotFoundException('Telemetry device not found');
+    }
+
+    return device;
+  }
+
+  async update(
+    id: string,
+    body: {
+      model?: string | null;
+      protocol?: string | null;
+      transport?: TelemetryTransport | null;
+      status?: TelemetryDeviceStatus;
+      firmwareVersion?: string | null;
+      metadata?: Prisma.InputJsonValue | null;
+    },
+  ) {
+    const existing = await this.findOne(id);
+
+    return this.prisma.telemetryDevice.update({
+      where: { id: existing.id },
+      data: {
+        ...(body.model !== undefined
+          ? { model: this.normalizeOptional(body.model) }
+          : {}),
+        ...(body.protocol !== undefined
+          ? { protocol: this.normalizeOptional(body.protocol) }
+          : {}),
+        ...(body.transport !== undefined
+          ? { transport: body.transport }
+          : {}),
+        ...(body.status !== undefined ? { status: body.status } : {}),
+        ...(body.firmwareVersion !== undefined
+          ? { firmwareVersion: this.normalizeOptional(body.firmwareVersion) }
+          : {}),
+        ...(body.metadata !== undefined
+          ? {
+              metadata:
+                body.metadata === null
+                  ? Prisma.JsonNull
+                  : body.metadata,
+            }
+          : {}),
+      },
+      include: this.deviceInclude(),
+    });
+  }
+
+  async assignToAsset(
+    id: string,
+    body: {
+      companyId: string;
+      assetId: string;
+    },
+  ) {
+    const companyId = this.normalizeRequired(body.companyId, 'Company ID');
+    const assetId = this.normalizeRequired(body.assetId, 'Asset ID');
+    const device = await this.findOne(id);
+
+    if (device.companyId !== companyId) {
+      throw new BadRequestException(
+        'Telemetry device does not belong to this company',
+      );
+    }
+
+    await this.ensureCompany(companyId);
+    await this.ensureAsset(assetId, companyId);
+
+    if (device.assetId === assetId) {
+      return device;
+    }
+
+    return this.prisma.telemetryDevice.update({
+      where: { id: device.id },
+      data: {
+        assetId,
+      },
+      include: this.deviceInclude(),
+    });
+  }
+
+  async unassignFromAsset(
+    id: string,
+    body: {
+      companyId: string;
+    },
+  ) {
+    const companyId = this.normalizeRequired(body.companyId, 'Company ID');
+    const device = await this.findOne(id);
+
+    if (device.companyId !== companyId) {
+      throw new BadRequestException(
+        'Telemetry device does not belong to this company',
+      );
+    }
+
+    if (!device.assetId) {
+      return device;
+    }
+
+    return this.prisma.telemetryDevice.update({
+      where: { id: device.id },
+      data: {
+        assetId: null,
+      },
+      include: this.deviceInclude(),
+    });
+  }
+
+  async remove(id: string, companyIdInput?: string) {
+    const companyId = this.normalizeRequired(
+      companyIdInput,
+      'Company ID',
+    );
+    const device = await this.findOne(id);
+
+    if (device.companyId !== companyId) {
+      throw new BadRequestException(
+        'Telemetry device does not belong to this company',
+      );
+    }
+
+    return this.prisma.telemetryDevice.update({
+      where: { id: device.id },
+      data: {
+        assetId: null,
+        status: TelemetryDeviceStatus.INACTIVE,
+        deletedAt: new Date(),
+      },
+      include: this.deviceInclude(),
+    });
+  }
+}
