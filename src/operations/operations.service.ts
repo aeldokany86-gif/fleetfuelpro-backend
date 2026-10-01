@@ -1657,6 +1657,7 @@ async getMobileMyOperations(request?: RequestLike) {
     where: {
       companyId: currentUser.companyId,
       requestedByUserId: currentUser.id,
+      status: { not: 'CANCELLED' },
       occurredAt: {
         gte: windowFrom,
         lte: windowTo,
@@ -1747,6 +1748,7 @@ async findAll(request?: RequestLike) {
   const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
+      status: { not: 'CANCELLED' },
     },
 
     include: this.buildOperationListInclude(),
@@ -2863,6 +2865,7 @@ async getWarehouseOperationsReport(
     type?: string;
     stationId?: string;
     assetId?: string;
+    status?: string;
     dateFrom?: string;
     dateTo?: string;
     utcOffsetMinutes?: string | number;
@@ -2924,6 +2927,21 @@ async getWarehouseOperationsReport(
   ) {
     throw new BadRequestException('type is invalid');
   }
+
+  const requestedStatus = String(filters.status || 'COMPLETED')
+    .trim()
+    .toUpperCase();
+
+  if (!['COMPLETED', 'CANCELLED', 'ALL'].includes(requestedStatus)) {
+    throw new BadRequestException(
+      'status must be COMPLETED, CANCELLED, or ALL for warehouse report.',
+    );
+  }
+
+  const warehouseStatusCondition =
+    requestedStatus === 'ALL'
+      ? { status: { in: ['COMPLETED', 'CANCELLED'] } }
+      : { status: requestedStatus };
 
   const accessibleProjectIds =
     currentUser.role === 'Manager'
@@ -3051,7 +3069,7 @@ async getWarehouseOperationsReport(
   const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
-      status: 'COMPLETED',
+      ...warehouseStatusCondition,
       ...(requestedType ? { type: requestedType } : {}),
       ...(resolvedAsset ? { assetId: resolvedAsset.id } : {}),
       ...(Object.keys(occurredAt).length ? { occurredAt } : {}),
@@ -3061,6 +3079,7 @@ async getWarehouseOperationsReport(
       id: true,
       operationNo: true,
       type: true,
+      status: true,
       quantity: true,
       occurredAt: true,
       externalStationName: true,
@@ -3167,6 +3186,7 @@ async getWarehouseOperationsReport(
       operationNo: operation.operationNo,
       occurredAt: operation.occurredAt,
       type: operation.type,
+      status: operation.status,
       source,
       destination,
       quantity: Number(operation.quantity || 0),
@@ -3243,13 +3263,34 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     throw new ForbiddenException('You cannot view this project report.');
   }
 
+  const requestedStatus = String(filters.status || 'COMPLETED')
+    .trim()
+    .toUpperCase();
+
+  const allowedReportStatuses = [
+    'PENDING',
+    'PARTIALLY_APPROVED',
+    'APPROVED',
+    'REJECTED',
+    'COMPLETED',
+    'CANCELLED',
+    'ALL',
+  ];
+
+  if (!allowedReportStatuses.includes(requestedStatus)) {
+    throw new BadRequestException('status is invalid');
+  }
+
+  const summaryStatusCondition =
+    requestedStatus === 'ALL' ? {} : { status: requestedStatus };
+
   const fuelerCode = String(filters.fuelerEmployeeId || '').trim();
   const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
       ...(filters.assetId ? { assetId: filters.assetId } : {}),
       ...(filters.type ? { type: filters.type } : {}),
-      ...(filters.status ? { status: filters.status } : {}),
+      ...summaryStatusCondition,
       ...(Object.keys(occurredAt).length ? { occurredAt } : {}),
       ...(scopedProjectIds.length
         ? {

@@ -1197,6 +1197,7 @@ model OperationCorrection {
   requestedByUserId String
   reviewedByUserId  String?
   reviewNote        String?
+  metadata          Json?
   reviewedAt        DateTime?
   appliedAt         DateTime?
   rejectedAt        DateTime?
@@ -1498,6 +1499,7 @@ enum OperationCorrectionField {
   TOTAL_COST_AT_OPERATION
   NOTES
   FUELER_ID
+  CANCELLATION
 }
 
 enum EmployeeStatus {

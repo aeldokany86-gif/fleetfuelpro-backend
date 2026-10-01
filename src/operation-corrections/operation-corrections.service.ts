@@ -35,7 +35,8 @@ type CorrectionField =
   | 'EXTERNAL_STATION_NAME'
   | 'INVOICE_NUMBER'
   | 'TOTAL_COST_AT_OPERATION'
-  | 'NOTES';
+  | 'NOTES'
+  | 'CANCELLATION';
 
 @Injectable()
 export class OperationCorrectionsService {
@@ -208,6 +209,10 @@ export class OperationCorrectionsService {
     this.validateFieldAllowedForOperation(fieldName, operation.type);
     this.validateStructureAwareCorrectionField(fieldName, operation);
 
+    if (fieldName === 'CANCELLATION') {
+      this.assertCanAccessCorrectionContext(currentUser, operation);
+    }
+
     let oldValue = this.getOperationFieldValue(operation, fieldName);
     const newValue = await this.normalizeNewValue(
       fieldName,
@@ -247,12 +252,31 @@ export class OperationCorrectionsService {
     const existingPending = await (this.prisma as any).operationCorrection.findFirst({
       where: {
         operationId: operation.id,
-        fieldName,
         status: 'PENDING',
+        ...(fieldName === 'CANCELLATION'
+          ? {}
+          : {
+              OR: [
+                { fieldName },
+                { fieldName: 'CANCELLATION' },
+              ],
+            }),
       },
     });
 
     if (existingPending) {
+      if (fieldName === 'CANCELLATION') {
+        throw new BadRequestException(
+          'This operation already has a pending correction. Resolve it before requesting cancellation.',
+        );
+      }
+
+      if (existingPending.fieldName === 'CANCELLATION') {
+        throw new BadRequestException(
+          'This operation has a pending cancellation request. Resolve it before creating another correction.',
+        );
+      }
+
       throw new BadRequestException('There is already a pending correction for this field.');
     }
 
@@ -262,10 +286,31 @@ export class OperationCorrectionsService {
       const correctionId = await this.prisma.$transaction(
         async (tx) => {
           const duplicate = await (tx as any).operationCorrection.findFirst({
-            where: { operationId: operation.id, fieldName, status: 'PENDING' },
-            select: { id: true },
+            where: {
+              operationId: operation.id,
+              status: 'PENDING',
+              ...(fieldName === 'CANCELLATION'
+                ? {}
+                : {
+                    OR: [
+                      { fieldName },
+                      { fieldName: 'CANCELLATION' },
+                    ],
+                  }),
+            },
+            select: { id: true, fieldName: true },
           });
           if (duplicate) {
+            if (fieldName === 'CANCELLATION') {
+              throw new BadRequestException(
+                'This operation already has a pending correction. Resolve it before requesting cancellation.',
+              );
+            }
+            if (duplicate.fieldName === 'CANCELLATION') {
+              throw new BadRequestException(
+                'This operation has a pending cancellation request. Resolve it before creating another correction.',
+              );
+            }
             throw new BadRequestException('There is already a pending correction for this field.');
           }
 
@@ -331,10 +376,31 @@ export class OperationCorrectionsService {
     const correctionId = await this.prisma.$transaction(
       async (tx) => {
         const duplicate = await (tx as any).operationCorrection.findFirst({
-          where: { operationId: operation.id, fieldName, status: 'PENDING' },
-          select: { id: true },
+          where: {
+            operationId: operation.id,
+            status: 'PENDING',
+            ...(fieldName === 'CANCELLATION'
+              ? {}
+              : {
+                  OR: [
+                    { fieldName },
+                    { fieldName: 'CANCELLATION' },
+                  ],
+                }),
+          },
+          select: { id: true, fieldName: true },
         });
         if (duplicate) {
+          if (fieldName === 'CANCELLATION') {
+            throw new BadRequestException(
+              'This operation already has a pending correction. Resolve it before requesting cancellation.',
+            );
+          }
+          if (duplicate.fieldName === 'CANCELLATION') {
+            throw new BadRequestException(
+              'This operation has a pending cancellation request. Resolve it before creating another correction.',
+            );
+          }
           throw new BadRequestException('There is already a pending correction for this field.');
         }
 
@@ -936,6 +1002,7 @@ export class OperationCorrectionsService {
         reason: true,
         status: true,
         reviewNote: true,
+        metadata: true,
         requestedByUserId: true,
         reviewedByUserId: true,
         createdAt: true,
@@ -1261,6 +1328,7 @@ export class OperationCorrectionsService {
           reviewedBy?.email ||
           null,
         reviewNote: correction.reviewNote || null,
+        metadata: correction.metadata || null,
         reviewedAt: correction.reviewedAt,
         appliedAt: correction.appliedAt,
         rejectedAt: correction.rejectedAt,
@@ -1687,6 +1755,16 @@ export class OperationCorrectionsService {
       throw new BadRequestException('Only completed operations can be corrected.');
     }
 
+    if (fieldName === 'CANCELLATION') {
+      await this.applyCancellationCorrection(
+        tx,
+        correction,
+        operation,
+        currentUser,
+      );
+      return;
+    }
+
     if (fieldName === 'ASSET_ID') {
       await this.applyAssetCorrection(tx, operation, String(newValue), currentUser);
       return;
@@ -1755,6 +1833,316 @@ export class OperationCorrectionsService {
       where: { id: operation.id },
       data,
     });
+  }
+
+  private isLedgerRowAfter(candidate: any, reference: any) {
+    const movementDiff =
+      new Date(candidate.movementAt).getTime() -
+      new Date(reference.movementAt).getTime();
+
+    if (movementDiff !== 0) return movementDiff > 0;
+
+    const createdDiff =
+      new Date(candidate.createdAt).getTime() -
+      new Date(reference.createdAt).getTime();
+
+    if (createdDiff !== 0) return createdDiff > 0;
+
+    return String(candidate.id).localeCompare(String(reference.id)) > 0;
+  }
+
+  private async applyCancellationCorrection(
+    tx: any,
+    correction: any,
+    operation: any,
+    currentUser: CurrentUserContext,
+  ) {
+    if (!['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(operation.type)) {
+      throw new BadRequestException(
+        'Cancellation is currently enabled only for Direct Refuel and External Direct Refuel operations.',
+      );
+    }
+
+    const cancelledAt = new Date();
+
+    const claimed = await (tx as any).operation.updateMany({
+      where: {
+        id: operation.id,
+        companyId: operation.companyId,
+        status: 'COMPLETED',
+      },
+      data: {
+        status: 'CANCELLED',
+        cancelledAt,
+      },
+    });
+
+    if (claimed.count !== 1) {
+      throw new BadRequestException(
+        'Operation status changed before cancellation was applied.',
+      );
+    }
+
+    const stockMovements = await (tx as any).stationStockMovement.findMany({
+      where: {
+        companyId: operation.companyId,
+        referenceType: 'Operation',
+        referenceId: operation.id,
+      },
+      orderBy: [
+        { movementAt: 'asc' },
+        { createdAt: 'asc' },
+        { id: 'asc' },
+      ],
+    });
+
+    if (operation.type === 'DIRECT_REFUEL' && stockMovements.length !== 1) {
+      throw new BadRequestException(
+        `Direct Refuel cancellation expected exactly one stock movement but found ${stockMovements.length}. No changes were committed.`,
+      );
+    }
+
+    if (
+      operation.type === 'EXTERNAL_DIRECT_REFUEL' &&
+      stockMovements.length !== 0
+    ) {
+      throw new BadRequestException(
+        `External Direct Refuel cancellation expected no internal stock movement but found ${stockMovements.length}. No changes were committed.`,
+      );
+    }
+
+    const reconciliations: any[] = [];
+
+    for (const originalMovement of stockMovements) {
+      reconciliations.push(
+        await this.reconcileCancelledOperationStockMovement(
+          tx,
+          originalMovement,
+        ),
+      );
+    }
+
+    if (operation.assetId) {
+      await this.rebuildAssetLifetimeHistory(tx, operation.assetId);
+    }
+
+    await (tx as any).operationCorrection.update({
+      where: { id: correction.id },
+      data: {
+        metadata: {
+          cancellation: {
+            operationId: operation.id,
+            operationNo: operation.operationNo || null,
+            operationType: operation.type,
+            cancelledAt: cancelledAt.toISOString(),
+            cancelledByUserId: currentUser.id,
+            preservedOperationQuantity: Number(operation.quantity || 0),
+            preservedOperationCost:
+              operation.totalCostAtOperation == null
+                ? null
+                : Number(operation.totalCostAtOperation),
+            stockReconciliation: reconciliations,
+          },
+        },
+      },
+    });
+  }
+
+  private async reconcileCancelledOperationStockMovement(
+    tx: any,
+    originalMovement: any,
+  ) {
+    const reversalDelta = -Number(originalMovement.quantity || 0);
+
+    if (!Number.isFinite(reversalDelta)) {
+      throw new BadRequestException(
+        'Original stock movement quantity is invalid.',
+      );
+    }
+
+    const anchorCandidates = await (tx as any).stationStockMovement.findMany({
+      where: {
+        stationId: originalMovement.stationId,
+        companyId: originalMovement.companyId,
+        movementType: {
+          in: ['ZERO_BALANCE', 'PHYSICAL_ADJUSTMENT'],
+        },
+        movementAt: {
+          gte: originalMovement.movementAt,
+        },
+      },
+      orderBy: [
+        { movementAt: 'asc' },
+        { createdAt: 'asc' },
+        { id: 'asc' },
+      ],
+    });
+
+    const anchor =
+      anchorCandidates.find((candidate: any) =>
+        this.isLedgerRowAfter(candidate, originalMovement),
+      ) || null;
+
+    if (anchor) {
+      const segmentRows = await (tx as any).stationStockMovement.findMany({
+        where: {
+          stationId: originalMovement.stationId,
+          companyId: originalMovement.companyId,
+          movementAt: {
+            gte: originalMovement.movementAt,
+            lte: anchor.movementAt,
+          },
+        },
+        orderBy: [
+          { movementAt: 'asc' },
+          { createdAt: 'asc' },
+          { id: 'asc' },
+        ],
+      });
+
+      const rowsBetween = segmentRows.filter(
+        (row: any) =>
+          row.id !== originalMovement.id &&
+          this.isLedgerRowAfter(row, originalMovement) &&
+          this.isLedgerRowAfter(anchor, row),
+      );
+
+      for (const row of rowsBetween) {
+        await (tx as any).stationStockMovement.update({
+          where: { id: row.id },
+          data: {
+            balanceBefore: { increment: reversalDelta },
+            balanceAfter: { increment: reversalDelta },
+          },
+        });
+      }
+
+      const oldAnchorBalanceBefore = Number(anchor.balanceBefore || 0);
+      const oldAnchorBalanceAfter = Number(anchor.balanceAfter || 0);
+      const oldAnchorQuantity = Number(anchor.quantity || 0);
+      const newAnchorBalanceBefore =
+        oldAnchorBalanceBefore + reversalDelta;
+      const newAnchorQuantity =
+        oldAnchorBalanceAfter - newAnchorBalanceBefore;
+
+      await (tx as any).stationStockMovement.update({
+        where: { id: anchor.id },
+        data: {
+          balanceBefore: newAnchorBalanceBefore,
+          quantity: newAnchorQuantity,
+          balanceAfter: oldAnchorBalanceAfter,
+        },
+      });
+
+      /*
+        Do not rewrite StationActionRequest.requestedActualStock here.
+        That field is the original snapshot/intention captured when the user
+        requested Zero Balance. Historical reconciliation may recalculate the
+        resulting ledger anchor, but the original request snapshot must remain
+        unchanged for audit.
+      */
+
+      await (tx as any).stationStockMovement.delete({
+        where: { id: originalMovement.id },
+      });
+
+      return {
+        stationId: originalMovement.stationId,
+        originalMovement: {
+          id: originalMovement.id,
+          movementType: originalMovement.movementType,
+          quantity: Number(originalMovement.quantity || 0),
+          balanceBefore: Number(originalMovement.balanceBefore || 0),
+          balanceAfter: Number(originalMovement.balanceAfter || 0),
+          movementAt: originalMovement.movementAt,
+          referenceType: originalMovement.referenceType || null,
+          referenceId: originalMovement.referenceId || null,
+        },
+        reversalDelta,
+        currentStockChanged: false,
+        affectedRowsBeforeAnchor: rowsBetween.length,
+        anchor: {
+          id: anchor.id,
+          movementType: anchor.movementType,
+          referenceType: anchor.referenceType || null,
+          referenceId: anchor.referenceId || null,
+          movementAt: anchor.movementAt,
+          oldBalanceBefore: oldAnchorBalanceBefore,
+          newBalanceBefore: newAnchorBalanceBefore,
+          oldQuantity: oldAnchorQuantity,
+          newQuantity: newAnchorQuantity,
+          balanceAfter: oldAnchorBalanceAfter,
+        },
+      };
+    }
+
+    await (tx as any).station.update({
+      where: { id: originalMovement.stationId },
+      data: {
+        currentStock: { increment: 0 },
+      },
+      select: { id: true },
+    });
+
+    const laterRows = await (tx as any).stationStockMovement.findMany({
+      where: {
+        stationId: originalMovement.stationId,
+        companyId: originalMovement.companyId,
+        movementAt: {
+          gte: originalMovement.movementAt,
+        },
+      },
+      orderBy: [
+        { movementAt: 'asc' },
+        { createdAt: 'asc' },
+        { id: 'asc' },
+      ],
+    });
+
+    const rowsAfter = laterRows.filter(
+      (row: any) =>
+        row.id !== originalMovement.id &&
+        this.isLedgerRowAfter(row, originalMovement),
+    );
+
+    for (const row of rowsAfter) {
+      await (tx as any).stationStockMovement.update({
+        where: { id: row.id },
+        data: {
+          balanceBefore: { increment: reversalDelta },
+          balanceAfter: { increment: reversalDelta },
+        },
+      });
+    }
+
+    await (tx as any).station.update({
+      where: { id: originalMovement.stationId },
+      data: {
+        currentStock: { increment: reversalDelta },
+      },
+    });
+
+    await (tx as any).stationStockMovement.delete({
+      where: { id: originalMovement.id },
+    });
+
+    return {
+      stationId: originalMovement.stationId,
+      originalMovement: {
+        id: originalMovement.id,
+        movementType: originalMovement.movementType,
+        quantity: Number(originalMovement.quantity || 0),
+        balanceBefore: Number(originalMovement.balanceBefore || 0),
+        balanceAfter: Number(originalMovement.balanceAfter || 0),
+        movementAt: originalMovement.movementAt,
+        referenceType: originalMovement.referenceType || null,
+        referenceId: originalMovement.referenceId || null,
+      },
+      reversalDelta,
+      currentStockChanged: true,
+      affectedRowsAfterOperation: rowsAfter.length,
+      anchor: null,
+    };
   }
 
   private async applyAssetCorrection(tx: any, operation: any, newAssetId: string, currentUser: CurrentUserContext) {
@@ -3216,6 +3604,15 @@ export class OperationCorrectionsService {
   }
 
   private validateFieldAllowedForOperation(fieldName: CorrectionField, type: string) {
+    if (
+      fieldName === 'CANCELLATION' &&
+      !['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type)
+    ) {
+      throw new BadRequestException(
+        'Cancellation is currently enabled only for Direct Refuel and External Direct Refuel operations.',
+      );
+    }
+
     if (fieldName === 'ASSET_ID' && !['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type)) {
       throw new BadRequestException('assetId correction is allowed only for refuel operations.');
     }
@@ -3256,6 +3653,10 @@ export class OperationCorrectionsService {
   }
 
   private async normalizeNewValue(fieldName: CorrectionField, value: any, operation: any, companyId: string) {
+    if (fieldName === 'CANCELLATION') {
+      return 'CANCELLED';
+    }
+
     if (fieldName === 'DISPENSER_COUNTER_READING') {
       const stationId = String(value?.stationId || '').trim();
       const counter = Number(value?.counter);
@@ -3473,6 +3874,7 @@ export class OperationCorrectionsService {
       INVOICE_NUMBER: operation.invoiceNumber,
       TOTAL_COST_AT_OPERATION: operation.totalCostAtOperation,
       NOTES: operation.notes,
+      CANCELLATION: operation.status,
     };
 
     return map[fieldName];
@@ -3582,6 +3984,9 @@ export class OperationCorrectionsService {
       TOTAL_COST_AT_OPERATION: 'TOTAL_COST_AT_OPERATION',
       TOTALCOSTATOPERATION: 'TOTAL_COST_AT_OPERATION',
       NOTES: 'NOTES',
+      CANCELLATION: 'CANCELLATION',
+      CANCEL: 'CANCELLATION',
+      CANCEL_OPERATION: 'CANCELLATION',
     };
 
     const field = aliases[compact];
@@ -3605,6 +4010,7 @@ export class OperationCorrectionsService {
       reviewedBy: {
         select: { id: true, fullName: true },
       },
+      metadata: true,
     };
   }
 
