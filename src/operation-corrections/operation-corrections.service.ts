@@ -4010,7 +4010,6 @@ export class OperationCorrectionsService {
       reviewedBy: {
         select: { id: true, fullName: true },
       },
-      metadata: true,
     };
   }
 
