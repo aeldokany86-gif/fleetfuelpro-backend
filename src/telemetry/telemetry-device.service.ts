@@ -52,11 +52,18 @@ export class TelemetryDeviceService {
         id: true,
         name: true,
         code: true,
+        telemetryEnabled: true,
       },
     });
 
     if (!company) {
       throw new BadRequestException('Company not found or inactive');
+    }
+
+    if (!company.telemetryEnabled) {
+      throw new BadRequestException(
+        'Telemetry is disabled for this company',
+      );
     }
 
     return company;
@@ -209,6 +216,32 @@ export class TelemetryDeviceService {
     });
   }
 
+  async findActiveByVendorHardwareId(vendorInput: string, hardwareIdInput: string) {
+    const vendor = this.normalizeVendor(vendorInput);
+    const hardwareId = this.normalizeHardwareId(hardwareIdInput);
+
+    return this.prisma.telemetryDevice.findFirst({
+      where: {
+        vendor,
+        hardwareId,
+        status: TelemetryDeviceStatus.ACTIVE,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        companyId: true,
+        assetId: true,
+        vendor: true,
+        model: true,
+        hardwareId: true,
+        protocol: true,
+        transport: true,
+        status: true,
+        lastSeenAt: true,
+      },
+    });
+  }
+
   async findOne(id: string) {
     const deviceId = this.normalizeRequired(id, 'Telemetry device ID');
 
@@ -230,6 +263,7 @@ export class TelemetryDeviceService {
   async update(
     id: string,
     body: {
+      hardwareId?: string;
       model?: string | null;
       protocol?: string | null;
       transport?: TelemetryTransport | null;
@@ -240,9 +274,43 @@ export class TelemetryDeviceService {
   ) {
     const existing = await this.findOne(id);
 
+    let hardwareId: string | undefined;
+
+    if (body.hardwareId !== undefined) {
+      hardwareId = this.normalizeHardwareId(body.hardwareId);
+
+      if (hardwareId !== existing.hardwareId) {
+        const duplicate = await this.prisma.telemetryDevice.findUnique({
+          where: {
+            vendor_hardwareId: {
+              vendor: existing.vendor,
+              hardwareId,
+            },
+          },
+          select: {
+            id: true,
+            deletedAt: true,
+          },
+        });
+
+        if (duplicate && duplicate.id !== existing.id) {
+          if (duplicate.deletedAt) {
+            throw new BadRequestException(
+              'This telemetry device hardware ID was previously registered and cannot be reused',
+            );
+          }
+
+          throw new BadRequestException(
+            'Telemetry device already exists for this vendor and hardware ID',
+          );
+        }
+      }
+    }
+
     return this.prisma.telemetryDevice.update({
       where: { id: existing.id },
       data: {
+        ...(hardwareId !== undefined ? { hardwareId } : {}),
         ...(body.model !== undefined
           ? { model: this.normalizeOptional(body.model) }
           : {}),
@@ -269,6 +337,158 @@ export class TelemetryDeviceService {
     });
   }
 
+  async getLatestTelemetry(id: string) {
+    const device = await this.prisma.telemetryDevice.findFirst({
+      where: {
+        id,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        companyId: true,
+        assetId: true,
+        vendor: true,
+        model: true,
+        hardwareId: true,
+        protocol: true,
+        transport: true,
+        status: true,
+        firmwareVersion: true,
+        lastSeenAt: true,
+        company: {
+          select: {
+            telemetryEnabled: true,
+          },
+        },
+        asset: {
+          select: {
+            id: true,
+            assetId: true,
+            type: true,
+            category: true,
+            status: true,
+            projectId: true,
+          },
+        },
+      },
+    });
+
+    if (!device) {
+      throw new NotFoundException('Telemetry device not found');
+    }
+
+    if (!device.company.telemetryEnabled) {
+      throw new BadRequestException(
+        'Telemetry is disabled for this company',
+      );
+    }
+
+    if (!device.assetId || !device.asset) {
+      return {
+        device: {
+          id: device.id,
+          companyId: device.companyId,
+          vendor: device.vendor,
+          model: device.model,
+          hardwareId: device.hardwareId,
+          protocol: device.protocol,
+          transport: device.transport,
+          status: device.status,
+          firmwareVersion: device.firmwareVersion,
+          lastSeenAt: device.lastSeenAt,
+          assignmentStatus: 'UNASSIGNED',
+        },
+        asset: null,
+        latestReadingAt: null,
+        latestReceivedAt: null,
+        parameterCount: 0,
+        parameters: {},
+      };
+    }
+
+    const readings = await this.prisma.assetTelemetryReading.findMany({
+      where: {
+        companyId: device.companyId,
+        deviceId: device.id,
+        assetId: device.assetId,
+      },
+      orderBy: [
+        { readingAt: 'desc' },
+        { receivedAt: 'desc' },
+        { id: 'desc' },
+      ],
+      select: {
+        id: true,
+        parameterCode: true,
+        vendorSensorId: true,
+        numericValue: true,
+        textValue: true,
+        jsonValue: true,
+        unit: true,
+        dataSource: true,
+        readingAt: true,
+        receivedAt: true,
+      },
+    });
+
+    const parameters: Record<string, unknown> = {};
+    let latestReadingAt: Date | null = null;
+    let latestReceivedAt: Date | null = null;
+
+    for (const reading of readings) {
+      if (parameters[reading.parameterCode] !== undefined) {
+        continue;
+      }
+
+      const value =
+        reading.numericValue ??
+        reading.textValue ??
+        reading.jsonValue ??
+        null;
+
+      parameters[reading.parameterCode] = {
+        value,
+        numericValue: reading.numericValue,
+        textValue: reading.textValue,
+        jsonValue: reading.jsonValue,
+        unit: reading.unit,
+        dataSource: reading.dataSource,
+        vendorSensorId: reading.vendorSensorId,
+        readingAt: reading.readingAt,
+        receivedAt: reading.receivedAt,
+      };
+
+      if (!latestReadingAt || reading.readingAt > latestReadingAt) {
+        latestReadingAt = reading.readingAt;
+      }
+
+      if (!latestReceivedAt || reading.receivedAt > latestReceivedAt) {
+        latestReceivedAt = reading.receivedAt;
+      }
+    }
+
+    return {
+      device: {
+        id: device.id,
+        companyId: device.companyId,
+        vendor: device.vendor,
+        model: device.model,
+        hardwareId: device.hardwareId,
+        protocol: device.protocol,
+        transport: device.transport,
+        status: device.status,
+        firmwareVersion: device.firmwareVersion,
+        lastSeenAt: device.lastSeenAt,
+        assignmentStatus: 'ASSIGNED',
+      },
+      asset: device.asset,
+      latestReadingAt,
+      latestReceivedAt,
+      parameterCount: Object.keys(parameters).length,
+      parameters,
+    };
+  }
+
   async assignToAsset(
     id: string,
     body: {
@@ -291,6 +511,30 @@ export class TelemetryDeviceService {
 
     if (device.assetId === assetId) {
       return device;
+    }
+
+    const existingAssignment = await this.prisma.telemetryDevice.findFirst({
+      where: {
+        companyId,
+        assetId,
+        deletedAt: null,
+        NOT: {
+          id: device.id,
+        },
+      },
+      select: {
+        id: true,
+        vendor: true,
+        model: true,
+        hardwareId: true,
+        status: true,
+      },
+    });
+
+    if (existingAssignment) {
+      throw new BadRequestException(
+        'This asset is already assigned to another telemetry device. Unassign the existing device first.',
+      );
     }
 
     return this.prisma.telemetryDevice.update({
@@ -316,6 +560,8 @@ export class TelemetryDeviceService {
         'Telemetry device does not belong to this company',
       );
     }
+
+    await this.ensureCompany(companyId);
 
     if (!device.assetId) {
       return device;

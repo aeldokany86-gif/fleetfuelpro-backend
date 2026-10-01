@@ -1470,25 +1470,23 @@ export class OperationCorrectionsService {
   async findPending(request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(request);
 
-    if (!['Manager', 'Admin', 'PlatformAdmin'].includes(currentUser.role)) {
-      throw new ForbiddenException('Only managers can view pending operation corrections.');
+    if (currentUser.role !== 'Manager') {
+      throw new ForbiddenException(
+        'Only project managers can view pending operation corrections.',
+      );
     }
 
     return (this.prisma as any).operationCorrection.findMany({
       where: {
         companyId: currentUser.companyId,
         status: 'PENDING',
-        ...(currentUser.role === 'Manager'
-          ? {
-              operation: {
-                OR: [
-                  { projectIdAtOperation: { in: currentUser.managedProjectIds } },
-                  { sourceProjectIdAtOperation: { in: currentUser.managedProjectIds } },
-                  { destinationProjectIdAtOperation: { in: currentUser.managedProjectIds } },
-                ],
-              },
-            }
-          : {}),
+        operation: {
+          OR: [
+            { projectIdAtOperation: { in: currentUser.managedProjectIds } },
+            { sourceProjectIdAtOperation: { in: currentUser.managedProjectIds } },
+            { destinationProjectIdAtOperation: { in: currentUser.managedProjectIds } },
+          ],
+        },
       },
       include: this.correctionInclude(),
       orderBy: { createdAt: 'desc' },
@@ -1514,8 +1512,10 @@ export class OperationCorrectionsService {
   async review(correctionId: string, dto: ReviewOperationCorrectionDto, request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(request);
 
-    if (!['Manager', 'Admin', 'PlatformAdmin'].includes(currentUser.role)) {
-      throw new ForbiddenException('Only managers can review operation corrections.');
+    if (currentUser.role !== 'Manager') {
+      throw new ForbiddenException(
+        'Only project managers can review pending operation corrections.',
+      );
     }
 
     const action = String(dto.action || '').trim().toUpperCase();

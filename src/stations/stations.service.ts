@@ -186,13 +186,9 @@ export class StationsService {
       return actor;
     }
 
-    if (this.isAdminRole(roleName)) {
-      return actor;
-    }
-
     if (!this.isManagerRole(roleName)) {
       throw new BadRequestException(
-        'Only the assigned Project Manager or Admin can execute this station action directly',
+        'Only the assigned Project Manager can execute this station action directly',
       );
     }
 
@@ -2646,8 +2642,11 @@ export class StationsService {
     ];
 
     if (this.isAdminRole(roleName)) {
+      // Admin approval inbox is intentionally limited to Inventory Adjustment.
+      // Zero Balance and Counter Reset belong to the assigned Project Manager.
       visibility.push({
         companyId: user.companyId,
+        actionType: 'INVENTORY_ADJUSTMENT' as any,
       });
     } else if (this.isManagerRole(roleName)) {
       visibility.push({

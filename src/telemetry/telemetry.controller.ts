@@ -15,6 +15,7 @@ import {
 } from '@prisma/client';
 
 import { TelemetryDeviceService } from './telemetry-device.service';
+import { TelemetryIngestionService } from './telemetry-ingestion.service';
 
 @Controller('telemetry/devices')
 export class TelemetryController {
@@ -56,6 +57,11 @@ export class TelemetryController {
     });
   }
 
+  @Get(':id/latest')
+  getLatestTelemetry(@Param('id') id: string) {
+    return this.telemetryDeviceService.getLatestTelemetry(id);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.telemetryDeviceService.findOne(id);
@@ -66,6 +72,7 @@ export class TelemetryController {
     @Param('id') id: string,
     @Body()
     body: {
+      hardwareId?: string;
       model?: string | null;
       protocol?: string | null;
       transport?: TelemetryTransport | null;
@@ -106,5 +113,47 @@ export class TelemetryController {
     @Query('companyId') companyId: string,
   ) {
     return this.telemetryDeviceService.remove(id, companyId);
+  }
+}
+
+@Controller('telemetry')
+export class TelemetryIngestionController {
+  constructor(
+    private readonly telemetryIngestionService: TelemetryIngestionService,
+  ) {}
+
+  @Post('raw')
+  ingestRaw(
+    @Body()
+    body: {
+      companyId: string;
+      deviceId?: string | null;
+      transport: TelemetryTransport;
+      topic?: string | null;
+      payload: string;
+      payloadEncoding?: 'utf8' | 'base64' | 'hex';
+      protocolVersion?: string | null;
+      checksumValid?: boolean | null;
+      readingAt?: string | null;
+      metadata?: Prisma.InputJsonValue | null;
+    },
+  ) {
+    return this.telemetryIngestionService.ingestRaw(body);
+  }
+
+  @Post('xirgo')
+  ingestXirgo(
+    @Body()
+    body: {
+      companyId: string;
+      deviceId: string;
+      transport: TelemetryTransport;
+      topic?: string | null;
+      payload: string;
+      payloadEncoding?: 'base64' | 'hex';
+      metadata?: Prisma.InputJsonValue | null;
+    },
+  ) {
+    return this.telemetryIngestionService.ingestXirgo(body);
   }
 }

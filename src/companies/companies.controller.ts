@@ -104,6 +104,17 @@ export class CompaniesController {
   }
 
 
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Platform User')
+  @Patch(':id/telemetry-access')
+  async updateTelemetryAccess(
+    @Param('id') id: string,
+    @Body() body: { enabled: boolean },
+  ) {
+    return this.companiesService.updateTelemetryAccess(id, body.enabled);
+  }
+
   @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles('Admin')
   @Get('settings/mobile-application')
