@@ -186,9 +186,15 @@ export class StationsService {
       return actor;
     }
 
+    if (actionType === 'ZERO_BALANCE' && this.isSupervisorRole(roleName)) {
+      return actor;
+    }
+
     if (!this.isManagerRole(roleName)) {
       throw new BadRequestException(
-        'Only the assigned Project Manager can execute this station action directly',
+        actionType === 'ZERO_BALANCE'
+          ? 'Only Supervisor or the assigned Project Manager can execute zero balance directly'
+          : 'Only the assigned Project Manager can execute this station action directly',
       );
     }
 
@@ -212,11 +218,41 @@ export class StationsService {
 
     if (!projectManagerId || projectManagerId !== userId) {
       throw new BadRequestException(
-        'Only the assigned Project Manager can execute this station action directly',
+        actionType === 'ZERO_BALANCE'
+          ? 'Only Supervisor or the assigned Project Manager can execute zero balance directly'
+          : 'Only the assigned Project Manager can execute this station action directly',
       );
     }
 
     return actor;
+  }
+
+  private validateZeroBalanceTolerance(station: any, currentStock: number) {
+    const capacity = Number(station?.capacity);
+
+    if (!Number.isFinite(capacity) || capacity <= 0) {
+      throw new BadRequestException(
+        'Station capacity must be configured with a value greater than zero before zero balance can be used',
+      );
+    }
+
+    if (!Number.isFinite(currentStock)) {
+      throw new BadRequestException('Current station stock is invalid');
+    }
+
+    const allowedVariance = capacity * 0.05;
+    const absoluteStock = Math.abs(currentStock);
+
+    if (absoluteStock > allowedVariance + 1e-9) {
+      throw new BadRequestException(
+        `Zero balance is allowed only within ±5% of station capacity. Current stock is ${currentStock} L and the allowed variance is ±${allowedVariance} L. Use inventory adjustment instead.`,
+      );
+    }
+
+    return {
+      capacity,
+      allowedVariance,
+    };
   }
 
   private buildUniqueApprovers(
@@ -2264,6 +2300,8 @@ export class StationsService {
           );
         }
 
+        this.validateZeroBalanceTolerance(station, balanceBefore);
+
         const quantity = -balanceBefore;
         const balanceAfter = 0;
 
@@ -2302,8 +2340,9 @@ export class StationsService {
         };
       },
       {
-        maxWait: 10000,
-        timeout: 20000,
+        maxWait: 5000,
+        timeout: 15000,
+        isolationLevel: 'Serializable' as any,
       },
     );
   }
@@ -2331,6 +2370,12 @@ export class StationsService {
       )
     ) {
       throw new BadRequestException('Unsupported station action request type');
+    }
+
+    if (actionType === 'ZERO_BALANCE') {
+      throw new BadRequestException(
+        'Zero balance no longer requires an approval request. Use the direct zero balance action; it is allowed only within ±5% of station capacity.',
+      );
     }
 
     if (!body.requestedByUserId) {
