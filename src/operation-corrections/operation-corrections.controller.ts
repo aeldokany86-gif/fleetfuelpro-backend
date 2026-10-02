@@ -79,6 +79,23 @@ export class OperationCorrectionsController {
     );
   }
 
+
+  @Post('stock-reconciliation-repair')
+  applyStockReconciliationRepair(
+    @Body()
+    body: {
+      operationNo?: string;
+      mode?: string;
+      confirmOperationNo?: string;
+    },
+    @Req() req: any,
+  ) {
+    return this.service.applyExistingCancelledOperationStockReconciliation(
+      body,
+      req,
+    );
+  }
+
   @Get(':operationId/correction-context')
   getCorrectionContext(
     @Param('operationId') operationId: string,

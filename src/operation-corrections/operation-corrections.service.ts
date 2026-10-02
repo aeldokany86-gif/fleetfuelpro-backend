@@ -703,6 +703,400 @@ export class OperationCorrectionsService {
     };
   }
 
+
+  async applyExistingCancelledOperationStockReconciliation(
+    body: {
+      operationNo?: string;
+      mode?: string;
+      confirmOperationNo?: string;
+    },
+    request?: RequestLike,
+  ) {
+    const currentUser = await this.resolveCurrentUser(request);
+
+    if (!['Admin', 'PlatformAdmin'].includes(currentUser.role)) {
+      throw new ForbiddenException(
+        'Only Admin or Platform Admin can apply an existing cancellation stock reconciliation repair.',
+      );
+    }
+
+    const operationNo = String(body?.operationNo || '').trim();
+    const confirmOperationNo = String(body?.confirmOperationNo || '').trim();
+    const mode = String(
+      body?.mode || 'EXISTING_CANCELLED_OPERATION',
+    )
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+
+    if (!operationNo) {
+      throw new BadRequestException('Operation number is required.');
+    }
+
+    if (confirmOperationNo !== operationNo) {
+      throw new BadRequestException(
+        'confirmOperationNo must exactly match operationNo.',
+      );
+    }
+
+    if (mode !== 'EXISTING_CANCELLED_OPERATION') {
+      throw new BadRequestException(
+        `Unsupported stock reconciliation repair mode: ${body?.mode}`,
+      );
+    }
+
+    const operation = await (this.prisma as any).operation.findFirst({
+      where: {
+        companyId: currentUser.companyId,
+        operationNo,
+      },
+      include: {
+        sourceStation: {
+          include: { parentStation: true },
+        },
+        destinationStation: {
+          include: { parentStation: true },
+        },
+        asset: true,
+      },
+    });
+
+    if (!operation) {
+      throw new NotFoundException('Operation was not found.');
+    }
+
+    this.assertCanAccessCorrectionContext(currentUser, operation);
+
+    if (operation.status !== 'CANCELLED') {
+      throw new BadRequestException(
+        'This repair requires an operation that is already CANCELLED.',
+      );
+    }
+
+    const result = await this.prisma.$transaction(
+      async (tx) => {
+        const lockedOperation = await (tx as any).operation.findFirst({
+          where: {
+            id: operation.id,
+            companyId: currentUser.companyId,
+          },
+          select: {
+            id: true,
+            operationNo: true,
+            status: true,
+            type: true,
+            quantity: true,
+            occurredAt: true,
+            createdAt: true,
+          },
+        });
+
+        if (!lockedOperation || lockedOperation.status !== 'CANCELLED') {
+          throw new BadRequestException(
+            'Operation status changed before reconciliation repair could be applied.',
+          );
+        }
+
+        const cancellationCorrection = await (tx as any)
+          .operationCorrection.findFirst({
+            where: {
+              companyId: currentUser.companyId,
+              operationId: operation.id,
+              fieldName: 'CANCELLATION',
+              status: 'APPLIED',
+            },
+            orderBy: [
+              { appliedAt: 'desc' },
+              { createdAt: 'desc' },
+              { id: 'desc' },
+            ],
+          });
+
+        if (!cancellationCorrection) {
+          throw new BadRequestException(
+            'Applied cancellation correction metadata was not found for this operation.',
+          );
+        }
+
+        const existingMetadata =
+          (cancellationCorrection.metadata as any) || {};
+        const cancellationMetadata =
+          (existingMetadata as any)?.cancellation || null;
+
+        if (cancellationMetadata?.historicalStockRepair?.appliedAt) {
+          return {
+            alreadyApplied: true,
+            correctionId: cancellationCorrection.id,
+            operationNo,
+            stationId:
+              cancellationMetadata?.historicalStockRepair?.stationId || null,
+            currentStockBefore:
+              cancellationMetadata?.historicalStockRepair
+                ?.currentStockBefore ?? null,
+            currentStockAfter:
+              cancellationMetadata?.historicalStockRepair
+                ?.currentStockAfter ?? null,
+            currentStockDelta:
+              cancellationMetadata?.historicalStockRepair
+                ?.currentStockDelta ?? null,
+            changedRows:
+              cancellationMetadata?.historicalStockRepair?.changedRows ?? null,
+            hardAnchor:
+              cancellationMetadata?.historicalStockRepair?.hardAnchor || null,
+          };
+        }
+
+        const storedReconciliations = Array.isArray(
+          cancellationMetadata?.stockReconciliation,
+        )
+          ? cancellationMetadata.stockReconciliation
+          : [];
+
+        if (storedReconciliations.length !== 1) {
+          throw new BadRequestException(
+            `Expected exactly one stored stock reconciliation for this cancelled operation but found ${storedReconciliations.length}.`,
+          );
+        }
+
+        const storedReconciliation = storedReconciliations[0];
+        const originalMovement = storedReconciliation?.originalMovement;
+        const reconciledStationId = String(
+          storedReconciliation?.stationId ||
+            originalMovement?.stationId ||
+            '',
+        ).trim();
+
+        if (
+          !reconciledStationId ||
+          !originalMovement?.movementAt ||
+          originalMovement?.balanceBefore === null ||
+          originalMovement?.balanceBefore === undefined
+        ) {
+          throw new BadRequestException(
+            'Cancellation metadata does not contain enough original stock movement information for a safe repair.',
+          );
+        }
+
+        const originalMovementAt = new Date(originalMovement.movementAt);
+
+        if (Number.isNaN(originalMovementAt.getTime())) {
+          throw new BadRequestException(
+            'Stored original stock movement date is invalid.',
+          );
+        }
+
+        const station = await (tx as any).station.findFirst({
+          where: {
+            id: reconciledStationId,
+            companyId: currentUser.companyId,
+            deletedAt: null,
+          },
+          select: {
+            id: true,
+            stationId: true,
+            name: true,
+            currentStock: true,
+            structureType: true,
+          },
+        });
+
+        if (!station) {
+          throw new NotFoundException(
+            'The stock-owning station referenced by the cancellation was not found.',
+          );
+        }
+
+        const currentStockBefore = Number(station.currentStock || 0);
+
+        if (!Number.isFinite(currentStockBefore)) {
+          throw new BadRequestException(
+            'Station current stock is invalid.',
+          );
+        }
+
+        const sameTimestampRows = await (tx as any)
+          .stationStockMovement.findMany({
+            where: {
+              stationId: station.id,
+              companyId: currentUser.companyId,
+              movementAt: originalMovementAt,
+            },
+            select: {
+              id: true,
+              movementType: true,
+              referenceType: true,
+              referenceId: true,
+              movementAt: true,
+              createdAt: true,
+            },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          });
+
+        if (sameTimestampRows.length > 0) {
+          throw new BadRequestException(
+            'Another stock movement exists at the exact cancelled-operation timestamp. Repair stopped to avoid ambiguous historical ordering.',
+          );
+        }
+
+        const timeline = await this.buildHistoricalStockTimelinePreview(
+          tx as any,
+          {
+            stationId: station.id,
+            companyId: currentUser.companyId,
+            startMovementAt: originalMovementAt,
+            initialBalance: Number(originalMovement.balanceBefore),
+          },
+        );
+
+        const changedRows = timeline.rows.filter(
+          (row: any) => row.changed,
+        );
+
+        const expectedCurrentStock = timeline.hardAnchor
+          ? currentStockBefore
+          : Number(timeline.finalBalance);
+
+        if (!Number.isFinite(expectedCurrentStock)) {
+          throw new BadRequestException(
+            'Calculated current stock after reconciliation is invalid.',
+          );
+        }
+
+        const currentStockDelta =
+          expectedCurrentStock - currentStockBefore;
+
+        const storedReversalDelta = Number(
+          storedReconciliation?.reversalDelta,
+        );
+
+        if (
+          !timeline.hardAnchor &&
+          Number.isFinite(storedReversalDelta) &&
+          Math.abs(currentStockDelta - storedReversalDelta) > 0.000001
+        ) {
+          throw new BadRequestException(
+            `Safety check failed: calculated current stock delta (${currentStockDelta}) does not match stored cancellation reversal delta (${storedReversalDelta}). No changes were committed.`,
+          );
+        }
+
+        for (const row of changedRows) {
+          const updated = await (tx as any)
+            .stationStockMovement.updateMany({
+              where: {
+                id: row.id,
+                stationId: station.id,
+                companyId: currentUser.companyId,
+                quantity: row.oldQuantity,
+                balanceBefore: row.oldBalanceBefore,
+                balanceAfter: row.oldBalanceAfter,
+              },
+              data: {
+                quantity: row.newQuantity,
+                balanceBefore: row.newBalanceBefore,
+                balanceAfter: row.newBalanceAfter,
+              },
+            });
+
+          if (updated.count !== 1) {
+            throw new BadRequestException(
+              `Stock movement ${row.id} changed while reconciliation was running. No changes were committed.`,
+            );
+          }
+        }
+
+        if (!timeline.hardAnchor && currentStockDelta !== 0) {
+          const updatedStation = await (tx as any).station.updateMany({
+            where: {
+              id: station.id,
+              companyId: currentUser.companyId,
+              currentStock: currentStockBefore,
+            },
+            data: {
+              currentStock: expectedCurrentStock,
+            },
+          });
+
+          if (updatedStation.count !== 1) {
+            throw new BadRequestException(
+              'Station current stock changed while reconciliation was running. No changes were committed.',
+            );
+          }
+        }
+
+        const appliedAt = new Date();
+
+        const repairAudit = {
+          version: 1,
+          mode,
+          operationId: operation.id,
+          operationNo,
+          stationId: station.id,
+          stationIdentifier:
+            station.stationId || station.name || station.id,
+          originalMovementAt:
+            originalMovementAt.toISOString(),
+          originalMovementBalanceBefore: Number(
+            originalMovement.balanceBefore,
+          ),
+          storedReversalDelta: Number.isFinite(storedReversalDelta)
+            ? storedReversalDelta
+            : null,
+          currentStockBefore,
+          currentStockAfter: expectedCurrentStock,
+          currentStockDelta,
+          affectedRows: timeline.rows.length,
+          changedRows: changedRows.length,
+          hardAnchor: timeline.hardAnchor,
+          appliedAt: appliedAt.toISOString(),
+          appliedByUserId: currentUser.id,
+        };
+
+        await (tx as any).operationCorrection.update({
+          where: { id: cancellationCorrection.id },
+          data: {
+            metadata: {
+              ...existingMetadata,
+              cancellation: {
+                ...cancellationMetadata,
+                historicalStockRepair: repairAudit,
+              },
+            },
+          },
+        });
+
+        return {
+          alreadyApplied: false,
+          correctionId: cancellationCorrection.id,
+          operationNo,
+          stationId: station.id,
+          stationIdentifier:
+            station.stationId || station.name || station.id,
+          currentStockBefore,
+          currentStockAfter: expectedCurrentStock,
+          currentStockDelta,
+          affectedRows: timeline.rows.length,
+          changedRows: changedRows.length,
+          hardAnchor: timeline.hardAnchor,
+          appliedAt,
+        };
+      },
+      {
+        maxWait: 5000,
+        timeout: 30000,
+        isolationLevel: 'Serializable' as any,
+      },
+    );
+
+    return {
+      ok: true,
+      writeApplied: !result.alreadyApplied,
+      message: result.alreadyApplied
+        ? 'Historical cancellation stock reconciliation repair was already applied.'
+        : 'Historical cancellation stock reconciliation repair applied successfully.',
+      result,
+    };
+  }
+
   async getCorrectionContext(operationId: string, request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(request);
     this.validateRequesterCanCreateCorrection(currentUser);
