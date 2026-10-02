@@ -3281,13 +3281,34 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     throw new ForbiddenException('You cannot view this project report.');
   }
 
+  const requestedStatus = String(filters.status || 'COMPLETED')
+    .trim()
+    .toUpperCase();
+
+  const allowedReportStatuses = [
+    'PENDING',
+    'PARTIALLY_APPROVED',
+    'APPROVED',
+    'REJECTED',
+    'COMPLETED',
+    'CANCELLED',
+    'ALL',
+  ];
+
+  if (!allowedReportStatuses.includes(requestedStatus)) {
+    throw new BadRequestException('status is invalid');
+  }
+
+  const summaryStatusCondition =
+    requestedStatus === 'ALL' ? {} : { status: requestedStatus };
+
   const fuelerCode = String(filters.fuelerEmployeeId || '').trim();
   const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
       ...(filters.assetId ? { assetId: filters.assetId } : {}),
       ...(filters.type ? { type: filters.type } : {}),
-      ...(filters.status ? { status: filters.status } : {}),
+      ...summaryStatusCondition,
       ...(Object.keys(occurredAt).length ? { occurredAt } : {}),
       ...(scopedProjectIds.length
         ? {
@@ -3340,14 +3361,22 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       null,
   }));
 
+  const rowsForOperationalTotals =
+    requestedStatus === 'ALL'
+      ? rows.filter(
+          (row: any) =>
+            String(row.status || '').trim().toUpperCase() !== 'CANCELLED',
+        )
+      : rows;
+
   return {
     summary: {
       records: rows.length,
-      totalQuantity: rows.reduce(
+      totalQuantity: rowsForOperationalTotals.reduce(
         (sum: number, row: any) => sum + Number(row.quantity || 0),
         0,
       ),
-      totalCost: rows.reduce(
+      totalCost: rowsForOperationalTotals.reduce(
         (sum: number, row: any) =>
           sum + Number(row.totalCostAtOperation || 0),
         0,
