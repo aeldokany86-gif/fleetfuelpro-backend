@@ -1,6 +1,7 @@
 import {
   IsArray,
   ValidateNested,
+  IsBoolean,
   IsDateString,
   IsEnum,
   IsNumber,
@@ -101,6 +102,19 @@ export class CreateOperationDto {
   @IsOptional()
   @IsDateString()
   occurredAt?: string;
+
+  /*
+    Explicit controlled path for adding a genuinely missing historical
+    equipment refuel operation from Equipment Operations History.
+
+    Authority model:
+    - Supervisor submits PENDING request for manager approval.
+    - Manager / Admin / PlatformAdmin apply directly.
+    - Normal live-operation role rules remain unchanged.
+  */
+  @IsOptional()
+  @IsBoolean()
+  historicalMissingOperation?: boolean;
 
   /*
     Immutable operation-location snapshot.

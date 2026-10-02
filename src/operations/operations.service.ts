@@ -251,8 +251,19 @@ export class OperationsService {
     const currentUser = await this.resolveAuthenticatedCurrentUser(request);
     const type = this.normalizeOperationType(dto.type);
 
-    this.validateRoleCanCreateAnyOperation(currentUser);
-    this.validateRoleCanCreateOperationType(currentUser, type);
+    const isHistoricalMissingOperation =
+      dto.historicalMissingOperation === true;
+
+    if (isHistoricalMissingOperation) {
+      this.validateHistoricalMissingOperationCreate(
+        currentUser,
+        type,
+        dto,
+      );
+    } else {
+      this.validateRoleCanCreateAnyOperation(currentUser);
+      this.validateRoleCanCreateOperationType(currentUser, type);
+    }
 
     /*
       Idempotency must be checked before photo-draft validation.
@@ -3533,12 +3544,56 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       pendingPhotoDrafts,
     );
 
-    const approvalPlan = await this.buildApprovalPlan(
-      this.prisma as any,
-      currentUser,
-      type,
-      entities,
-    );
+    const isHistoricalMissingOperation =
+      dto.historicalMissingOperation === true;
+
+    /*
+      Missing Historical Operation uses a correction-style authority flow,
+      not the normal operation-type approval rules:
+
+      - Supervisor -> PENDING approval to the manager of the asset project.
+        This applies even to DIRECT_REFUEL, which a Supervisor would normally
+        complete immediately in the live operational flow.
+      - Manager / Admin / PlatformAdmin -> COMPLETED immediately.
+
+      Existing normal operation creation/approval behavior is untouched.
+    */
+    let approvalPlan: ApprovalPlanItem[];
+
+    if (isHistoricalMissingOperation) {
+      if (currentUser.role === 'Supervisor') {
+        const assetProjectId = String(entities.assetProjectId || '').trim();
+
+        if (!assetProjectId) {
+          throw new BadRequestException(
+            'Asset project could not be resolved for the missing historical operation.',
+          );
+        }
+
+        const managerId = await this.getProjectManagerId(
+          this.prisma as any,
+          assetProjectId,
+        );
+
+        approvalPlan = [
+          {
+            approverUserId: managerId,
+            projectId: assetProjectId,
+            approvalStage: 'Historical Missing Operation - Manager Review',
+            status: 'PENDING',
+          },
+        ];
+      } else {
+        approvalPlan = [];
+      }
+    } else {
+      approvalPlan = await this.buildApprovalPlan(
+        this.prisma as any,
+        currentUser,
+        type,
+        entities,
+      );
+    }
 
     const status = this.getInitialOperationStatus(type, currentUser, approvalPlan);
     const completedAt = status === 'COMPLETED' ? serverOperationDate : null;
@@ -6690,6 +6745,55 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     if (compact === 'EXTERNAL_TRANSFER') return 'EXTERNAL_TRANSFER';
 
     throw new BadRequestException(`Unsupported operation type: ${value}`);
+  }
+
+  private validateHistoricalMissingOperationCreate(
+    user: CurrentUserContext,
+    type: NormalizedOperationType,
+    dto: CreateOperationDto,
+  ) {
+    /*
+      Missing Historical Operation follows the same authority model as
+      Operation Correction:
+      - Supervisor: may submit, but the record stays PENDING until a project
+        manager approves it.
+      - Manager / Admin / PlatformAdmin: apply immediately.
+      - Operator / Officer / TopManagement: not allowed.
+      Normal live-operation role rules remain unchanged.
+    */
+    if (
+      !['Supervisor', 'Manager', 'Admin', 'PlatformAdmin'].includes(user.role)
+    ) {
+      throw new ForbiddenException(
+        'This role cannot add or request a missing historical operation.',
+      );
+    }
+
+    if (!['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type)) {
+      throw new BadRequestException(
+        'Missing historical operation supports Direct Refuel and External Direct Refuel only.',
+      );
+    }
+
+    const occurredAtText = String(dto.occurredAt || '').trim();
+    if (!occurredAtText) {
+      throw new BadRequestException(
+        'occurredAt is required for a missing historical operation.',
+      );
+    }
+
+    const occurredAt = new Date(occurredAtText);
+    if (Number.isNaN(occurredAt.getTime())) {
+      throw new BadRequestException(
+        'occurredAt must be a valid ISO date-time.',
+      );
+    }
+
+    if (occurredAt.getTime() >= Date.now()) {
+      throw new BadRequestException(
+        'A missing historical operation must have an occurredAt in the past.',
+      );
+    }
   }
 
   private validateRoleCanCreateAnyOperation(user: CurrentUserContext) {
