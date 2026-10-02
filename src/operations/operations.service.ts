@@ -11,6 +11,7 @@ import { CreateOperationDto } from './dto/create-operation.dto';
 import { ReviewOperationDto } from './dto/review-operation.dto';
 import { OperationsRealtimeService } from './operations-realtime.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { OperationCorrectionsService } from '../operation-corrections/operation-corrections.service';
 
 type NormalizedOperationType =
   | 'DIRECT_REFUEL'
@@ -104,6 +105,7 @@ export class OperationsService {
     private readonly prisma: PrismaService,
     private readonly operationsRealtime: OperationsRealtimeService,
     private readonly notificationsService: NotificationsService,
+    private readonly operationCorrectionsService: OperationCorrectionsService,
   ) {}
 
   private buildOperationListInclude() {
@@ -1130,6 +1132,15 @@ export class OperationsService {
             )
         : this.emptyOperationMeterSnapshot();
 
+    if (action === 'APPROVE' && entities && useHistoricalAssetMeterPath) {
+      await this.validateHistoricalAssetMeterPlacement(
+        this.prisma as any,
+        entities.asset?.id,
+        operation.occurredAt,
+        operationDto.odometer,
+      );
+    }
+
     const result = await this.prisma.$transaction(async (tx) => {
       const claimed = await (tx as any).operationApproval.updateMany({
         where: { id: approval.id, approverUserId: currentUser.id, status: 'PENDING' },
@@ -1657,7 +1668,6 @@ async getMobileMyOperations(request?: RequestLike) {
     where: {
       companyId: currentUser.companyId,
       requestedByUserId: currentUser.id,
-      status: { not: 'CANCELLED' },
       occurredAt: {
         gte: windowFrom,
         lte: windowTo,
@@ -1748,7 +1758,6 @@ async findAll(request?: RequestLike) {
   const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
-      status: { not: 'CANCELLED' },
     },
 
     include: this.buildOperationListInclude(),
@@ -3079,7 +3088,6 @@ async getWarehouseOperationsReport(
       id: true,
       operationNo: true,
       type: true,
-      status: true,
       quantity: true,
       occurredAt: true,
       externalStationName: true,
@@ -3186,7 +3194,6 @@ async getWarehouseOperationsReport(
       operationNo: operation.operationNo,
       occurredAt: operation.occurredAt,
       type: operation.type,
-      status: operation.status,
       source,
       destination,
       quantity: Number(operation.quantity || 0),
@@ -3263,34 +3270,13 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     throw new ForbiddenException('You cannot view this project report.');
   }
 
-  const requestedStatus = String(filters.status || 'COMPLETED')
-    .trim()
-    .toUpperCase();
-
-  const allowedReportStatuses = [
-    'PENDING',
-    'PARTIALLY_APPROVED',
-    'APPROVED',
-    'REJECTED',
-    'COMPLETED',
-    'CANCELLED',
-    'ALL',
-  ];
-
-  if (!allowedReportStatuses.includes(requestedStatus)) {
-    throw new BadRequestException('status is invalid');
-  }
-
-  const summaryStatusCondition =
-    requestedStatus === 'ALL' ? {} : { status: requestedStatus };
-
   const fuelerCode = String(filters.fuelerEmployeeId || '').trim();
   const operations = await (this.prisma as any).operation.findMany({
     where: {
       companyId: currentUser.companyId,
       ...(filters.assetId ? { assetId: filters.assetId } : {}),
       ...(filters.type ? { type: filters.type } : {}),
-      ...summaryStatusCondition,
+      ...(filters.status ? { status: filters.status } : {}),
       ...(Object.keys(occurredAt).length ? { occurredAt } : {}),
       ...(scopedProjectIds.length
         ? {
@@ -3597,6 +3583,15 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
           ? this.emptyOperationMeterSnapshot()
           : this.buildOperationMeterSnapshot(type, dto, entities)
         : this.emptyOperationMeterSnapshot();
+
+    if (status === 'COMPLETED' && useHistoricalAssetMeterPath) {
+      await this.validateHistoricalAssetMeterPlacement(
+        this.prisma as any,
+        entities.asset?.id,
+        occurredAt,
+        dto.odometer,
+      );
+    }
 
     let result: any;
     let lastError: any;
@@ -5788,6 +5783,22 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     const movementQuantity = Number(quantity || 0);
 
+    const historicalMovement =
+      await this.operationCorrectionsService
+        .createHistoricalOperationStockMovementIfNeeded(tx, {
+          station,
+          operation,
+          movementType,
+          quantity: movementQuantity,
+          reason,
+          currentUser: currentUser as any,
+        });
+
+    if (historicalMovement) {
+      return;
+    }
+
+
     /*
       Stock protection is enforced after the atomic database increment/decrement
       inside the same transaction. If the new source balance is below the
@@ -5862,6 +5873,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         referenceType: 'Operation',
         referenceId: operation.id,
         reason,
+        movementAt: operation.occurredAt || new Date(),
         createdByUserId: currentUser.id,
       },
     });
@@ -5916,6 +5928,162 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       : Number.NEGATIVE_INFINITY;
 
     return occurredAt.getTime() < Math.max(latestOperationTime, latestResetTime);
+  }
+
+  private async validateHistoricalAssetMeterPlacement(
+    db: any,
+    assetId: string | undefined,
+    occurredAtInput: Date | string | null | undefined,
+    odometerInput: number | null | undefined,
+  ) {
+    if (!assetId || odometerInput === null || odometerInput === undefined) {
+      return;
+    }
+
+    const occurredAt = new Date(occurredAtInput as any);
+    const candidateReading = Number(odometerInput);
+
+    if (
+      Number.isNaN(occurredAt.getTime()) ||
+      !Number.isFinite(candidateReading) ||
+      candidateReading < 0
+    ) {
+      throw new BadRequestException(
+        'Historical operation odometer/date is invalid.',
+      );
+    }
+
+    const [operations, resets] = await Promise.all([
+      db.operation.findMany({
+        where: {
+          assetId,
+          status: 'COMPLETED',
+          odometer: { not: null },
+        },
+        orderBy: [
+          { occurredAt: 'asc' },
+          { createdAt: 'asc' },
+          { id: 'asc' },
+        ],
+        select: {
+          id: true,
+          odometer: true,
+          occurredAt: true,
+          createdAt: true,
+          operationNo: true,
+        },
+      }),
+      db.assetOdometerReset.findMany({
+        where: { assetId },
+        orderBy: [
+          { effectiveAt: 'asc' },
+          { createdAt: 'asc' },
+          { id: 'asc' },
+        ],
+        select: {
+          id: true,
+          oldOdometer: true,
+          newOdometer: true,
+          effectiveAt: true,
+          createdAt: true,
+        },
+      }),
+    ]);
+
+    const candidate = {
+      kind: 'CANDIDATE' as const,
+      at: occurredAt,
+      createdAt: new Date('9999-12-31T23:59:59.999Z'),
+      id: '__HISTORICAL_CANDIDATE__',
+      reading: candidateReading,
+    };
+
+    const events: any[] = [
+      ...operations.map((operation: any) => ({
+        kind: 'OPERATION' as const,
+        at: operation.occurredAt,
+        createdAt: operation.createdAt,
+        id: operation.id,
+        reading: Number(operation.odometer),
+        operationNo: operation.operationNo || operation.id,
+      })),
+      ...resets.map((reset: any) => ({
+        kind: 'RESET' as const,
+        at: reset.effectiveAt,
+        createdAt: reset.createdAt,
+        id: reset.id,
+        oldReading: Number(reset.oldOdometer),
+        newReading: Number(reset.newOdometer),
+      })),
+      candidate,
+    ].sort((a, b) => {
+      const effectiveDiff =
+        new Date(a.at).getTime() - new Date(b.at).getTime();
+      if (effectiveDiff !== 0) return effectiveDiff;
+
+      const createdDiff =
+        new Date(a.createdAt).getTime() -
+        new Date(b.createdAt).getTime();
+      if (createdDiff !== 0) return createdDiff;
+
+      if (a.kind === 'RESET' && b.kind !== 'RESET') return -1;
+      if (a.kind !== 'RESET' && b.kind === 'RESET') return 1;
+      return String(a.id).localeCompare(String(b.id));
+    });
+
+    let cycleNumber = 1;
+    let previousReading: number | null = null;
+    let previousLabel = 'start of meter history';
+
+    for (const event of events) {
+      if (event.kind === 'RESET') {
+        if (
+          previousReading !== null &&
+          Number(event.oldReading) < previousReading
+        ) {
+          if (event.id === '__HISTORICAL_CANDIDATE__') {
+            throw new BadRequestException(
+              'Historical odometer sequence is invalid.',
+            );
+          }
+
+          throw new BadRequestException(
+            `Historical odometer ${candidateReading} is too high for its position: the following reset old reading is ${event.oldReading} in meter cycle ${cycleNumber}.`,
+          );
+        }
+
+        cycleNumber += 1;
+        previousReading = Number(event.newReading);
+        previousLabel = `reset ${event.id}`;
+        continue;
+      }
+
+      const reading = Number(event.reading);
+
+      if (!Number.isFinite(reading) || reading < 0) {
+        throw new BadRequestException(
+          'Historical meter history contains an invalid odometer reading.',
+        );
+      }
+
+      if (previousReading !== null && reading < previousReading) {
+        if (event.kind === 'CANDIDATE') {
+          throw new BadRequestException(
+            `Historical odometer ${candidateReading} cannot be lower than the previous reading ${previousReading} (${previousLabel}) in meter cycle ${cycleNumber}.`,
+          );
+        }
+
+        throw new BadRequestException(
+          `Historical odometer ${candidateReading} cannot be higher than the next reading ${reading} (${event.operationNo || event.id}) in meter cycle ${cycleNumber}.`,
+        );
+      }
+
+      previousReading = reading;
+      previousLabel =
+        event.kind === 'CANDIDATE'
+          ? 'new historical operation'
+          : `operation ${event.operationNo || event.id}`;
+    }
   }
 
   private async rebuildAssetLifetimeHistoryForBackdatedOperation(

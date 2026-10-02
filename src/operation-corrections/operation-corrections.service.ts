@@ -2487,6 +2487,11 @@ export class OperationCorrectionsService {
       companyId: string;
       startMovementAt: Date;
       initialBalance: number;
+      startReference?: {
+        id: string;
+        movementAt: Date | string;
+        createdAt: Date | string;
+      } | null;
     },
   ) {
     if (!Number.isFinite(input.initialBalance)) {
@@ -2495,12 +2500,12 @@ export class OperationCorrectionsService {
       );
     }
 
-    const rows = await db.stationStockMovement.findMany({
+    const candidateRows = await db.stationStockMovement.findMany({
       where: {
         stationId: input.stationId,
         companyId: input.companyId,
         movementAt: {
-          gt: input.startMovementAt,
+          gte: input.startMovementAt,
         },
       },
       orderBy: [
@@ -2509,6 +2514,16 @@ export class OperationCorrectionsService {
         { id: 'asc' },
       ],
     });
+
+    const rows = input.startReference
+      ? candidateRows.filter((row: any) =>
+          this.isLedgerRowAfter(row, input.startReference),
+        )
+      : candidateRows.filter(
+          (row: any) =>
+            new Date(row.movementAt).getTime() >
+            input.startMovementAt.getTime(),
+        );
 
     const legacyRequestIds = Array.from(
       new Set(
@@ -2594,43 +2609,25 @@ export class OperationCorrectionsService {
           );
         }
 
-        /*
-          Legacy request-based Zero Balance is NOT a hard anchor.
-          Preserve the request's original snapshot/intention and rebuild the
-          movement quantity from that snapshot. Historical deltas therefore
-          pass through this movement.
-        */
         newQuantity = -legacyRequestedActualStock;
         newBalanceBefore = runningBalance;
         newBalanceAfter = newBalanceBefore + newQuantity;
       } else if (isDirectZeroBalance) {
         classification = 'DIRECT_ZERO_BALANCE_HARD_ANCHOR';
-
-        /*
-          A direct Zero Balance is a real-time physical reconciliation.
-          It is authoritative: regardless of the incoming historical delta,
-          the balance after this point is zero.
-        */
         newBalanceBefore = runningBalance;
         newBalanceAfter = 0;
         newQuantity = -newBalanceBefore;
       } else if (isPhysicalAdjustment) {
         classification = 'PHYSICAL_ADJUSTMENT_HARD_ANCHOR';
-
-        /*
-          Physical Adjustment records an authoritative actual stock value.
-          Preserve its historical balanceAfter and recalculate only the
-          adjustment quantity needed to reach that actual stock.
-        */
         newBalanceBefore = runningBalance;
         newBalanceAfter = oldBalanceAfter;
         newQuantity = newBalanceAfter - newBalanceBefore;
       }
 
       const changed =
-        newQuantity !== oldQuantity ||
-        newBalanceBefore !== oldBalanceBefore ||
-        newBalanceAfter !== oldBalanceAfter;
+        Math.abs(newQuantity - oldQuantity) > 0.000001 ||
+        Math.abs(newBalanceBefore - oldBalanceBefore) > 0.000001 ||
+        Math.abs(newBalanceAfter - oldBalanceAfter) > 0.000001;
 
       const previewRow = {
         id: row.id,
@@ -2672,6 +2669,343 @@ export class OperationCorrectionsService {
       rows: previewRows,
       finalBalance: runningBalance,
       hardAnchor,
+    };
+  }
+
+  private async applyHistoricalStockReplay(
+    tx: any,
+    input: {
+      stationId: string;
+      companyId: string;
+      startReference: {
+        id: string;
+        movementAt: Date | string;
+        createdAt: Date | string;
+      };
+      initialBalance: number;
+    },
+  ) {
+    const station = await (tx as any).station.findFirst({
+      where: {
+        id: input.stationId,
+        companyId: input.companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        currentStock: true,
+      },
+    });
+
+    if (!station) {
+      throw new NotFoundException(
+        'Station was not found for historical stock reconciliation.',
+      );
+    }
+
+    const currentStockBefore = Number(station.currentStock || 0);
+
+    const timeline = await this.buildHistoricalStockTimelinePreview(tx, {
+      stationId: input.stationId,
+      companyId: input.companyId,
+      startMovementAt: new Date(input.startReference.movementAt),
+      startReference: input.startReference,
+      initialBalance: Number(input.initialBalance),
+    });
+
+    const changedRows = timeline.rows.filter((row: any) => row.changed);
+
+    for (const row of changedRows) {
+      const updated = await (tx as any).stationStockMovement.updateMany({
+        where: {
+          id: row.id,
+          stationId: input.stationId,
+          companyId: input.companyId,
+          quantity: row.oldQuantity,
+          balanceBefore: row.oldBalanceBefore,
+          balanceAfter: row.oldBalanceAfter,
+        },
+        data: {
+          quantity: row.newQuantity,
+          balanceBefore: row.newBalanceBefore,
+          balanceAfter: row.newBalanceAfter,
+        },
+      });
+
+      if (updated.count !== 1) {
+        throw new BadRequestException(
+          `Stock movement ${row.id} changed while historical reconciliation was running. No changes were committed.`,
+        );
+      }
+    }
+
+    const currentStockAfter = timeline.hardAnchor
+      ? currentStockBefore
+      : Number(timeline.finalBalance);
+
+    if (
+      !timeline.hardAnchor &&
+      Math.abs(currentStockAfter - currentStockBefore) > 0.000001
+    ) {
+      const updatedStation = await (tx as any).station.updateMany({
+        where: {
+          id: input.stationId,
+          companyId: input.companyId,
+          currentStock: currentStockBefore,
+        },
+        data: {
+          currentStock: currentStockAfter,
+        },
+      });
+
+      if (updatedStation.count !== 1) {
+        throw new BadRequestException(
+          'Station current stock changed while historical reconciliation was running. No changes were committed.',
+        );
+      }
+    }
+
+    return {
+      stationId: input.stationId,
+      currentStockBefore,
+      currentStockAfter,
+      currentStockDelta: currentStockAfter - currentStockBefore,
+      affectedRows: timeline.rows.length,
+      changedRows: changedRows.length,
+      hardAnchor: timeline.hardAnchor,
+    };
+  }
+
+  private async getHistoricalBalanceBeforeReference(
+    tx: any,
+    input: {
+      stationId: string;
+      companyId: string;
+      reference: {
+        id: string;
+        movementAt: Date | string;
+        createdAt: Date | string;
+      };
+    },
+  ) {
+    const candidates = await (tx as any).stationStockMovement.findMany({
+      where: {
+        stationId: input.stationId,
+        companyId: input.companyId,
+        movementAt: {
+          lte: new Date(input.reference.movementAt),
+        },
+      },
+      orderBy: [
+        { movementAt: 'desc' },
+        { createdAt: 'desc' },
+        { id: 'desc' },
+      ],
+      take: 50,
+    });
+
+    const previous = candidates.find(
+      (row: any) =>
+        row.id !== input.reference.id &&
+        this.isLedgerRowAfter(input.reference, row),
+    );
+
+    if (previous) {
+      return Number(previous.balanceAfter || 0);
+    }
+
+    const next = await (tx as any).stationStockMovement.findFirst({
+      where: {
+        stationId: input.stationId,
+        companyId: input.companyId,
+        movementAt: {
+          gte: new Date(input.reference.movementAt),
+        },
+        id: { not: input.reference.id },
+      },
+      orderBy: [
+        { movementAt: 'asc' },
+        { createdAt: 'asc' },
+        { id: 'asc' },
+      ],
+    });
+
+    if (next) {
+      return Number(next.balanceBefore || 0);
+    }
+
+    const station = await (tx as any).station.findFirst({
+      where: {
+        id: input.stationId,
+        companyId: input.companyId,
+        deletedAt: null,
+      },
+      select: { currentStock: true },
+    });
+
+    if (!station) {
+      throw new NotFoundException(
+        'Station was not found for historical stock reconciliation.',
+      );
+    }
+
+    return Number(station.currentStock || 0);
+  }
+
+  private async validateHistoricalNegativeStock(
+    tx: any,
+    input: {
+      stationId: string;
+      companyId: string;
+      balanceBefore: number;
+      movementQuantity: number;
+    },
+  ) {
+    if (input.movementQuantity >= 0) return;
+
+    const [station, company] = await Promise.all([
+      (tx as any).station.findFirst({
+        where: {
+          id: input.stationId,
+          companyId: input.companyId,
+          deletedAt: null,
+        },
+        select: {
+          capacity: true,
+        },
+      }),
+      (tx as any).company.findUnique({
+        where: { id: input.companyId },
+        select: { stationNegativeTolerancePercent: true },
+      }),
+    ]);
+
+    if (!station) {
+      throw new NotFoundException(
+        'Station was not found for historical stock validation.',
+      );
+    }
+
+    const configuredPercent = Number(
+      company?.stationNegativeTolerancePercent ?? 2,
+    );
+    const tolerancePercent =
+      Number.isFinite(configuredPercent) &&
+      configuredPercent >= 0 &&
+      configuredPercent <= 5
+        ? configuredPercent
+        : 2;
+
+    const capacity = Number(station.capacity || 0);
+    const minimumAllowedBalance =
+      capacity > 0
+        ? -Math.abs(capacity * (tolerancePercent / 100))
+        : 0;
+    const balanceAfter =
+      Number(input.balanceBefore) + Number(input.movementQuantity);
+
+    if (balanceAfter < minimumAllowedBalance - 0.000001) {
+      throw new BadRequestException(
+        [
+          'Historical operation would exceed the allowed negative station balance.',
+          `Balance before: ${Number(input.balanceBefore).toFixed(2)} L.`,
+          `Movement quantity: ${Number(input.movementQuantity).toFixed(2)} L.`,
+          `Expected balance: ${balanceAfter.toFixed(2)} L.`,
+          `Minimum allowed balance: ${minimumAllowedBalance.toFixed(2)} L.`,
+        ].join(' '),
+      );
+    }
+  }
+
+  public async createHistoricalOperationStockMovementIfNeeded(
+    tx: any,
+    args: {
+      station: any;
+      operation: any;
+      movementType: string;
+      quantity: number;
+      reason: string;
+      currentUser: CurrentUserContext;
+    },
+  ) {
+    const { station, operation, movementType, quantity, reason, currentUser } =
+      args;
+
+    if (!station || !operation?.occurredAt) return null;
+
+    const movementAt = new Date(operation.occurredAt);
+    if (Number.isNaN(movementAt.getTime())) {
+      throw new BadRequestException(
+        'Operation occurredAt is invalid for historical stock reconciliation.',
+      );
+    }
+
+    const laterOrSameMovement = await (tx as any).stationStockMovement.findFirst({
+      where: {
+        stationId: station.id,
+        companyId: currentUser.companyId,
+        movementAt: { gte: movementAt },
+      },
+      orderBy: [
+        { movementAt: 'asc' },
+        { createdAt: 'asc' },
+        { id: 'asc' },
+      ],
+      select: { id: true },
+    });
+
+    if (!laterOrSameMovement) {
+      return null;
+    }
+
+    const syntheticReference = {
+      id: `historical-${operation.id}`,
+      movementAt,
+      createdAt: new Date(),
+    };
+
+    const balanceBefore = await this.getHistoricalBalanceBeforeReference(tx, {
+      stationId: station.id,
+      companyId: currentUser.companyId,
+      reference: syntheticReference,
+    });
+
+    const movementQuantity = Number(quantity || 0);
+
+    await this.validateHistoricalNegativeStock(tx, {
+      stationId: station.id,
+      companyId: currentUser.companyId,
+      balanceBefore,
+      movementQuantity,
+    });
+
+    const movement = await (tx as any).stationStockMovement.create({
+      data: {
+        stationId: station.id,
+        companyId: currentUser.companyId,
+        movementType,
+        quantity: movementQuantity,
+        balanceBefore,
+        balanceAfter: balanceBefore + movementQuantity,
+        referenceType: 'Operation',
+        referenceId: operation.id,
+        reason,
+        movementAt,
+        createdByUserId: currentUser.id,
+      },
+    });
+
+    const replay = await this.applyHistoricalStockReplay(tx, {
+      stationId: station.id,
+      companyId: currentUser.companyId,
+      startReference: movement,
+      initialBalance: Number(movement.balanceAfter),
+    });
+
+    return {
+      historical: true,
+      movement,
+      replay,
     };
   }
 
@@ -2800,171 +3134,29 @@ export class OperationCorrectionsService {
       );
     }
 
-    const anchorCandidates = await (tx as any).stationStockMovement.findMany({
-      where: {
-        stationId: originalMovement.stationId,
-        companyId: originalMovement.companyId,
-        movementType: {
-          in: ['ZERO_BALANCE', 'PHYSICAL_ADJUSTMENT'],
-        },
-        movementAt: {
-          gte: originalMovement.movementAt,
-        },
-      },
-      orderBy: [
-        { movementAt: 'asc' },
-        { createdAt: 'asc' },
-        { id: 'asc' },
-      ],
+    const replay = await this.applyHistoricalStockReplay(tx, {
+      stationId: originalMovement.stationId,
+      companyId: originalMovement.companyId,
+      startReference: originalMovement,
+      initialBalance: Number(originalMovement.balanceBefore || 0),
     });
 
-    const anchor =
-      anchorCandidates.find((candidate: any) =>
-        this.isLedgerRowAfter(candidate, originalMovement),
-      ) || null;
+    const deleted = await (tx as any).stationStockMovement.deleteMany({
+      where: {
+        id: originalMovement.id,
+        stationId: originalMovement.stationId,
+        companyId: originalMovement.companyId,
+        quantity: Number(originalMovement.quantity || 0),
+        balanceBefore: Number(originalMovement.balanceBefore || 0),
+        balanceAfter: Number(originalMovement.balanceAfter || 0),
+      },
+    });
 
-    if (anchor) {
-      const segmentRows = await (tx as any).stationStockMovement.findMany({
-        where: {
-          stationId: originalMovement.stationId,
-          companyId: originalMovement.companyId,
-          movementAt: {
-            gte: originalMovement.movementAt,
-            lte: anchor.movementAt,
-          },
-        },
-        orderBy: [
-          { movementAt: 'asc' },
-          { createdAt: 'asc' },
-          { id: 'asc' },
-        ],
-      });
-
-      const rowsBetween = segmentRows.filter(
-        (row: any) =>
-          row.id !== originalMovement.id &&
-          this.isLedgerRowAfter(row, originalMovement) &&
-          this.isLedgerRowAfter(anchor, row),
+    if (deleted.count !== 1) {
+      throw new BadRequestException(
+        'Original stock movement changed while cancellation reconciliation was running. No changes were committed.',
       );
-
-      for (const row of rowsBetween) {
-        await (tx as any).stationStockMovement.update({
-          where: { id: row.id },
-          data: {
-            balanceBefore: { increment: reversalDelta },
-            balanceAfter: { increment: reversalDelta },
-          },
-        });
-      }
-
-      const oldAnchorBalanceBefore = Number(anchor.balanceBefore || 0);
-      const oldAnchorBalanceAfter = Number(anchor.balanceAfter || 0);
-      const oldAnchorQuantity = Number(anchor.quantity || 0);
-      const newAnchorBalanceBefore =
-        oldAnchorBalanceBefore + reversalDelta;
-      const newAnchorQuantity =
-        oldAnchorBalanceAfter - newAnchorBalanceBefore;
-
-      await (tx as any).stationStockMovement.update({
-        where: { id: anchor.id },
-        data: {
-          balanceBefore: newAnchorBalanceBefore,
-          quantity: newAnchorQuantity,
-          balanceAfter: oldAnchorBalanceAfter,
-        },
-      });
-
-      /*
-        Do not rewrite StationActionRequest.requestedActualStock here.
-        That field is the original snapshot/intention captured when the user
-        requested Zero Balance. Historical reconciliation may recalculate the
-        resulting ledger anchor, but the original request snapshot must remain
-        unchanged for audit.
-      */
-
-      await (tx as any).stationStockMovement.delete({
-        where: { id: originalMovement.id },
-      });
-
-      return {
-        stationId: originalMovement.stationId,
-        originalMovement: {
-          id: originalMovement.id,
-          movementType: originalMovement.movementType,
-          quantity: Number(originalMovement.quantity || 0),
-          balanceBefore: Number(originalMovement.balanceBefore || 0),
-          balanceAfter: Number(originalMovement.balanceAfter || 0),
-          movementAt: originalMovement.movementAt,
-          referenceType: originalMovement.referenceType || null,
-          referenceId: originalMovement.referenceId || null,
-        },
-        reversalDelta,
-        currentStockChanged: false,
-        affectedRowsBeforeAnchor: rowsBetween.length,
-        anchor: {
-          id: anchor.id,
-          movementType: anchor.movementType,
-          referenceType: anchor.referenceType || null,
-          referenceId: anchor.referenceId || null,
-          movementAt: anchor.movementAt,
-          oldBalanceBefore: oldAnchorBalanceBefore,
-          newBalanceBefore: newAnchorBalanceBefore,
-          oldQuantity: oldAnchorQuantity,
-          newQuantity: newAnchorQuantity,
-          balanceAfter: oldAnchorBalanceAfter,
-        },
-      };
     }
-
-    await (tx as any).station.update({
-      where: { id: originalMovement.stationId },
-      data: {
-        currentStock: { increment: 0 },
-      },
-      select: { id: true },
-    });
-
-    const laterRows = await (tx as any).stationStockMovement.findMany({
-      where: {
-        stationId: originalMovement.stationId,
-        companyId: originalMovement.companyId,
-        movementAt: {
-          gte: originalMovement.movementAt,
-        },
-      },
-      orderBy: [
-        { movementAt: 'asc' },
-        { createdAt: 'asc' },
-        { id: 'asc' },
-      ],
-    });
-
-    const rowsAfter = laterRows.filter(
-      (row: any) =>
-        row.id !== originalMovement.id &&
-        this.isLedgerRowAfter(row, originalMovement),
-    );
-
-    for (const row of rowsAfter) {
-      await (tx as any).stationStockMovement.update({
-        where: { id: row.id },
-        data: {
-          balanceBefore: { increment: reversalDelta },
-          balanceAfter: { increment: reversalDelta },
-        },
-      });
-    }
-
-    await (tx as any).station.update({
-      where: { id: originalMovement.stationId },
-      data: {
-        currentStock: { increment: reversalDelta },
-      },
-    });
-
-    await (tx as any).stationStockMovement.delete({
-      where: { id: originalMovement.id },
-    });
 
     return {
       stationId: originalMovement.stationId,
@@ -2979,9 +3171,14 @@ export class OperationCorrectionsService {
         referenceId: originalMovement.referenceId || null,
       },
       reversalDelta,
-      currentStockChanged: true,
-      affectedRowsAfterOperation: rowsAfter.length,
-      anchor: null,
+      currentStockChanged:
+        Math.abs(Number(replay.currentStockDelta || 0)) > 0.000001,
+      affectedRowsAfterOperation: replay.affectedRows,
+      changedRowsAfterOperation: replay.changedRows,
+      currentStockBefore: replay.currentStockBefore,
+      currentStockAfter: replay.currentStockAfter,
+      currentStockDelta: replay.currentStockDelta,
+      anchor: replay.hardAnchor,
     };
   }
 
@@ -3131,19 +3328,39 @@ export class OperationCorrectionsService {
     }
   }
 
-  private async applySourceStationCorrection(tx: any, operation: any, newStationId: string, currentUser: CurrentUserContext) {
-    if (!['DIRECT_REFUEL', 'INTERNAL_TRANSFER', 'EXTERNAL_TRANSFER'].includes(operation.type)) {
-      throw new BadRequestException('Source station correction is not allowed for this operation type.');
+  private async applySourceStationCorrection(
+    tx: any,
+    operation: any,
+    newStationId: string,
+    currentUser: CurrentUserContext,
+  ) {
+    if (
+      !['DIRECT_REFUEL', 'INTERNAL_TRANSFER', 'EXTERNAL_TRANSFER'].includes(
+        operation.type,
+      )
+    ) {
+      throw new BadRequestException(
+        'Source station correction is not allowed for this operation type.',
+      );
     }
 
-    // The operation was loaded with its source station before the transaction.
-    // Reuse it instead of spending another transaction query on the same row.
     const oldStation = operation.sourceStation || null;
-    const newStation = await tx.station.findFirst({ where: { id: newStationId, companyId: operation.companyId, deletedAt: null } });
+    const newStation = await tx.station.findFirst({
+      where: {
+        id: newStationId,
+        companyId: operation.companyId,
+        deletedAt: null,
+      },
+    });
 
-    if (!newStation) throw new NotFoundException('New source station was not found.');
+    if (!newStation) {
+      throw new NotFoundException('New source station was not found.');
+    }
 
-    const targetProjectId = this.getHistoricalProjectForCorrection(operation, 'SOURCE_STATION_ID');
+    const targetProjectId = this.getHistoricalProjectForCorrection(
+      operation,
+      'SOURCE_STATION_ID',
+    );
     const newStationProjectId = await this.getStationProjectAtOperationTime(
       tx,
       newStation,
@@ -3158,7 +3375,9 @@ export class OperationCorrectionsService {
 
     await this.validateCorrectedProjectRules(tx, operation, {
       sourceProjectId: targetProjectId,
-      destinationProjectId: operation.destinationProjectIdAtOperation || operation.projectIdAtOperation,
+      destinationProjectId:
+        operation.destinationProjectIdAtOperation ||
+        operation.projectIdAtOperation,
       assetProjectId: operation.projectIdAtOperation,
     });
 
@@ -3168,29 +3387,111 @@ export class OperationCorrectionsService {
       newStation,
     );
 
-    const quantity = Math.abs(Number(operation.quantity || 0));
-    const oldInventoryStation = await this.resolveInventoryStation(tx, oldStation);
-    const newInventoryStation = await this.resolveInventoryStation(tx, newStation);
+    const oldInventoryStation = await this.resolveInventoryStation(
+      tx,
+      oldStation,
+    );
+    const newInventoryStation = await this.resolveInventoryStation(
+      tx,
+      newStation,
+    );
 
     if (oldInventoryStation?.id !== newInventoryStation?.id) {
-      if (oldInventoryStation) {
-        await this.createStockMovement(tx, {
-          station: oldInventoryStation,
-          operation,
-          movementType: 'ADJUSTMENT',
-          quantity,
-          reason: 'Operation correction: reverse old source inventory station',
-          currentUser,
-        });
+      if (!oldInventoryStation || !newInventoryStation) {
+        throw new BadRequestException(
+          'Both old and new source inventory stations are required for source-station correction.',
+        );
       }
 
-      await this.createStockMovement(tx, {
-        station: newInventoryStation,
-        operation,
-        movementType: 'ADJUSTMENT',
-        quantity: -quantity,
-        reason: 'Operation correction: apply new source inventory station',
-        currentUser,
+      const stockMovements = await (tx as any).stationStockMovement.findMany({
+        where: {
+          companyId: operation.companyId,
+          referenceType: 'Operation',
+          referenceId: operation.id,
+          stationId: oldInventoryStation.id,
+        },
+        orderBy: [
+          { movementAt: 'asc' },
+          { createdAt: 'asc' },
+          { id: 'asc' },
+        ],
+      });
+
+      const sourceMovement = stockMovements.find(
+        (movement: any) => Number(movement.quantity || 0) < 0,
+      );
+
+      if (!sourceMovement) {
+        throw new BadRequestException(
+          'Historical source stock movement was not found for this operation.',
+        );
+      }
+
+      /*
+        First remove the movement effect from the old source timeline while the
+        movement still acts only as the ordering reference. Then move that same
+        movement row to the new source so its audit identity/timestamp is kept.
+      */
+      await this.applyHistoricalStockReplay(tx, {
+        stationId: oldInventoryStation.id,
+        companyId: operation.companyId,
+        startReference: sourceMovement,
+        initialBalance: Number(sourceMovement.balanceBefore || 0),
+      });
+
+      const newBalanceBefore = await this.getHistoricalBalanceBeforeReference(
+        tx,
+        {
+          stationId: newInventoryStation.id,
+          companyId: operation.companyId,
+          reference: sourceMovement,
+        },
+      );
+
+      const movementQuantity = Number(sourceMovement.quantity || 0);
+
+      await this.validateHistoricalNegativeStock(tx, {
+        stationId: newInventoryStation.id,
+        companyId: operation.companyId,
+        balanceBefore: newBalanceBefore,
+        movementQuantity,
+      });
+
+      const moved = await (tx as any).stationStockMovement.updateMany({
+        where: {
+          id: sourceMovement.id,
+          stationId: oldInventoryStation.id,
+          companyId: operation.companyId,
+          quantity: Number(sourceMovement.quantity || 0),
+          balanceBefore: Number(sourceMovement.balanceBefore || 0),
+          balanceAfter: Number(sourceMovement.balanceAfter || 0),
+        },
+        data: {
+          stationId: newInventoryStation.id,
+          balanceBefore: newBalanceBefore,
+          balanceAfter: newBalanceBefore + movementQuantity,
+          reason: 'Operation correction: corrected source inventory station',
+        },
+      });
+
+      if (moved.count !== 1) {
+        throw new BadRequestException(
+          'Source stock movement changed while source-station correction was running. No changes were committed.',
+        );
+      }
+
+      const movedMovement = {
+        ...sourceMovement,
+        stationId: newInventoryStation.id,
+        balanceBefore: newBalanceBefore,
+        balanceAfter: newBalanceBefore + movementQuantity,
+      };
+
+      await this.applyHistoricalStockReplay(tx, {
+        stationId: newInventoryStation.id,
+        companyId: operation.companyId,
+        startReference: movedMovement,
+        initialBalance: Number(movedMovement.balanceAfter),
       });
     }
 
@@ -3198,7 +3499,6 @@ export class OperationCorrectionsService {
       where: { id: operation.id },
       data: { sourceStationId: newStation.id },
     });
-
   }
 
   private async applyDestinationStationCorrection(tx: any, operation: any, newStationId: string, currentUser: CurrentUserContext) {
@@ -3387,90 +3687,129 @@ export class OperationCorrectionsService {
     });
   }
 
-  private async applyQuantityCorrection(tx: any, operation: any, newQuantity: number, currentUser: CurrentUserContext) {
+  private async applyQuantityCorrection(
+    tx: any,
+    operation: any,
+    newQuantity: number,
+    currentUser: CurrentUserContext,
+  ) {
     if (!newQuantity || Number(newQuantity) <= 0) {
-      throw new BadRequestException('New quantity must be greater than zero.');
+      throw new BadRequestException(
+        'New quantity must be greater than zero.',
+      );
     }
 
     const oldQuantity = Number(operation.quantity || 0);
-    const diff = Number(newQuantity) - oldQuantity;
+    const normalizedNewQuantity = Number(newQuantity);
 
-    if (diff === 0) return;
-
-    if (operation.type === 'DIRECT_REFUEL') {
-      const sourceStation = await this.resolveInventoryStation(
-        tx,
-        operation.sourceStation,
-      );
-      await this.createStockMovement(tx, {
-        station: sourceStation,
-        operation,
-        movementType: 'ADJUSTMENT',
-        quantity: -diff,
-        reason: 'Operation correction: quantity change for Direct Refuel',
-        currentUser,
-      });
+    if (Math.abs(normalizedNewQuantity - oldQuantity) <= 0.000001) {
+      return;
     }
 
-    if (operation.type === 'INTERNAL_TRANSFER' || operation.type === 'EXTERNAL_TRANSFER') {
-      const sourceStation = await this.resolveInventoryStation(
-        tx,
-        operation.sourceStation,
-      );
-      const destinationStation = await this.resolveInventoryStation(
-        tx,
-        operation.destinationStation,
-      );
-
-      await this.createStockMovement(tx, {
-        station: sourceStation,
-        operation,
-        movementType: 'ADJUSTMENT',
-        quantity: -diff,
-        reason: 'Operation correction: quantity change for transfer source',
-        currentUser,
+    if (
+      [
+        'DIRECT_REFUEL',
+        'INTERNAL_TRANSFER',
+        'EXTERNAL_TRANSFER',
+        'EXTERNAL_SUPPLY',
+      ].includes(operation.type)
+    ) {
+      const stockMovements = await (tx as any).stationStockMovement.findMany({
+        where: {
+          companyId: operation.companyId,
+          referenceType: 'Operation',
+          referenceId: operation.id,
+        },
+        orderBy: [
+          { movementAt: 'asc' },
+          { createdAt: 'asc' },
+          { id: 'asc' },
+        ],
       });
 
-      await this.createStockMovement(tx, {
-        station: destinationStation,
-        operation,
-        movementType: 'ADJUSTMENT',
-        quantity: diff,
-        reason: 'Operation correction: quantity change for transfer destination',
-        currentUser,
-      });
+      const expectedCount =
+        operation.type === 'DIRECT_REFUEL' ||
+        operation.type === 'EXTERNAL_SUPPLY'
+          ? 1
+          : 2;
+
+      if (stockMovements.length !== expectedCount) {
+        throw new BadRequestException(
+          `Quantity correction expected ${expectedCount} historical stock movement(s) but found ${stockMovements.length}. No changes were committed.`,
+        );
+      }
+
+      for (const movement of stockMovements) {
+        const oldMovementQuantity = Number(movement.quantity || 0);
+        const sign = oldMovementQuantity < 0 ? -1 : 1;
+        const newMovementQuantity =
+          sign * Math.abs(normalizedNewQuantity);
+        const balanceBefore = Number(movement.balanceBefore || 0);
+
+        await this.validateHistoricalNegativeStock(tx, {
+          stationId: movement.stationId,
+          companyId: operation.companyId,
+          balanceBefore,
+          movementQuantity: newMovementQuantity,
+        });
+
+        const updated = await (tx as any).stationStockMovement.updateMany({
+          where: {
+            id: movement.id,
+            stationId: movement.stationId,
+            companyId: operation.companyId,
+            quantity: oldMovementQuantity,
+            balanceBefore,
+            balanceAfter: Number(movement.balanceAfter || 0),
+          },
+          data: {
+            quantity: newMovementQuantity,
+            balanceAfter: balanceBefore + newMovementQuantity,
+            reason: 'Operation correction: historical quantity corrected',
+          },
+        });
+
+        if (updated.count !== 1) {
+          throw new BadRequestException(
+            `Stock movement ${movement.id} changed while quantity correction was running. No changes were committed.`,
+          );
+        }
+
+        const correctedMovement = {
+          ...movement,
+          quantity: newMovementQuantity,
+          balanceAfter: balanceBefore + newMovementQuantity,
+        };
+
+        await this.applyHistoricalStockReplay(tx, {
+          stationId: movement.stationId,
+          companyId: operation.companyId,
+          startReference: correctedMovement,
+          initialBalance: Number(correctedMovement.balanceAfter),
+        });
+      }
     }
 
-    if (operation.type === 'EXTERNAL_SUPPLY') {
-      const destinationStation = await this.resolveInventoryStation(
-        tx,
-        operation.destinationStation,
-      );
+    const pricePerLiter = Number(
+      operation.pricePerLiterAtOperation || 0,
+    );
+    const nextTotalCost =
+      pricePerLiter > 0
+        ? normalizedNewQuantity * pricePerLiter
+        : operation.totalCostAtOperation;
 
-      await this.createStockMovement(tx, {
-        station: destinationStation,
-        operation,
-        movementType: 'ADJUSTMENT',
-        quantity: diff,
-        reason: 'Operation correction: quantity change for External Supply',
-        currentUser,
-      });
-    }
-
-    const pricePerLiter = Number(operation.pricePerLiterAtOperation || 0);
-    const nextTotalCost = pricePerLiter > 0 ? Number(newQuantity) * pricePerLiter : operation.totalCostAtOperation;
     const grossPricePerLiter = Number(
       operation.grossPricePerLiterAtOperation || 0,
     );
     const nextGrossTotalCost =
       grossPricePerLiter > 0
-        ? Number(newQuantity) * grossPricePerLiter
+        ? normalizedNewQuantity * grossPricePerLiter
         : operation.grossTotalCostAtOperation;
 
     await tx.operation.update({
       where: { id: operation.id },
       data: {
-        quantity: Number(newQuantity),
+        quantity: normalizedNewQuantity,
         totalCostAtOperation: nextTotalCost,
         grossTotalCostAtOperation: nextGrossTotalCost,
       },
