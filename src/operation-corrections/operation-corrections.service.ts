@@ -4347,9 +4347,13 @@ export class OperationCorrectionsService {
   private async resolveCurrentUser(request?: RequestLike): Promise<CurrentUserContext> {
     const requestUser = request?.user as any;
 
-    const userId =
-      requestUser?.id ||
-      this.getHeader(request, 'x-user-id');
+    const userId = String(
+      requestUser?.userId ||
+        requestUser?.id ||
+        requestUser?.sub ||
+        this.getHeader(request, 'x-user-id') ||
+        '',
+    ).trim();
 
     if (!userId) {
       throw new UnauthorizedException('Current user was not found.');
