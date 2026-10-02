@@ -556,9 +556,12 @@ export class OperationCorrectionsService {
 
     const storedReconciliation = storedReconciliations[0];
     const originalMovement = storedReconciliation?.originalMovement;
+    const reconciledStationId = String(
+      storedReconciliation?.stationId || originalMovement?.stationId || '',
+    ).trim();
 
     if (
-      !originalMovement?.stationId ||
+      !reconciledStationId ||
       !originalMovement?.movementAt ||
       originalMovement?.balanceBefore === null ||
       originalMovement?.balanceBefore === undefined
@@ -570,7 +573,7 @@ export class OperationCorrectionsService {
 
     const station = await (this.prisma as any).station.findFirst({
       where: {
-        id: originalMovement.stationId,
+        id: reconciledStationId,
         companyId: currentUser.companyId,
         deletedAt: null,
       },
@@ -662,7 +665,7 @@ export class OperationCorrectionsService {
         cancelledAt: cancellationMetadata?.cancelledAt || null,
         originalMovement: {
           id: originalMovement.id || null,
-          stationId: originalMovement.stationId,
+          stationId: reconciledStationId,
           movementType: originalMovement.movementType || null,
           quantity: originalQuantity,
           balanceBefore: Number(originalMovement.balanceBefore),
