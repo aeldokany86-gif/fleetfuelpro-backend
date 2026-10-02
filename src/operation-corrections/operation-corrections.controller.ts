@@ -63,6 +63,22 @@ export class OperationCorrectionsController {
     return this.service.findPending(req);
   }
 
+
+  @Get('stock-reconciliation-preview')
+  getStockReconciliationPreview(
+    @Req() req: any,
+    @Query('operationNo') operationNo?: string,
+    @Query('mode') mode?: string,
+  ) {
+    return this.service.getStockReconciliationPreview(
+      {
+        operationNo,
+        mode,
+      },
+      req,
+    );
+  }
+
   @Get(':operationId/correction-context')
   getCorrectionContext(
     @Param('operationId') operationId: string,

@@ -453,6 +453,253 @@ export class OperationCorrectionsService {
     };
   }
 
+
+  async getStockReconciliationPreview(
+    filters: {
+      operationNo?: string;
+      mode?: string;
+    },
+    request?: RequestLike,
+  ) {
+    const currentUser = await this.resolveCurrentUser(request);
+
+    if (
+      !['Manager', 'Admin', 'TopManagement', 'PlatformAdmin'].includes(
+        currentUser.role,
+      )
+    ) {
+      throw new ForbiddenException(
+        'You do not have permission to preview stock reconciliation.',
+      );
+    }
+
+    const operationNo = String(filters.operationNo || '').trim();
+    const mode = String(
+      filters.mode || 'EXISTING_CANCELLED_OPERATION',
+    )
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '_');
+
+    if (!operationNo) {
+      throw new BadRequestException('Operation number is required.');
+    }
+
+    if (mode !== 'EXISTING_CANCELLED_OPERATION') {
+      throw new BadRequestException(
+        `Unsupported stock reconciliation preview mode: ${filters.mode}`,
+      );
+    }
+
+    const operation = await (this.prisma as any).operation.findFirst({
+      where: {
+        companyId: currentUser.companyId,
+        operationNo,
+      },
+      include: {
+        sourceStation: {
+          include: { parentStation: true },
+        },
+        destinationStation: {
+          include: { parentStation: true },
+        },
+        asset: true,
+      },
+    });
+
+    if (!operation) {
+      throw new NotFoundException('Operation was not found.');
+    }
+
+    this.assertCanAccessCorrectionContext(currentUser, operation);
+
+    if (operation.status !== 'CANCELLED') {
+      throw new BadRequestException(
+        'This preview mode requires an operation that is already CANCELLED.',
+      );
+    }
+
+    const cancellationCorrection = await (this.prisma as any)
+      .operationCorrection.findFirst({
+        where: {
+          companyId: currentUser.companyId,
+          operationId: operation.id,
+          fieldName: 'CANCELLATION',
+          status: 'APPLIED',
+        },
+        orderBy: [
+          { appliedAt: 'desc' },
+          { createdAt: 'desc' },
+          { id: 'desc' },
+        ],
+      });
+
+    if (!cancellationCorrection) {
+      throw new BadRequestException(
+        'Applied cancellation correction metadata was not found for this operation.',
+      );
+    }
+
+    const cancellationMetadata =
+      (cancellationCorrection.metadata as any)?.cancellation || null;
+    const storedReconciliations = Array.isArray(
+      cancellationMetadata?.stockReconciliation,
+    )
+      ? cancellationMetadata.stockReconciliation
+      : [];
+
+    if (storedReconciliations.length !== 1) {
+      throw new BadRequestException(
+        `Expected exactly one stored stock reconciliation for this cancelled operation but found ${storedReconciliations.length}.`,
+      );
+    }
+
+    const storedReconciliation = storedReconciliations[0];
+    const originalMovement = storedReconciliation?.originalMovement;
+
+    if (
+      !originalMovement?.stationId ||
+      !originalMovement?.movementAt ||
+      originalMovement?.balanceBefore === null ||
+      originalMovement?.balanceBefore === undefined
+    ) {
+      throw new BadRequestException(
+        'Cancellation metadata does not contain enough original stock movement information for a safe preview.',
+      );
+    }
+
+    const station = await (this.prisma as any).station.findFirst({
+      where: {
+        id: originalMovement.stationId,
+        companyId: currentUser.companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        stationId: true,
+        name: true,
+        currentStock: true,
+        projectId: true,
+        structureType: true,
+      },
+    });
+
+    if (!station) {
+      throw new NotFoundException(
+        'The stock-owning station referenced by the cancellation was not found.',
+      );
+    }
+
+    const originalMovementAt = new Date(originalMovement.movementAt);
+
+    if (Number.isNaN(originalMovementAt.getTime())) {
+      throw new BadRequestException(
+        'Stored original stock movement date is invalid.',
+      );
+    }
+
+    const sameTimestampRows = await (this.prisma as any)
+      .stationStockMovement.findMany({
+        where: {
+          stationId: station.id,
+          companyId: currentUser.companyId,
+          movementAt: originalMovementAt,
+        },
+        select: {
+          id: true,
+          movementType: true,
+          referenceType: true,
+          referenceId: true,
+          movementAt: true,
+          createdAt: true,
+        },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      });
+
+    if (sameTimestampRows.length > 0) {
+      throw new BadRequestException(
+        'Another stock movement exists at the exact cancelled-operation timestamp. Preview stopped to avoid ambiguous historical ordering.',
+      );
+    }
+
+    const timeline = await this.buildHistoricalStockTimelinePreview(
+      this.prisma as any,
+      {
+        stationId: station.id,
+        companyId: currentUser.companyId,
+        startMovementAt: originalMovementAt,
+        initialBalance: Number(originalMovement.balanceBefore),
+      },
+    );
+
+    const storedReversalDelta = Number(storedReconciliation?.reversalDelta);
+    const originalQuantity = Number(originalMovement.quantity || 0);
+    const expectedReversalDelta = -originalQuantity;
+
+    if (
+      !Number.isFinite(expectedReversalDelta) ||
+      !Number.isFinite(Number(originalMovement.balanceBefore))
+    ) {
+      throw new BadRequestException(
+        'Stored original stock movement values are invalid.',
+      );
+    }
+
+    return {
+      ok: true,
+      readOnly: true,
+      mode,
+      operation: {
+        id: operation.id,
+        operationNo: operation.operationNo,
+        status: operation.status,
+        type: operation.type,
+        occurredAt: this.getOperationEffectiveTime(operation),
+        quantity: Number(operation.quantity || 0),
+      },
+      cancellation: {
+        correctionId: cancellationCorrection.id,
+        cancelledAt: cancellationMetadata?.cancelledAt || null,
+        originalMovement: {
+          id: originalMovement.id || null,
+          stationId: originalMovement.stationId,
+          movementType: originalMovement.movementType || null,
+          quantity: originalQuantity,
+          balanceBefore: Number(originalMovement.balanceBefore),
+          balanceAfter: Number(originalMovement.balanceAfter || 0),
+          movementAt: originalMovementAt,
+          referenceType: originalMovement.referenceType || null,
+          referenceId: originalMovement.referenceId || null,
+        },
+        storedReversalDelta: Number.isFinite(storedReversalDelta)
+          ? storedReversalDelta
+          : null,
+        expectedReversalDelta,
+      },
+      station: {
+        id: station.id,
+        stationId: station.stationId,
+        name: station.name,
+        structureType: station.structureType,
+        currentStock: Number(station.currentStock || 0),
+      },
+      preview: {
+        initialBalanceAfterRemovingCancelledMovement: Number(
+          originalMovement.balanceBefore,
+        ),
+        affectedRows: timeline.rows.length,
+        hardAnchor: timeline.hardAnchor,
+        expectedCurrentStock: timeline.hardAnchor
+          ? Number(station.currentStock || 0)
+          : timeline.finalBalance,
+        currentStockDelta: timeline.hardAnchor
+          ? 0
+          : timeline.finalBalance - Number(station.currentStock || 0),
+        rows: timeline.rows,
+      },
+    };
+  }
+
   async getCorrectionContext(operationId: string, request?: RequestLike) {
     const currentUser = await this.resolveCurrentUser(request);
     this.validateRequesterCanCreateCorrection(currentUser);
@@ -1833,6 +2080,202 @@ export class OperationCorrectionsService {
       where: { id: operation.id },
       data,
     });
+  }
+
+
+  private async buildHistoricalStockTimelinePreview(
+    db: any,
+    input: {
+      stationId: string;
+      companyId: string;
+      startMovementAt: Date;
+      initialBalance: number;
+    },
+  ) {
+    if (!Number.isFinite(input.initialBalance)) {
+      throw new BadRequestException(
+        'Historical reconciliation initial balance is invalid.',
+      );
+    }
+
+    const rows = await db.stationStockMovement.findMany({
+      where: {
+        stationId: input.stationId,
+        companyId: input.companyId,
+        movementAt: {
+          gt: input.startMovementAt,
+        },
+      },
+      orderBy: [
+        { movementAt: 'asc' },
+        { createdAt: 'asc' },
+        { id: 'asc' },
+      ],
+    });
+
+    const legacyRequestIds = Array.from(
+      new Set(
+        rows
+          .filter(
+            (row: any) =>
+              row.movementType === 'ZERO_BALANCE' &&
+              row.referenceType === 'STATION_ACTION_REQUEST' &&
+              row.referenceId,
+          )
+          .map((row: any) => String(row.referenceId)),
+      ),
+    );
+
+    const legacyRequests = legacyRequestIds.length
+      ? await db.stationActionRequest.findMany({
+          where: {
+            id: { in: legacyRequestIds },
+            companyId: input.companyId,
+            actionType: 'ZERO_BALANCE',
+          },
+          select: {
+            id: true,
+            requestedActualStock: true,
+            movementAt: true,
+            createdAt: true,
+            status: true,
+          },
+        })
+      : [];
+
+    const legacyRequestById = new Map<string, any>(
+      legacyRequests.map((item: any) => [String(item.id), item]),
+    );
+
+    let runningBalance = Number(input.initialBalance);
+    let hardAnchor: any = null;
+    const previewRows: any[] = [];
+
+    for (const row of rows) {
+      const oldQuantity = Number(row.quantity || 0);
+      const oldBalanceBefore = Number(row.balanceBefore || 0);
+      const oldBalanceAfter = Number(row.balanceAfter || 0);
+
+      if (
+        !Number.isFinite(oldQuantity) ||
+        !Number.isFinite(oldBalanceBefore) ||
+        !Number.isFinite(oldBalanceAfter)
+      ) {
+        throw new BadRequestException(
+          `Stock movement ${row.id} contains invalid numeric ledger values.`,
+        );
+      }
+
+      let classification = 'NORMAL_MOVEMENT';
+      let newQuantity = oldQuantity;
+      let newBalanceBefore = runningBalance;
+      let newBalanceAfter = newBalanceBefore + newQuantity;
+      let legacyRequestedActualStock: number | null = null;
+
+      const isLegacyZeroBalance =
+        row.movementType === 'ZERO_BALANCE' &&
+        row.referenceType === 'STATION_ACTION_REQUEST';
+
+      const isDirectZeroBalance =
+        row.movementType === 'ZERO_BALANCE' && !isLegacyZeroBalance;
+
+      const isPhysicalAdjustment =
+        row.movementType === 'PHYSICAL_ADJUSTMENT';
+
+      if (isLegacyZeroBalance) {
+        classification = 'LEGACY_ZERO_BALANCE_PASSTHROUGH';
+
+        const request = row.referenceId
+          ? legacyRequestById.get(String(row.referenceId))
+          : null;
+
+        legacyRequestedActualStock = Number(request?.requestedActualStock);
+
+        if (!Number.isFinite(legacyRequestedActualStock)) {
+          throw new BadRequestException(
+            `Legacy Zero Balance movement ${row.id} has no valid StationActionRequest stock snapshot.`,
+          );
+        }
+
+        /*
+          Legacy request-based Zero Balance is NOT a hard anchor.
+          Preserve the request's original snapshot/intention and rebuild the
+          movement quantity from that snapshot. Historical deltas therefore
+          pass through this movement.
+        */
+        newQuantity = -legacyRequestedActualStock;
+        newBalanceBefore = runningBalance;
+        newBalanceAfter = newBalanceBefore + newQuantity;
+      } else if (isDirectZeroBalance) {
+        classification = 'DIRECT_ZERO_BALANCE_HARD_ANCHOR';
+
+        /*
+          A direct Zero Balance is a real-time physical reconciliation.
+          It is authoritative: regardless of the incoming historical delta,
+          the balance after this point is zero.
+        */
+        newBalanceBefore = runningBalance;
+        newBalanceAfter = 0;
+        newQuantity = -newBalanceBefore;
+      } else if (isPhysicalAdjustment) {
+        classification = 'PHYSICAL_ADJUSTMENT_HARD_ANCHOR';
+
+        /*
+          Physical Adjustment records an authoritative actual stock value.
+          Preserve its historical balanceAfter and recalculate only the
+          adjustment quantity needed to reach that actual stock.
+        */
+        newBalanceBefore = runningBalance;
+        newBalanceAfter = oldBalanceAfter;
+        newQuantity = newBalanceAfter - newBalanceBefore;
+      }
+
+      const changed =
+        newQuantity !== oldQuantity ||
+        newBalanceBefore !== oldBalanceBefore ||
+        newBalanceAfter !== oldBalanceAfter;
+
+      const previewRow = {
+        id: row.id,
+        movementAt: row.movementAt,
+        createdAt: row.createdAt,
+        movementType: row.movementType,
+        referenceType: row.referenceType || null,
+        referenceId: row.referenceId || null,
+        classification,
+        oldQuantity,
+        newQuantity,
+        oldBalanceBefore,
+        newBalanceBefore,
+        oldBalanceAfter,
+        newBalanceAfter,
+        changed,
+        legacyRequestedActualStock,
+      };
+
+      previewRows.push(previewRow);
+      runningBalance = newBalanceAfter;
+
+      if (isDirectZeroBalance || isPhysicalAdjustment) {
+        hardAnchor = {
+          id: row.id,
+          movementAt: row.movementAt,
+          movementType: row.movementType,
+          referenceType: row.referenceType || null,
+          referenceId: row.referenceId || null,
+          classification,
+          oldBalanceAfter,
+          newBalanceAfter,
+        };
+        break;
+      }
+    }
+
+    return {
+      rows: previewRows,
+      finalBalance: runningBalance,
+      hardAnchor,
+    };
   }
 
   private isLedgerRowAfter(candidate: any, reference: any) {
