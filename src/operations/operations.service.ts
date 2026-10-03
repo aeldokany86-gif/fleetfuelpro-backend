@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -281,6 +282,25 @@ export class OperationsService {
     }
 
     this.validateRequiredFieldsByType(type, dto);
+
+    const possibleDuplicate = await this.findPossibleDuplicateOperation(
+      dto,
+      currentUser,
+      type,
+    );
+
+    if (possibleDuplicate) {
+      throw new ConflictException(
+        JSON.stringify({
+          code: 'POSSIBLE_DUPLICATE',
+          message: 'A similar operation was found within the duplicate-check window.',
+          duplicate: possibleDuplicate,
+          windowMinutes: 60,
+          historicalWindow: dto.historicalMissingOperation === true,
+        }),
+      );
+    }
+
     this.validateRequiredPhotosByType(type, dto.attachments);
 
     return this.createPersistedOperation(dto, currentUser, type);
@@ -3917,6 +3937,103 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         role: currentUser.role,
       },
       approvals: result.approvalPlan,
+    };
+  }
+
+  private async findPossibleDuplicateOperation(
+    dto: CreateOperationDto,
+    currentUser: CurrentUserContext,
+    type: NormalizedOperationType,
+  ) {
+    if (dto.allowPossibleDuplicate === true || !currentUser.companyId) {
+      return null;
+    }
+
+    const referenceTime = dto.occurredAt ? new Date(dto.occurredAt) : new Date();
+
+    if (Number.isNaN(referenceTime.getTime())) {
+      return null;
+    }
+
+    const windowMs = 60 * 60 * 1000;
+    const where: any = {
+      companyId: currentUser.companyId,
+      type,
+      status: { notIn: ['CANCELLED', 'REJECTED'] },
+      quantity: Number(dto.quantity),
+      occurredAt: {
+        gte: new Date(referenceTime.getTime() - windowMs),
+        lte: new Date(referenceTime.getTime() + windowMs),
+      },
+    };
+
+    if (type === 'DIRECT_REFUEL') {
+      where.assetId = dto.assetId || null;
+      where.sourceStationId = dto.sourceStationId || null;
+    } else if (type === 'EXTERNAL_DIRECT_REFUEL') {
+      where.assetId = dto.assetId || null;
+      where.externalStationName = {
+        equals: String(dto.externalStationName || '').trim(),
+        mode: 'insensitive',
+      };
+    } else if (type === 'INTERNAL_TRANSFER' || type === 'EXTERNAL_TRANSFER') {
+      where.sourceStationId = dto.sourceStationId || null;
+      where.destinationStationId = dto.destinationStationId || null;
+    } else if (type === 'EXTERNAL_SUPPLY') {
+      where.destinationStationId = dto.destinationStationId || null;
+      where.externalStationName = {
+        equals: String(dto.externalStationName || '').trim(),
+        mode: 'insensitive',
+      };
+    }
+
+    const candidates = await (this.prisma as any).operation.findMany({
+      where,
+      take: 20,
+      orderBy: [{ occurredAt: 'desc' }],
+      select: {
+        id: true,
+        operationNo: true,
+        type: true,
+        status: true,
+        quantity: true,
+        occurredAt: true,
+        externalStationName: true,
+        asset: {
+          select: { id: true, assetId: true },
+        },
+        sourceStation: {
+          select: { id: true, stationId: true, name: true },
+        },
+        destinationStation: {
+          select: { id: true, stationId: true, name: true },
+        },
+      },
+    });
+
+    if (!candidates.length) {
+      return null;
+    }
+
+    const closest = candidates.sort(
+      (a: any, b: any) =>
+        Math.abs(new Date(a.occurredAt).getTime() - referenceTime.getTime()) -
+        Math.abs(new Date(b.occurredAt).getTime() - referenceTime.getTime()),
+    )[0];
+
+    return {
+      operationId: closest.id,
+      operationNo: closest.operationNo,
+      operationType: closest.type,
+      status: closest.status,
+      quantity: closest.quantity,
+      occurredAt: closest.occurredAt,
+      assetId: closest.asset?.assetId || null,
+      sourceStationId: closest.sourceStation?.stationId || null,
+      sourceStationName: closest.sourceStation?.name || null,
+      destinationStationId: closest.destinationStation?.stationId || null,
+      destinationStationName: closest.destinationStation?.name || null,
+      externalStationName: closest.externalStationName || null,
     };
   }
 

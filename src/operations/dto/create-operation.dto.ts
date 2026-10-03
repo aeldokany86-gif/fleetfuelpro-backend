@@ -117,6 +117,15 @@ export class CreateOperationDto {
   historicalMissingOperation?: boolean;
 
   /*
+    Explicit user override after the backend reports a possible business duplicate.
+    This does not bypass clientOperationId idempotency; it only acknowledges the
+    60-minute duplicate warning and allows a genuinely separate operation to proceed.
+  */
+  @IsOptional()
+  @IsBoolean()
+  allowPossibleDuplicate?: boolean;
+
+  /*
     Immutable operation-location snapshot.
 
     Mobile captures these automatically when the operation is recorded.
