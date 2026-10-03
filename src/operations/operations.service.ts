@@ -255,6 +255,7 @@ export class OperationsService {
     const isHistoricalMissingOperation =
       dto.historicalMissingOperation === true;
 
+
     if (isHistoricalMissingOperation) {
       this.validateHistoricalMissingOperationCreate(
         currentUser,
@@ -3978,10 +3979,11 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       60-minute window, but a changed meter reading means they are not the same
       physical event.
 
-      Historical Missing Operation is intentionally less strict about the
-      source identifier: the original historical operation may already exist
-      with a wrong source. The asset + quantity + odometer + time window are the
-      identifying signals, so a different source still produces a warning.
+      Asset refuel duplicate detection intentionally does not require the
+      source identifier to match, for both live and historical operations.
+      A wrong source selection is itself one of the mistakes this guard must
+      catch. Asset + quantity + odometer + time window identify the potential
+      duplicate; the existing source is returned in the warning for review.
     */
     if (
       (type === 'DIRECT_REFUEL' || type === 'EXTERNAL_DIRECT_REFUEL') &&
@@ -4014,20 +4016,9 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     if (type === 'DIRECT_REFUEL') {
       where.assetId = dto.assetId || null;
       where.odometer = Number(dto.odometer);
-
-      if (!isHistoricalMissingOperation) {
-        where.sourceStationId = dto.sourceStationId || null;
-      }
     } else if (type === 'EXTERNAL_DIRECT_REFUEL') {
       where.assetId = dto.assetId || null;
       where.odometer = Number(dto.odometer);
-
-      if (!isHistoricalMissingOperation) {
-        where.externalStationName = {
-          equals: String(dto.externalStationName || '').trim(),
-          mode: 'insensitive',
-        };
-      }
     } else if (type === 'INTERNAL_TRANSFER' || type === 'EXTERNAL_TRANSFER') {
       where.sourceStationId = dto.sourceStationId || null;
       where.destinationStationId = dto.destinationStationId || null;
