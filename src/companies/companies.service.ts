@@ -669,6 +669,31 @@ export class CompaniesService {
 
 
 
+  async getTelemetryAccess(companyId: string) {
+    if (!companyId) {
+      throw new BadRequestException('Authenticated company is required');
+    }
+
+    const company = await this.prisma.company.findFirst({
+      where: {
+        id: companyId,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        telemetryEnabled: true,
+      },
+    });
+
+    if (!company) {
+      throw new NotFoundException('Company not found');
+    }
+
+    return {
+      enabled: Boolean(company.telemetryEnabled),
+    };
+  }
+
   async updateTelemetryAccess(id: string, enabled: boolean) {
     if (typeof enabled !== 'boolean') {
       throw new BadRequestException(

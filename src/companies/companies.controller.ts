@@ -106,6 +106,13 @@ export class CompaniesController {
 
 
   @UseGuards(AuthGuard('jwt'), RolesGuard)
+  @Roles('Admin')
+  @Get('settings/telemetry-access')
+  async getTelemetryAccess(@Request() req) {
+    return this.companiesService.getTelemetryAccess(req.user.companyId);
+  }
+
+  @UseGuards(AuthGuard('jwt'), RolesGuard)
   @Roles('Platform User')
   @Patch(':id/telemetry-access')
   async updateTelemetryAccess(
