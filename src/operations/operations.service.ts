@@ -3955,7 +3955,51 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       return null;
     }
 
+    const isHistoricalMissingOperation =
+      dto.historicalMissingOperation === true;
     const windowMs = 60 * 60 * 1000;
+    const inputDispenserReadings = Array.isArray(dto.dispenserReadings)
+      ? dto.dispenserReadings
+          .map((item) => ({
+            stationId: String(item?.stationId || '').trim(),
+            counterValue: Number(item?.counter),
+          }))
+          .filter(
+            (item) =>
+              item.stationId && Number.isFinite(item.counterValue),
+          )
+          .sort((a, b) => a.stationId.localeCompare(b.stationId))
+      : [];
+
+    /*
+      A business duplicate must match the operation meter as well as the
+      operational identifiers. This is intentionally separate from technical
+      idempotency. Two genuine operations may use the same quantity inside the
+      60-minute window, but a changed meter reading means they are not the same
+      physical event.
+
+      Historical Missing Operation is intentionally less strict about the
+      source identifier: the original historical operation may already exist
+      with a wrong source. The asset + quantity + odometer + time window are the
+      identifying signals, so a different source still produces a warning.
+    */
+    if (
+      (type === 'DIRECT_REFUEL' || type === 'EXTERNAL_DIRECT_REFUEL') &&
+      (dto.odometer === undefined || dto.odometer === null)
+    ) {
+      return null;
+    }
+
+    if (
+      ['INTERNAL_TRANSFER', 'EXTERNAL_SUPPLY', 'EXTERNAL_TRANSFER'].includes(
+        type,
+      ) &&
+      (dto.stationCounter === undefined || dto.stationCounter === null) &&
+      inputDispenserReadings.length === 0
+    ) {
+      return null;
+    }
+
     const where: any = {
       companyId: currentUser.companyId,
       type,
@@ -3969,22 +4013,38 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
 
     if (type === 'DIRECT_REFUEL') {
       where.assetId = dto.assetId || null;
-      where.sourceStationId = dto.sourceStationId || null;
+      where.odometer = Number(dto.odometer);
+
+      if (!isHistoricalMissingOperation) {
+        where.sourceStationId = dto.sourceStationId || null;
+      }
     } else if (type === 'EXTERNAL_DIRECT_REFUEL') {
       where.assetId = dto.assetId || null;
-      where.externalStationName = {
-        equals: String(dto.externalStationName || '').trim(),
-        mode: 'insensitive',
-      };
+      where.odometer = Number(dto.odometer);
+
+      if (!isHistoricalMissingOperation) {
+        where.externalStationName = {
+          equals: String(dto.externalStationName || '').trim(),
+          mode: 'insensitive',
+        };
+      }
     } else if (type === 'INTERNAL_TRANSFER' || type === 'EXTERNAL_TRANSFER') {
       where.sourceStationId = dto.sourceStationId || null;
       where.destinationStationId = dto.destinationStationId || null;
+
+      if (dto.stationCounter !== undefined && dto.stationCounter !== null) {
+        where.stationCounter = Number(dto.stationCounter);
+      }
     } else if (type === 'EXTERNAL_SUPPLY') {
       where.destinationStationId = dto.destinationStationId || null;
       where.externalStationName = {
         equals: String(dto.externalStationName || '').trim(),
         mode: 'insensitive',
       };
+
+      if (dto.stationCounter !== undefined && dto.stationCounter !== null) {
+        where.stationCounter = Number(dto.stationCounter);
+      }
     }
 
     const candidates = await (this.prisma as any).operation.findMany({
@@ -3997,8 +4057,16 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         type: true,
         status: true,
         quantity: true,
+        odometer: true,
+        stationCounter: true,
         occurredAt: true,
         externalStationName: true,
+        stationCounterReadings: {
+          select: {
+            stationId: true,
+            counterValue: true,
+          },
+        },
         asset: {
           select: { id: true, assetId: true },
         },
@@ -4011,11 +4079,44 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       },
     });
 
-    if (!candidates.length) {
+    const meterMatchedCandidates =
+      inputDispenserReadings.length === 0
+        ? candidates
+        : candidates.filter((candidate: any) => {
+            const candidateReadings = Array.isArray(
+              candidate.stationCounterReadings,
+            )
+              ? candidate.stationCounterReadings
+                  .map((item: any) => ({
+                    stationId: String(item?.stationId || '').trim(),
+                    counterValue: Number(item?.counterValue),
+                  }))
+                  .filter(
+                    (item: any) =>
+                      item.stationId && Number.isFinite(item.counterValue),
+                  )
+                  .sort((a: any, b: any) =>
+                    a.stationId.localeCompare(b.stationId),
+                  )
+              : [];
+
+            if (candidateReadings.length !== inputDispenserReadings.length) {
+              return false;
+            }
+
+            return inputDispenserReadings.every(
+              (reading, index) =>
+                candidateReadings[index]?.stationId === reading.stationId &&
+                Number(candidateReadings[index]?.counterValue) ===
+                  Number(reading.counterValue),
+            );
+          });
+
+    if (!meterMatchedCandidates.length) {
       return null;
     }
 
-    const closest = candidates.sort(
+    const closest = meterMatchedCandidates.sort(
       (a: any, b: any) =>
         Math.abs(new Date(a.occurredAt).getTime() - referenceTime.getTime()) -
         Math.abs(new Date(b.occurredAt).getTime() - referenceTime.getTime()),
@@ -4027,6 +4128,8 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       operationType: closest.type,
       status: closest.status,
       quantity: closest.quantity,
+      odometer: closest.odometer,
+      stationCounter: closest.stationCounter,
       occurredAt: closest.occurredAt,
       assetId: closest.asset?.assetId || null,
       sourceStationId: closest.sourceStation?.stationId || null,
