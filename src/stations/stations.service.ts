@@ -73,6 +73,41 @@ export class StationsService {
     }
   }
 
+  private formatBusinessReference(prefix: 'SA' | 'CR', value: number) {
+    return `${prefix}-${String(value).padStart(6, '0')}`;
+  }
+
+  private async nextBusinessReference(
+    tx: any,
+    companyId: string,
+    key: 'STOCK_ADJUSTMENT' | 'OPERATION_CORRECTION',
+    prefix: 'SA' | 'CR',
+  ) {
+    const sequence = await tx.businessSequence.upsert({
+      where: {
+        companyId_key: {
+          companyId,
+          key,
+        },
+      },
+      create: {
+        companyId,
+        key,
+        nextValue: 2,
+      },
+      update: {
+        nextValue: {
+          increment: 1,
+        },
+      },
+      select: {
+        nextValue: true,
+      },
+    });
+
+    return this.formatBusinessReference(prefix, Number(sequence.nextValue) - 1);
+  }
+
   private normalizeStationId(stationId: string) {
     return this.stationCreationDomainService.normalizeStationId(stationId);
   }
@@ -2198,11 +2233,18 @@ export class StationsService {
         const balanceBefore = Number(station.currentStock || 0);
         const quantity = actualStock - balanceBefore;
         const balanceAfter = actualStock;
+        const referenceNo = await this.nextBusinessReference(
+          tx,
+          station.companyId,
+          'STOCK_ADJUSTMENT',
+          'SA',
+        );
 
         const movement = await tx.stationStockMovement.create({
           data: {
             stationId: station.id,
             companyId: station.companyId,
+            referenceNo,
             movementType: 'PHYSICAL_ADJUSTMENT' as any,
             quantity,
             balanceBefore,
@@ -2304,11 +2346,18 @@ export class StationsService {
 
         const quantity = -balanceBefore;
         const balanceAfter = 0;
+        const referenceNo = await this.nextBusinessReference(
+          tx,
+          station.companyId,
+          'STOCK_ADJUSTMENT',
+          'SA',
+        );
 
         const movement = await tx.stationStockMovement.create({
           data: {
             stationId: station.id,
             companyId: station.companyId,
+            referenceNo,
             movementType: 'ZERO_BALANCE' as any,
             quantity,
             balanceBefore,
@@ -2555,39 +2604,55 @@ export class StationsService {
       );
     }
 
-    const createdRequest = await this.prisma.stationActionRequest.create({
-      data: {
-        companyId: station.companyId,
-        stationId: station.id,
-        projectId: station.projectId,
-        requestedByUserId: body.requestedByUserId,
-        actionType: actionType as any,
-        status: 'PENDING' as any,
-        reason: body.reason.trim(),
-        requestedActualStock,
-        requestedCounter,
-        effectiveAt,
-        movementAt,
-      },
-      include: {
-        station: {
+    const createdRequest = await this.prisma.$transaction(
+      async (tx) => {
+        const referenceNo =
+          actionType === 'INVENTORY_ADJUSTMENT'
+            ? await this.nextBusinessReference(
+                tx,
+                station.companyId,
+                'STOCK_ADJUSTMENT',
+                'SA',
+              )
+            : null;
+
+        return tx.stationActionRequest.create({
+          data: {
+            companyId: station.companyId,
+            referenceNo,
+            stationId: station.id,
+            projectId: station.projectId,
+            requestedByUserId: body.requestedByUserId,
+            actionType: actionType as any,
+            status: 'PENDING' as any,
+            reason: body.reason.trim(),
+            requestedActualStock,
+            requestedCounter,
+            effectiveAt,
+            movementAt,
+          },
           include: {
+            station: {
+              include: {
+                project: true,
+              },
+            },
             project: true,
+            requestedBy: {
+              include: {
+                role: true,
+              },
+            },
+            reviewedBy: {
+              include: {
+                role: true,
+              },
+            },
           },
-        },
-        project: true,
-        requestedBy: {
-          include: {
-            role: true,
-          },
-        },
-        reviewedBy: {
-          include: {
-            role: true,
-          },
-        },
+        });
       },
-    });
+      { maxWait: 5000, timeout: 15000 },
+    );
 
     const workflowType = `STATION_${actionType}`;
     const metadata = {
@@ -2621,7 +2686,7 @@ export class StationsService {
           entityType: workflowType,
           entityId: createdRequest.id,
           workflowType,
-          reference: station.stationId,
+          reference: createdRequest.referenceNo || station.stationId,
           approvalStage: 'Admin',
           requestedByName: requester.fullName,
           metadata,
@@ -2633,7 +2698,7 @@ export class StationsService {
         entityType: workflowType,
         entityId: createdRequest.id,
         workflowType,
-        reference: station.stationId,
+        reference: createdRequest.referenceNo || station.stationId,
         approvalStage: 'Project Manager',
         requestedByName: requester.fullName,
         metadata,
@@ -2830,6 +2895,17 @@ export class StationsService {
     if (!body.approve) {
       const rejectedRequest = await this.prisma.$transaction(
         async (tx) => {
+          const stockAdjustmentReferenceNo =
+            ['INVENTORY_ADJUSTMENT', 'ZERO_BALANCE'].includes(actionType)
+              ? request.referenceNo ||
+                (await this.nextBusinessReference(
+                  tx,
+                  request.companyId,
+                  'STOCK_ADJUSTMENT',
+                  'SA',
+                ))
+              : null;
+
           const claimed = await tx.stationActionRequest.updateMany({
             where: {
               id: requestId,
@@ -2841,6 +2917,9 @@ export class StationsService {
               reviewNote: reviewNote || 'Rejected',
               reviewedAt: now,
               rejectedAt: now,
+              ...(stockAdjustmentReferenceNo
+                ? { referenceNo: stockAdjustmentReferenceNo }
+                : {}),
             },
           });
 
@@ -2883,7 +2962,11 @@ export class StationsService {
         entityType: workflowType,
         entityId: request.id,
         workflowType,
-        reference: request.station?.stationId || request.stationId,
+        reference:
+          rejectedRequest?.referenceNo ||
+          request.referenceNo ||
+          request.station?.stationId ||
+          request.stationId,
         status: 'REJECTED',
         metadata: {
           stationId: request.stationId,
@@ -2929,6 +3012,24 @@ export class StationsService {
           throw new NotFoundException('Station not found');
         }
 
+        const stockAdjustmentReferenceNo =
+          ['INVENTORY_ADJUSTMENT', 'ZERO_BALANCE'].includes(actionType)
+            ? request.referenceNo ||
+              (await this.nextBusinessReference(
+                tx,
+                request.companyId,
+                'STOCK_ADJUSTMENT',
+                'SA',
+              ))
+            : null;
+
+        if (stockAdjustmentReferenceNo && !request.referenceNo) {
+          await tx.stationActionRequest.update({
+            where: { id: request.id },
+            data: { referenceNo: stockAdjustmentReferenceNo },
+          });
+        }
+
         let actionResult: any = null;
 
         if (actionType === 'ZERO_BALANCE') {
@@ -2959,6 +3060,7 @@ export class StationsService {
             data: {
               stationId: station.id,
               companyId: station.companyId,
+              referenceNo: stockAdjustmentReferenceNo,
               movementType: 'ZERO_BALANCE' as any,
               quantity,
               balanceBefore,
@@ -3008,6 +3110,7 @@ export class StationsService {
             data: {
               stationId: station.id,
               companyId: station.companyId,
+              referenceNo: stockAdjustmentReferenceNo,
               movementType: 'PHYSICAL_ADJUSTMENT' as any,
               quantity,
               balanceBefore,
@@ -3150,7 +3253,11 @@ export class StationsService {
       entityType: workflowType,
       entityId: request.id,
       workflowType,
-      reference: request.station?.stationId || request.stationId,
+      reference:
+        approvedResult?.request?.referenceNo ||
+        request.referenceNo ||
+        request.station?.stationId ||
+        request.stationId,
       status: 'APPROVED',
       metadata: {
         stationId: request.stationId,

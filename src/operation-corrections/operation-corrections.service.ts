@@ -45,6 +45,41 @@ export class OperationCorrectionsService {
     private readonly notificationsService: NotificationsService,
   ) {}
 
+  private formatBusinessReference(prefix: 'SA' | 'CR', value: number) {
+    return `${prefix}-${String(value).padStart(6, '0')}`;
+  }
+
+  private async nextBusinessReference(
+    tx: any,
+    companyId: string,
+    key: 'STOCK_ADJUSTMENT' | 'OPERATION_CORRECTION',
+    prefix: 'SA' | 'CR',
+  ) {
+    const sequence = await tx.businessSequence.upsert({
+      where: {
+        companyId_key: {
+          companyId,
+          key,
+        },
+      },
+      create: {
+        companyId,
+        key,
+        nextValue: 2,
+      },
+      update: {
+        nextValue: {
+          increment: 1,
+        },
+      },
+      select: {
+        nextValue: true,
+      },
+    });
+
+    return this.formatBusinessReference(prefix, Number(sequence.nextValue) - 1);
+  }
+
   private async sendCorrectionApprovalRequiredBestEffort(input: {
     recipientUserId: string;
     correctionId: string;
@@ -112,6 +147,7 @@ export class OperationCorrectionsService {
   ) {
     return {
       correctionId: correction?.id || null,
+      correctionReferenceNo: correction?.referenceNo || null,
       operationId: operation?.id || correction?.operationId || null,
       operationNo: operation?.operationNo || null,
       operationType: operation?.type || null,
@@ -314,9 +350,17 @@ export class OperationCorrectionsService {
             throw new BadRequestException('There is already a pending correction for this field.');
           }
 
+          const referenceNo = await this.nextBusinessReference(
+            tx,
+            currentUser.companyId,
+            'OPERATION_CORRECTION',
+            'CR',
+          );
+
           const created = await (tx as any).operationCorrection.create({
             data: {
               companyId: currentUser.companyId,
+              referenceNo,
               operationId: operation.id,
               fieldName,
               oldValue: this.toJsonValue(oldValue),
@@ -359,7 +403,7 @@ export class OperationCorrectionsService {
           await this.sendCorrectionApprovalRequiredBestEffort({
             recipientUserId,
             correctionId: correction.id,
-            operationNo,
+            operationNo: correction.referenceNo || operationNo,
             requestedByName: currentUser.fullName,
             metadata,
           });
@@ -404,9 +448,17 @@ export class OperationCorrectionsService {
           throw new BadRequestException('There is already a pending correction for this field.');
         }
 
+        const referenceNo = await this.nextBusinessReference(
+          tx,
+          currentUser.companyId,
+          'OPERATION_CORRECTION',
+          'CR',
+        );
+
         const created = await (tx as any).operationCorrection.create({
           data: {
             companyId: currentUser.companyId,
+            referenceNo,
             operationId: operation.id,
             fieldName,
             oldValue: this.toJsonValue(oldValue),
@@ -1639,6 +1691,7 @@ export class OperationCorrectionsService {
       select: {
         id: true,
         companyId: true,
+        referenceNo: true,
         operationId: true,
         fieldName: true,
         oldValue: true,
@@ -2300,12 +2353,14 @@ export class OperationCorrectionsService {
           ...approverUserIds,
         ],
         correctionId: correction.id,
-        operationNo: String(
-          correction.operation?.operationNo ||
-            correction.operation?.id ||
-            correction.operationId ||
-            '',
-        ).trim(),
+        operationNo:
+          correction.referenceNo ||
+          String(
+            correction.operation?.operationNo ||
+              correction.operation?.id ||
+              correction.operationId ||
+              '',
+          ).trim(),
         status: 'REJECTED',
         metadata: {
           ...this.operationCorrectionNotificationMetadata(
@@ -2367,12 +2422,14 @@ export class OperationCorrectionsService {
         ...approverUserIds,
       ],
       correctionId: correction.id,
-      operationNo: String(
-        correction.operation?.operationNo ||
-          correction.operation?.id ||
-          correction.operationId ||
-          '',
-      ).trim(),
+      operationNo:
+        correction.referenceNo ||
+        String(
+          correction.operation?.operationNo ||
+            correction.operation?.id ||
+            correction.operationId ||
+            '',
+        ).trim(),
       status: 'APPROVED',
       metadata: {
         ...this.operationCorrectionNotificationMetadata(

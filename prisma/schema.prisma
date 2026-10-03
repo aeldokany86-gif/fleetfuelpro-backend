@@ -981,6 +981,7 @@ model StationStockMovement {
   id              String                   @id @default(cuid())
   stationId       String
   companyId       String
+  referenceNo     String?
   movementType    StationStockMovementType
   quantity        Float
   balanceBefore   Float
@@ -995,6 +996,7 @@ model StationStockMovement {
   createdBy       User?                    @relation(fields: [createdByUserId], references: [id])
   station         Station                  @relation(fields: [stationId], references: [id])
 
+  @@unique([companyId, referenceNo])
   @@index([stationId])
   @@index([companyId])
   @@index([movementType])
@@ -1185,9 +1187,23 @@ model OperationApproval {
   @@index([status])
 }
 
+
+model BusinessSequence {
+  id        String   @id @default(cuid())
+  companyId String
+  key       String
+  nextValue Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, key])
+  @@index([companyId])
+}
+
 model OperationCorrection {
   id                String                    @id @default(cuid())
   companyId         String
+  referenceNo       String?
   operationId       String
   fieldName         OperationCorrectionField
   oldValue          Json?
@@ -1208,6 +1224,7 @@ model OperationCorrection {
   requestedBy       User                      @relation("OperationCorrectionRequestedBy", fields: [requestedByUserId], references: [id])
   reviewedBy        User?                     @relation("OperationCorrectionReviewedBy", fields: [reviewedByUserId], references: [id])
 
+  @@unique([companyId, referenceNo])
   @@index([companyId])
   @@index([operationId])
   @@index([requestedByUserId])
@@ -1305,6 +1322,7 @@ model StationTransferApproval {
 model StationActionRequest {
   id                   String                     @id @default(cuid())
   companyId            String
+  referenceNo          String?
   stationId            String
   projectId            String?
   requestedByUserId    String
@@ -1329,6 +1347,7 @@ model StationActionRequest {
   requestedBy          User                       @relation("StationActionRequestedBy", fields: [requestedByUserId], references: [id])
   reviewedBy           User?                      @relation("StationActionReviewedBy", fields: [reviewedByUserId], references: [id])
 
+  @@unique([companyId, referenceNo])
   @@index([companyId])
   @@index([stationId])
   @@index([projectId])
