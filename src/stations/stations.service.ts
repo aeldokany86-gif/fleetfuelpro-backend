@@ -2130,7 +2130,10 @@ export class StationsService {
       return {
         ...movement,
         referenceNo:
-          operation?.operationNo || movement.referenceId || movement.id,
+          operation?.operationNo ||
+          movement.referenceNo ||
+          movement.referenceId ||
+          movement.id,
         referenceStatus: operation?.status || 'COMPLETED',
         relatedEntity,
         operationType: operation?.type || null,
