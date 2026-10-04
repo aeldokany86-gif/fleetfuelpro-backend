@@ -15,6 +15,16 @@ primary_region = 'nrt'
 [processes]
   app = 'npm run start:prod'
 
+[env]
+  MQTT_ENABLED = "true"
+  MQTT_HOST = "s0136cff.ala.eu-central-1.emqxsl.com"
+  MQTT_PORT = "8883"
+  MQTT_TOPIC_TELEMETRY = "BCE/D"
+
+  TELTONIKA_TCP_ENABLED = "true"
+  TELTONIKA_TCP_HOST = "0.0.0.0"
+  TELTONIKA_TCP_PORT = "5027"
+
 [http_service]
   internal_port = 4000
   force_https = true
@@ -22,6 +32,17 @@ primary_region = 'nrt'
   auto_start_machines = true
   min_machines_running = 1
   processes = ['app']
+
+[[services]]
+  protocol = 'tcp'
+  internal_port = 5027
+  processes = ['app']
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[services.ports]]
+    port = 5027
 
 [[vm]]
   memory = '1gb'

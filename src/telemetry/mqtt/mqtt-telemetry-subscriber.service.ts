@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { TelemetryTransport } from '@prisma/client';
 import { connect, MqttClient } from 'mqtt';
-import { XirgoIotmDecoder } from '../adapters/xirgo/xirgo-iotm.decoder';
+import { TelemetryAdapterRegistry } from '../adapters/telemetry-adapter.registry';
 import { TelemetryDeviceService } from '../telemetry-device.service';
 import { TelemetryIngestionService } from '../telemetry-ingestion.service';
 
@@ -15,12 +15,12 @@ export class MqttTelemetrySubscriberService
   implements OnModuleInit, OnApplicationShutdown
 {
   private readonly logger = new Logger(MqttTelemetrySubscriberService.name);
-  private readonly xirgoDecoder = new XirgoIotmDecoder();
   private client: MqttClient | null = null;
 
   constructor(
     private readonly telemetryDeviceService: TelemetryDeviceService,
     private readonly telemetryIngestionService: TelemetryIngestionService,
+    private readonly telemetryAdapterRegistry: TelemetryAdapterRegistry,
   ) {}
 
   onModuleInit() {
@@ -123,7 +123,7 @@ export class MqttTelemetrySubscriberService
 
   private async processXirgoTelemetry(topic: string, payload: Buffer) {
     try {
-      const decoded = this.xirgoDecoder.decode(payload);
+      const decoded = this.telemetryAdapterRegistry.decodeXirgoIotm(payload);
       const imei = String(decoded.imei || '').trim();
 
       if (!imei) {
