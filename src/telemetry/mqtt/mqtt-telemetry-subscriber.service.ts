@@ -33,7 +33,14 @@ export class MqttTelemetrySubscriberService
     }
 
     const host = String(process.env.MQTT_HOST || '').trim();
-    const port = Number(process.env.MQTT_PORT || 8883);
+    const protocol =
+      String(process.env.MQTT_PROTOCOL || 'mqtt')
+        .trim()
+        .toLowerCase() === 'mqtts'
+        ? 'mqtts'
+        : 'mqtt';
+    const defaultPort = protocol === 'mqtts' ? 8883 : 1883;
+    const port = Number(process.env.MQTT_PORT || defaultPort);
     const username = String(process.env.MQTT_USERNAME || '').trim();
     const password = String(process.env.MQTT_PASSWORD || '');
     const topic = String(
@@ -65,10 +72,12 @@ export class MqttTelemetrySubscriberService
       return;
     }
 
-    this.logger.log(`Connecting to MQTT broker ${host}:${port}...`);
+    this.logger.log(
+      `Connecting to MQTT broker ${host}:${port} using ${protocol.toUpperCase()}...`,
+    );
 
     this.client = connect({
-      protocol: 'mqtts',
+      protocol,
       host,
       port,
       username,
@@ -78,7 +87,7 @@ export class MqttTelemetrySubscriberService
       reconnectPeriod: 4000,
       connectTimeout: 10000,
       keepalive: 60,
-      rejectUnauthorized: true,
+      ...(protocol === 'mqtts' ? { rejectUnauthorized: true } : {}),
     });
 
     this.client.on('connect', () => {
