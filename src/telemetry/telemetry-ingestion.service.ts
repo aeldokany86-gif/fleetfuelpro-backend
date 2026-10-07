@@ -299,7 +299,6 @@ export class TelemetryIngestionService {
             where: {
               vendor: 'XIRGO',
               vendorSensorId: { in: sensorIds },
-              isActive: true,
               OR: [{ companyId }, { companyId: null }],
             },
           })
@@ -327,16 +326,49 @@ export class TelemetryIngestionService {
         }
       }
 
+      const definitionIds = [...definitionBySensorId.values()]
+        .map((definition) => definition.id)
+        .filter((id): id is string => Boolean(id));
+
+      const deviceSensorSettings = definitionIds.length
+        ? await this.prisma.telemetryDeviceSensor.findMany({
+            where: {
+              deviceId: device.id,
+              sensorDefinitionId: { in: definitionIds },
+            },
+            select: {
+              sensorDefinitionId: true,
+              isEnabled: true,
+            },
+          })
+        : [];
+
+      const enabledOverrideByDefinitionId = new Map(
+        deviceSensorSettings.map((setting) => [
+          setting.sensorDefinitionId,
+          setting.isEnabled,
+        ]),
+      );
+
       const readings: Prisma.AssetTelemetryReadingCreateManyInput[] = [];
 
       for (const record of telemetryRecords) {
         if (record.kind !== 'TELEMETRY') continue;
 
         for (const sensor of record.sensors) {
-          const mapped = this.xirgoMapper.map(
-            sensor,
-            definitionBySensorId.get(String(sensor.sensorId)),
-          );
+          const definition = definitionBySensorId.get(String(sensor.sensorId));
+
+          // Unknown sensors are intentionally ignored. XDM may send the full
+          // sensor payload, but FFP stores only catalogued + enabled sensors.
+          if (!definition?.id) continue;
+
+          const isEnabled =
+            enabledOverrideByDefinitionId.get(definition.id) ??
+            definition.isActive !== false;
+
+          if (!isEnabled) continue;
+
+          const mapped = this.xirgoMapper.map(sensor, definition);
 
           readings.push({
             companyId,
@@ -570,7 +602,6 @@ export class TelemetryIngestionService {
               vendor: 'TELTONIKA',
               protocol: 'CODEC_8_EXTENDED',
               vendorSensorId: { in: avlIds },
-              isActive: true,
               OR: [{ companyId }, { companyId: null }],
             },
           })
@@ -610,14 +641,45 @@ export class TelemetryIngestionService {
         }
       }
 
+      const definitionIds = [...definitionByAvlId.values()]
+        .map((definition) => definition.id)
+        .filter((id): id is string => Boolean(id));
+
+      const deviceSensorSettings = definitionIds.length
+        ? await this.prisma.telemetryDeviceSensor.findMany({
+            where: {
+              deviceId: device.id,
+              sensorDefinitionId: { in: definitionIds },
+            },
+            select: {
+              sensorDefinitionId: true,
+              isEnabled: true,
+            },
+          })
+        : [];
+
+      const enabledOverrideByDefinitionId = new Map(
+        deviceSensorSettings.map((setting) => [
+          setting.sensorDefinitionId,
+          setting.isEnabled,
+        ]),
+      );
+
       const readings: Prisma.AssetTelemetryReadingCreateManyInput[] = [];
 
       for (const record of decoded.records) {
         for (const io of record.ioElements) {
-          const mapped = this.teltonikaMapper.map(
-            io,
-            definitionByAvlId.get(String(io.avlId)),
-          );
+          const definition = definitionByAvlId.get(String(io.avlId));
+
+          if (!definition?.id) continue;
+
+          const isEnabled =
+            enabledOverrideByDefinitionId.get(definition.id) ??
+            definition.isActive !== false;
+
+          if (!isEnabled) continue;
+
+          const mapped = this.teltonikaMapper.map(io, definition);
 
           readings.push({
             companyId,

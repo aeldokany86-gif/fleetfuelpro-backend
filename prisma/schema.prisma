@@ -678,8 +678,9 @@ model TelemetryDevice {
 
   company     Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
   asset       Asset?                  @relation(fields: [assetId], references: [id], onDelete: SetNull)
-  rawMessages TelemetryRawMessage[]
-  readings    AssetTelemetryReading[]
+  rawMessages   TelemetryRawMessage[]
+  readings      AssetTelemetryReading[]
+  sensorSettings TelemetryDeviceSensor[]
 
   @@unique([vendor, hardwareId])
   @@index([companyId])
@@ -729,13 +730,31 @@ model TelemetrySensorDefinition {
   createdAt      DateTime            @default(now())
   updatedAt      DateTime            @updatedAt
 
-  company  Company?                @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  readings AssetTelemetryReading[]
+  company        Company?                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  readings       AssetTelemetryReading[]
+  deviceSettings TelemetryDeviceSensor[]
 
   @@unique([companyId, vendor, protocol, vendorSensorId])
   @@index([vendor, vendorSensorId])
   @@index([parameterCode])
   @@index([companyId])
+}
+
+
+model TelemetryDeviceSensor {
+  id                 String   @id @default(cuid())
+  deviceId           String
+  sensorDefinitionId String
+  isEnabled          Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  device           TelemetryDevice           @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  sensorDefinition TelemetrySensorDefinition @relation(fields: [sensorDefinitionId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, sensorDefinitionId])
+  @@index([deviceId, isEnabled])
+  @@index([sensorDefinitionId])
 }
 
 model AssetTelemetryReading {

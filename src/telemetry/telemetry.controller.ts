@@ -10,17 +10,20 @@ import {
 } from '@nestjs/common';
 import {
   Prisma,
+  TelemetryDataSource,
   TelemetryDeviceStatus,
   TelemetryTransport,
 } from '@prisma/client';
 
 import { TelemetryDeviceService } from './telemetry-device.service';
 import { TelemetryIngestionService } from './telemetry-ingestion.service';
+import { TelemetrySensorService } from './telemetry-sensor.service';
 
 @Controller('telemetry/devices')
 export class TelemetryController {
   constructor(
     private readonly telemetryDeviceService: TelemetryDeviceService,
+    private readonly telemetrySensorService: TelemetrySensorService,
   ) {}
 
   @Post()
@@ -55,6 +58,24 @@ export class TelemetryController {
       vendor,
       status,
     });
+  }
+
+  @Get(':id/sensors')
+  getDeviceSensors(@Param('id') id: string) {
+    return this.telemetrySensorService.listForDevice(id);
+  }
+
+  @Patch(':id/sensors/:sensorDefinitionId')
+  setDeviceSensorEnabled(
+    @Param('id') id: string,
+    @Param('sensorDefinitionId') sensorDefinitionId: string,
+    @Body() body: { isEnabled: boolean },
+  ) {
+    return this.telemetrySensorService.setDeviceSensorEnabled(
+      id,
+      sensorDefinitionId,
+      body.isEnabled,
+    );
   }
 
   @Get(':id/latest')
@@ -113,6 +134,31 @@ export class TelemetryController {
     @Query('companyId') companyId: string,
   ) {
     return this.telemetryDeviceService.remove(id, companyId);
+  }
+}
+
+@Controller('telemetry/sensors')
+export class TelemetrySensorController {
+  constructor(private readonly telemetrySensorService: TelemetrySensorService) {}
+
+  @Post()
+  createDefinition(
+    @Body()
+    body: {
+      companyId: string;
+      vendor: string;
+      protocol?: string | null;
+      vendorSensorId: string;
+      parameterCode: string;
+      displayName?: string | null;
+      unit?: string | null;
+      multiplier?: number | null;
+      offset?: number | null;
+      dataSource?: TelemetryDataSource;
+      metadata?: Prisma.InputJsonValue | null;
+    },
+  ) {
+    return this.telemetrySensorService.createDefinition(body);
   }
 }
 

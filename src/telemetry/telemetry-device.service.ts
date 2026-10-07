@@ -337,6 +337,64 @@ export class TelemetryDeviceService {
     });
   }
 
+  private async getEnabledSensorDefinitionIdsForDevice(device: {
+    id: string;
+    companyId: string;
+    vendor: string;
+  }) {
+    const definitions = await this.prisma.telemetrySensorDefinition.findMany({
+      where: {
+        vendor: device.vendor,
+        OR: [{ companyId: device.companyId }, { companyId: null }],
+      },
+      select: {
+        id: true,
+        companyId: true,
+        vendorSensorId: true,
+        isActive: true,
+      },
+    });
+
+    const selectedByVendorSensorId = new Map<
+      string,
+      (typeof definitions)[number]
+    >();
+
+    for (const definition of definitions) {
+      const existing = selectedByVendorSensorId.get(definition.vendorSensorId);
+      if (!existing || definition.companyId === device.companyId) {
+        selectedByVendorSensorId.set(definition.vendorSensorId, definition);
+      }
+    }
+
+    const selectedDefinitions = [...selectedByVendorSensorId.values()];
+    const definitionIds = selectedDefinitions.map((definition) => definition.id);
+
+    const settings = definitionIds.length
+      ? await this.prisma.telemetryDeviceSensor.findMany({
+          where: {
+            deviceId: device.id,
+            sensorDefinitionId: { in: definitionIds },
+          },
+          select: {
+            sensorDefinitionId: true,
+            isEnabled: true,
+          },
+        })
+      : [];
+
+    const overrideByDefinitionId = new Map(
+      settings.map((setting) => [setting.sensorDefinitionId, setting.isEnabled]),
+    );
+
+    return selectedDefinitions
+      .filter(
+        (definition) =>
+          overrideByDefinitionId.get(definition.id) ?? definition.isActive,
+      )
+      .map((definition) => definition.id);
+  }
+
   async getLatestTelemetry(id: string) {
     const device = await this.prisma.telemetryDevice.findFirst({
       where: {
@@ -406,11 +464,15 @@ export class TelemetryDeviceService {
       };
     }
 
+    const enabledSensorDefinitionIds =
+      await this.getEnabledSensorDefinitionIdsForDevice(device);
+
     const readings = await this.prisma.assetTelemetryReading.findMany({
       where: {
         companyId: device.companyId,
         deviceId: device.id,
         assetId: device.assetId,
+        sensorDefinitionId: { in: enabledSensorDefinitionIds },
       },
       orderBy: [
         { readingAt: 'desc' },
