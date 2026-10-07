@@ -24,6 +24,17 @@ type LatestTelemetryReadingRow = {
   receivedAt: Date;
 };
 
+type DailyTelemetryReadingRow = {
+  id: string;
+  parameterCode: string;
+  vendorSensorId: string;
+  numericValue: number;
+  readingAt: Date;
+  receivedAt: Date;
+};
+
+type DailyOperatingState = 'DRIVING' | 'IDLE' | 'ENGINE_OFF';
+
 @Injectable()
 export class TelemetryDeviceService {
   constructor(private readonly prisma: PrismaService) {}
@@ -406,6 +417,476 @@ export class TelemetryDeviceService {
           overrideByDefinitionId.get(definition.id) ?? definition.isActive,
       )
       .map((definition) => definition.id);
+  }
+
+  private formatDateInTimeZone(date: Date, timeZone: string) {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+
+    const parts = formatter.formatToParts(date);
+    const year = parts.find((part) => part.type === 'year')?.value;
+    const month = parts.find((part) => part.type === 'month')?.value;
+    const day = parts.find((part) => part.type === 'day')?.value;
+
+    if (!year || !month || !day) {
+      throw new BadRequestException('Unable to resolve company local date');
+    }
+
+    return `${year}-${month}-${day}`;
+  }
+
+  private validateDailySummaryDate(value: string | undefined) {
+    const normalized = String(value || '').trim();
+
+    if (!normalized) return null;
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+      throw new BadRequestException('Date must use YYYY-MM-DD format');
+    }
+
+    const [year, month, day] = normalized.split('-').map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+
+    if (
+      parsed.getUTCFullYear() !== year ||
+      parsed.getUTCMonth() !== month - 1 ||
+      parsed.getUTCDate() !== day
+    ) {
+      throw new BadRequestException('Invalid calendar date');
+    }
+
+    return normalized;
+  }
+
+  private resolveDailySemantic(reading: {
+    vendorSensorId: string;
+    parameterCode: string;
+  }) {
+    const vendorSensorId = String(reading.vendorSensorId || '').trim();
+    const parameterCode = String(reading.parameterCode || '')
+      .trim()
+      .toUpperCase();
+
+    if (
+      vendorSensorId === '12300' ||
+      ['RPM', 'ENGINE_RPM'].includes(parameterCode)
+    ) {
+      return 'RPM';
+    }
+
+    if (
+      vendorSensorId === '12317' ||
+      ['WHEEL_SPEED', 'VEHICLE_SPEED'].includes(parameterCode)
+    ) {
+      return 'WHEEL_SPEED';
+    }
+
+    if (
+      vendorSensorId === '8192' ||
+      ['GNSS_SPEED', 'GPS_SPEED'].includes(parameterCode)
+    ) {
+      return 'GNSS_SPEED';
+    }
+
+    if (
+      vendorSensorId === '16387' ||
+      ['TOTAL_DISTANCE', 'DISTANCE_TOTAL', 'TOTAL_ODOMETER'].includes(
+        parameterCode,
+      )
+    ) {
+      return 'TOTAL_DISTANCE';
+    }
+
+    if (
+      vendorSensorId === '16385' ||
+      ['TOTAL_FUEL_USED', 'FUEL_USED_TOTAL', 'CUMULATIVE_FUEL_USED'].includes(
+        parameterCode,
+      )
+    ) {
+      return 'TOTAL_FUEL_USED';
+    }
+
+    return null;
+  }
+
+  private calculatePositiveCumulativeDelta(
+    readings: Array<{ readingAt: Date; value: number }>,
+  ) {
+    if (readings.length < 2) return 0;
+
+    const latestByTimestamp = new Map<number, number>();
+
+    for (const reading of readings) {
+      latestByTimestamp.set(reading.readingAt.getTime(), reading.value);
+    }
+
+    const ordered = [...latestByTimestamp.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([timestamp, value]) => ({
+        readingAt: new Date(timestamp),
+        value,
+      }));
+
+    let total = 0;
+    let previous = ordered[0]?.value ?? null;
+
+    for (let index = 1; index < ordered.length; index += 1) {
+      const current = ordered[index].value;
+
+      if (
+        previous !== null &&
+        Number.isFinite(previous) &&
+        Number.isFinite(current)
+      ) {
+        const delta = current - previous;
+
+        // Negative movement is treated as a reset/rollover, never negative use.
+        if (delta > 0) {
+          total += delta;
+        }
+      }
+
+      previous = current;
+    }
+
+    return total;
+  }
+
+  async getDailySummary(id: string, dateInput?: string) {
+    const device = await this.prisma.telemetryDevice.findFirst({
+      where: {
+        id,
+        deletedAt: null,
+      },
+      select: {
+        id: true,
+        companyId: true,
+        assetId: true,
+        vendor: true,
+        model: true,
+        hardwareId: true,
+        status: true,
+        lastSeenAt: true,
+        company: {
+          select: {
+            telemetryEnabled: true,
+            timezone: true,
+          },
+        },
+        asset: {
+          select: {
+            id: true,
+            assetId: true,
+            type: true,
+            category: true,
+            status: true,
+            projectId: true,
+          },
+        },
+      },
+    });
+
+    if (!device) {
+      throw new NotFoundException('Telemetry device not found');
+    }
+
+    if (!device.company.telemetryEnabled) {
+      throw new BadRequestException(
+        'Telemetry is disabled for this company',
+      );
+    }
+
+    const timeZone = String(device.company.timezone || 'UTC').trim() || 'UTC';
+
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone }).format(new Date());
+    } catch {
+      throw new BadRequestException(
+        `Invalid company timezone configuration: ${timeZone}`,
+      );
+    }
+
+    const requestedDate =
+      this.validateDailySummaryDate(dateInput) ??
+      this.formatDateInTimeZone(new Date(), timeZone);
+
+    if (!device.assetId || !device.asset) {
+      return {
+        deviceId: device.id,
+        asset: null,
+        date: requestedDate,
+        timezone: timeZone,
+        todayDistanceKm: 0,
+        todayFuelUsedL: 0,
+        workingHours: 0,
+        idleHours: 0,
+        drivingHours: 0,
+        timeline: [],
+        thresholds: {
+          engineRunningRpm: 100,
+          drivingSpeedKph: 1,
+          maxTelemetryGapMinutes: 5,
+        },
+      };
+    }
+
+    /*
+     * Daily operational inputs only.
+     *
+     * Xirgo sensor IDs:
+     * 12300 = RPM
+     * 12317 = Wheel Speed
+     * 8192  = GNSS Speed fallback
+     * 16387 = Total Distance
+     * 16385 = Total Fuel Used
+     *
+     * parameterCode aliases keep the endpoint usable for future adapters that
+     * map the same semantics under a different vendor sensor ID.
+     */
+    const readings = await this.prisma.$queryRaw<DailyTelemetryReadingRow[]>(
+      Prisma.sql`
+        SELECT
+          "id",
+          "parameterCode",
+          "vendorSensorId",
+          "numericValue",
+          "readingAt",
+          "receivedAt"
+        FROM "AssetTelemetryReading"
+        WHERE "companyId" = ${device.companyId}
+          AND "deviceId" = ${device.id}
+          AND "assetId" = ${device.assetId}
+          AND "numericValue" IS NOT NULL
+          AND (
+            "vendorSensorId" IN ('12300', '12317', '8192', '16387', '16385')
+            OR UPPER("parameterCode") IN (
+              'RPM',
+              'ENGINE_RPM',
+              'WHEEL_SPEED',
+              'VEHICLE_SPEED',
+              'GNSS_SPEED',
+              'GPS_SPEED',
+              'TOTAL_DISTANCE',
+              'DISTANCE_TOTAL',
+              'TOTAL_ODOMETER',
+              'TOTAL_FUEL_USED',
+              'FUEL_USED_TOTAL',
+              'CUMULATIVE_FUEL_USED'
+            )
+          )
+          AND "readingAt" >= (
+            ${requestedDate}::date::timestamp AT TIME ZONE ${timeZone}
+          )
+          AND "readingAt" < (
+            (${requestedDate}::date + INTERVAL '1 day')::timestamp
+            AT TIME ZONE ${timeZone}
+          )
+        ORDER BY "readingAt" ASC, "receivedAt" ASC, "id" ASC
+      `,
+    );
+
+    const rpmReadings: Array<{ readingAt: Date; value: number }> = [];
+    const wheelSpeedReadings: Array<{ readingAt: Date; value: number }> = [];
+    const gnssSpeedReadings: Array<{ readingAt: Date; value: number }> = [];
+    const distanceReadings: Array<{ readingAt: Date; value: number }> = [];
+    const fuelReadings: Array<{ readingAt: Date; value: number }> = [];
+
+    type Snapshot = {
+      at: Date;
+      rpm?: number;
+      wheelSpeed?: number;
+      gnssSpeed?: number;
+    };
+
+    const snapshotsByTime = new Map<number, Snapshot>();
+
+    for (const reading of readings) {
+      const numericValue = Number(reading.numericValue);
+      if (!Number.isFinite(numericValue)) continue;
+
+      const semantic = this.resolveDailySemantic(reading);
+      if (!semantic) continue;
+
+      const point = {
+        readingAt: reading.readingAt,
+        value: numericValue,
+      };
+
+      const timestamp = reading.readingAt.getTime();
+      const snapshot = snapshotsByTime.get(timestamp) ?? {
+        at: reading.readingAt,
+      };
+
+      if (semantic === 'RPM') {
+        rpmReadings.push(point);
+        snapshot.rpm = numericValue;
+      } else if (semantic === 'WHEEL_SPEED') {
+        wheelSpeedReadings.push(point);
+        snapshot.wheelSpeed = numericValue;
+      } else if (semantic === 'GNSS_SPEED') {
+        gnssSpeedReadings.push(point);
+        snapshot.gnssSpeed = numericValue;
+      } else if (semantic === 'TOTAL_DISTANCE') {
+        distanceReadings.push(point);
+      } else if (semantic === 'TOTAL_FUEL_USED') {
+        fuelReadings.push(point);
+      }
+
+      snapshotsByTime.set(timestamp, snapshot);
+    }
+
+    const snapshots = [...snapshotsByTime.values()].sort(
+      (a, b) => a.at.getTime() - b.at.getTime(),
+    );
+
+    const ENGINE_RUNNING_RPM = 100;
+    const DRIVING_SPEED_KPH = 1;
+    const MAX_GAP_MS = 5 * 60 * 1000;
+
+    let latestRpm: number | null = null;
+    let latestWheelSpeed: number | null = null;
+    let latestGnssSpeed: number | null = null;
+
+    let drivingMs = 0;
+    let idleMs = 0;
+
+    const timeline: Array<{
+      state: DailyOperatingState;
+      startAt: Date;
+      endAt: Date;
+      durationSeconds: number;
+    }> = [];
+
+    const appendTimeline = (
+      state: DailyOperatingState,
+      startAt: Date,
+      endAt: Date,
+    ) => {
+      const durationMs = endAt.getTime() - startAt.getTime();
+      if (durationMs <= 0) return;
+
+      const previous = timeline[timeline.length - 1];
+
+      if (
+        previous &&
+        previous.state === state &&
+        previous.endAt.getTime() === startAt.getTime()
+      ) {
+        previous.endAt = endAt;
+        previous.durationSeconds += durationMs / 1000;
+        return;
+      }
+
+      timeline.push({
+        state,
+        startAt,
+        endAt,
+        durationSeconds: durationMs / 1000,
+      });
+    };
+
+    for (let index = 0; index < snapshots.length; index += 1) {
+      const snapshot = snapshots[index];
+
+      if (snapshot.rpm !== undefined) latestRpm = snapshot.rpm;
+      if (snapshot.wheelSpeed !== undefined) {
+        latestWheelSpeed = snapshot.wheelSpeed;
+      }
+      if (snapshot.gnssSpeed !== undefined) {
+        latestGnssSpeed = snapshot.gnssSpeed;
+      }
+
+      let endAt: Date | null = snapshots[index + 1]?.at ?? null;
+
+      if (!endAt && requestedDate === this.formatDateInTimeZone(new Date(), timeZone)) {
+        const now = new Date();
+        const cappedEnd = Math.min(
+          now.getTime(),
+          snapshot.at.getTime() + MAX_GAP_MS,
+        );
+
+        if (cappedEnd > snapshot.at.getTime()) {
+          endAt = new Date(cappedEnd);
+        }
+      }
+
+      if (!endAt) continue;
+
+      const gapMs = endAt.getTime() - snapshot.at.getTime();
+
+      // Do not invent operating time across long telemetry outages.
+      if (gapMs <= 0 || gapMs > MAX_GAP_MS || latestRpm === null) {
+        continue;
+      }
+
+      const speed =
+        latestWheelSpeed !== null ? latestWheelSpeed : latestGnssSpeed ?? 0;
+
+      let state: DailyOperatingState = 'ENGINE_OFF';
+
+      if (latestRpm > ENGINE_RUNNING_RPM) {
+        if (speed > DRIVING_SPEED_KPH) {
+          state = 'DRIVING';
+          drivingMs += gapMs;
+        } else {
+          state = 'IDLE';
+          idleMs += gapMs;
+        }
+      }
+
+      appendTimeline(state, snapshot.at, endAt);
+    }
+
+    const todayDistanceKm =
+      this.calculatePositiveCumulativeDelta(distanceReadings);
+    const todayFuelUsedL =
+      this.calculatePositiveCumulativeDelta(fuelReadings);
+
+    const drivingHours = drivingMs / 3_600_000;
+    const idleHours = idleMs / 3_600_000;
+    const workingHours = drivingHours + idleHours;
+
+    return {
+      deviceId: device.id,
+      asset: device.asset,
+      date: requestedDate,
+      timezone: timeZone,
+      todayDistanceKm,
+      todayFuelUsedL,
+      workingHours,
+      idleHours,
+      drivingHours,
+      timeline,
+      thresholds: {
+        engineRunningRpm: ENGINE_RUNNING_RPM,
+        drivingSpeedKph: DRIVING_SPEED_KPH,
+        maxTelemetryGapMinutes: MAX_GAP_MS / 60_000,
+      },
+      sources: {
+        rpm: {
+          vendorSensorId: '12300',
+          points: rpmReadings.length,
+        },
+        speed: {
+          primaryVendorSensorId: '12317',
+          fallbackVendorSensorId: '8192',
+          wheelSpeedPoints: wheelSpeedReadings.length,
+          gnssSpeedPoints: gnssSpeedReadings.length,
+        },
+        totalDistance: {
+          vendorSensorId: '16387',
+          points: distanceReadings.length,
+        },
+        totalFuelUsed: {
+          vendorSensorId: '16385',
+          points: fuelReadings.length,
+        },
+      },
+    };
   }
 
   async getLatestTelemetry(id: string) {

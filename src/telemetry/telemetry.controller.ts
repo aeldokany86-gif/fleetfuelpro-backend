@@ -83,6 +83,14 @@ export class TelemetryController {
     return this.telemetryDeviceService.getLatestTelemetry(id);
   }
 
+  @Get(':id/daily-summary')
+  getDailySummary(
+    @Param('id') id: string,
+    @Query('date') date?: string,
+  ) {
+    return this.telemetryDeviceService.getDailySummary(id, date);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.telemetryDeviceService.findOne(id);
