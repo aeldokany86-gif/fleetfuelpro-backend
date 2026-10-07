@@ -11,6 +11,19 @@ import {
 
 import { PrismaService } from '../prisma/prisma.service';
 
+type LatestTelemetryReadingRow = {
+  id: string;
+  parameterCode: string;
+  vendorSensorId: string;
+  numericValue: number | null;
+  textValue: string | null;
+  jsonValue: Prisma.JsonValue | null;
+  unit: string | null;
+  dataSource: string;
+  readingAt: Date;
+  receivedAt: Date;
+};
+
 @Injectable()
 export class TelemetryDeviceService {
   constructor(private readonly prisma: PrismaService) {}
@@ -467,58 +480,90 @@ export class TelemetryDeviceService {
     const enabledSensorDefinitionIds =
       await this.getEnabledSensorDefinitionIdsForDevice(device);
 
-    const readings = await this.prisma.assetTelemetryReading.findMany({
-      where: {
-        companyId: device.companyId,
-        deviceId: device.id,
-        assetId: device.assetId,
-        sensorDefinitionId: { in: enabledSensorDefinitionIds },
-      },
-      orderBy: [
-        { readingAt: 'desc' },
-        { receivedAt: 'desc' },
-        { id: 'desc' },
-      ],
-      select: {
-        id: true,
-        parameterCode: true,
-        vendorSensorId: true,
-        numericValue: true,
-        textValue: true,
-        jsonValue: true,
-        unit: true,
-        dataSource: true,
-        readingAt: true,
-        receivedAt: true,
-      },
-    });
+    /*
+     * Performance-critical latest snapshot:
+     *
+     * The previous implementation loaded the entire reading history for every
+     * enabled sensor and then discarded all but the newest row in Node.js.
+     * As AssetTelemetryReading grows, that makes both the Sensor Readings modal
+     * and the Real Time Status page progressively slower.
+     *
+     * PostgreSQL DISTINCT ON returns only the newest row for each enabled sensor
+     * definition. The companion composite index keeps this query bounded by the
+     * number of enabled sensors rather than by historical table size.
+     */
+    const readings = enabledSensorDefinitionIds.length
+      ? await this.prisma.$queryRaw<LatestTelemetryReadingRow[]>(
+          Prisma.sql`
+            SELECT DISTINCT ON ("sensorDefinitionId")
+              "id",
+              "parameterCode",
+              "vendorSensorId",
+              "numericValue",
+              "textValue",
+              "jsonValue",
+              "unit",
+              "dataSource",
+              "readingAt",
+              "receivedAt"
+            FROM "AssetTelemetryReading"
+            WHERE "companyId" = ${device.companyId}
+              AND "deviceId" = ${device.id}
+              AND "assetId" = ${device.assetId}
+              AND "sensorDefinitionId" IN (${Prisma.join(
+                enabledSensorDefinitionIds,
+              )})
+            ORDER BY
+              "sensorDefinitionId",
+              "readingAt" DESC,
+              "receivedAt" DESC,
+              "id" DESC
+          `,
+        )
+      : [];
 
     const parameters: Record<string, unknown> = {};
     let latestReadingAt: Date | null = null;
     let latestReceivedAt: Date | null = null;
 
     for (const reading of readings) {
-      if (parameters[reading.parameterCode] !== undefined) {
-        continue;
+      const existing = parameters[reading.parameterCode] as
+        | { readingAt?: Date; receivedAt?: Date }
+        | undefined;
+
+      const existingReadingAt = existing?.readingAt
+        ? new Date(existing.readingAt)
+        : null;
+      const existingReceivedAt = existing?.receivedAt
+        ? new Date(existing.receivedAt)
+        : null;
+
+      const shouldReplace =
+        !existing ||
+        !existingReadingAt ||
+        reading.readingAt > existingReadingAt ||
+        (reading.readingAt.getTime() === existingReadingAt.getTime() &&
+          (!existingReceivedAt || reading.receivedAt > existingReceivedAt));
+
+      if (shouldReplace) {
+        const value =
+          reading.numericValue ??
+          reading.textValue ??
+          reading.jsonValue ??
+          null;
+
+        parameters[reading.parameterCode] = {
+          value,
+          numericValue: reading.numericValue,
+          textValue: reading.textValue,
+          jsonValue: reading.jsonValue,
+          unit: reading.unit,
+          dataSource: reading.dataSource,
+          vendorSensorId: reading.vendorSensorId,
+          readingAt: reading.readingAt,
+          receivedAt: reading.receivedAt,
+        };
       }
-
-      const value =
-        reading.numericValue ??
-        reading.textValue ??
-        reading.jsonValue ??
-        null;
-
-      parameters[reading.parameterCode] = {
-        value,
-        numericValue: reading.numericValue,
-        textValue: reading.textValue,
-        jsonValue: reading.jsonValue,
-        unit: reading.unit,
-        dataSource: reading.dataSource,
-        vendorSensorId: reading.vendorSensorId,
-        readingAt: reading.readingAt,
-        receivedAt: reading.receivedAt,
-      };
 
       if (!latestReadingAt || reading.readingAt > latestReadingAt) {
         latestReadingAt = reading.readingAt;

@@ -785,6 +785,7 @@ model AssetTelemetryReading {
   @@index([companyId, readingAt])
   @@index([assetId, parameterCode, readingAt])
   @@index([deviceId, readingAt])
+  @@index([deviceId, sensorDefinitionId, readingAt, receivedAt], map: "telemetry_reading_device_sensor_time_idx")
   @@index([rawMessageId])
   @@index([sensorDefinitionId])
 }
