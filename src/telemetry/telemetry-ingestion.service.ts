@@ -368,7 +368,13 @@ export class TelemetryIngestionService {
 
           if (!isEnabled) continue;
 
-          const mapped = this.xirgoMapper.map(sensor, definition);
+          // Device-level enablement is authoritative here. A catalog definition
+          // may have isActive=false as its default state, while this specific
+          // device has an explicit isEnabled=true override.
+          const mapped = this.xirgoMapper.map(sensor, {
+            ...definition,
+            isActive: true,
+          });
 
           readings.push({
             companyId,
@@ -679,7 +685,13 @@ export class TelemetryIngestionService {
 
           if (!isEnabled) continue;
 
-          const mapped = this.teltonikaMapper.map(io, definition);
+          // Device-level enablement is authoritative here. A catalog definition
+          // may have isActive=false as its default state, while this specific
+          // device has an explicit isEnabled=true override.
+          const mapped = this.teltonikaMapper.map(io, {
+            ...definition,
+            isActive: true,
+          });
 
           readings.push({
             companyId,
