@@ -345,7 +345,7 @@ export class StationsService {
     projectId?: string,
     includeDeleted = false,
   ) {
-    return this.prisma.station.findMany({
+    const stations = await this.prisma.station.findMany({
       where: {
         ...(includeDeleted ? {} : { deletedAt: null }),
         ...(companyId ? { companyId } : {}),
@@ -413,6 +413,79 @@ export class StationsService {
       orderBy: {
         createdAt: 'desc',
       },
+    });
+
+    if (!stations.length) return stations;
+
+    const stationIds = stations.map((station) => station.id);
+
+    // Total Pumped is a lifetime operational KPI. It is derived from the
+    // authoritative stock ledger so it is independent from frontend pagination
+    // or currently loaded operation rows. Only real outbound fuel movements are
+    // counted; stock adjustments and zero-balance anchors are intentionally
+    // excluded. Cancelled operations are excluded because cancellation replay
+    // removes their original stock movement.
+    const [outboundMovements, dispenserAllocations] = await Promise.all([
+      this.prisma.stationStockMovement.groupBy({
+        by: ['stationId'],
+        where: {
+          stationId: { in: stationIds },
+          movementType: {
+            in: [
+              'DIRECT_REFUEL_OUT',
+              'INTERNAL_TRANSFER_OUT',
+              'EXTERNAL_TRANSFER_OUT',
+            ],
+          },
+        },
+        _sum: {
+          quantity: true,
+        },
+      }),
+      (this.prisma as any).operationDispenserAllocation.groupBy({
+        by: ['stationId'],
+        where: {
+          stationId: { in: stationIds },
+          operation: {
+            status: 'COMPLETED',
+            type: {
+              in: [
+                'DIRECT_REFUEL',
+                'INTERNAL_TRANSFER',
+                'EXTERNAL_TRANSFER',
+              ],
+            },
+          },
+        },
+        _sum: {
+          quantity: true,
+        },
+      }),
+    ]);
+
+    const ledgerPumpedByStationId = new Map(
+      outboundMovements.map((item) => [
+        item.stationId,
+        Math.abs(Number(item._sum.quantity || 0)),
+      ]),
+    );
+
+    const dispenserPumpedByStationId = new Map(
+      dispenserAllocations.map((item: any) => [
+        item.stationId,
+        Math.abs(Number(item._sum.quantity || 0)),
+      ]),
+    );
+
+    return stations.map((station) => {
+      const isDispenser = this.getStationStructureType(station) === 'DISPENSER';
+
+      return {
+        ...station,
+        totalPumped: isDispenser
+          ? dispenserPumpedByStationId.get(station.id) || 0
+          : ledgerPumpedByStationId.get(station.id) || 0,
+      };
     });
   }
 
