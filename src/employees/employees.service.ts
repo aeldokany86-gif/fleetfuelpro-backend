@@ -551,6 +551,111 @@ export class EmployeesService {
       orderBy: { createdAt: 'desc' },
     });
 
+    const companyIds = Array.from(
+      new Set(
+        employees
+          .map((employee: any) => String(employee.companyId || "").trim())
+          .filter(Boolean),
+      ),
+    );
+
+    const operationMetrics = new Map<
+      string,
+      { operationsCount: number; dieselQty: number; projectsWorked: Set<string> }
+    >();
+
+    if (companyIds.length > 0) {
+      const completedOperations = await this.prisma.operation.findMany({
+        where: {
+          companyId: { in: companyIds },
+          status: 'COMPLETED',
+        },
+        select: {
+          companyId: true,
+          quantity: true,
+          fuelerEmployeeIdAtOperation: true,
+          projectIdAtOperation: true,
+          projectNameAtOperation: true,
+          requestedBy: {
+            select: {
+              linkedEmployee: {
+                select: {
+                  id: true,
+                  employeeId: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      const addMetric = (
+        company: string,
+        employeeIdentity: string,
+        quantity: number,
+        projectValue: string,
+      ) => {
+        const normalizedCompanyId = String(company || "").trim();
+        const normalizedEmployeeIdentity = String(employeeIdentity || "")
+          .trim()
+          .toLowerCase();
+
+        if (!normalizedCompanyId || !normalizedEmployeeIdentity) return;
+
+        const key = `${normalizedCompanyId}::${normalizedEmployeeIdentity}`;
+        const current = operationMetrics.get(key) || {
+          operationsCount: 0,
+          dieselQty: 0,
+          projectsWorked: new Set<string>(),
+        };
+
+        current.operationsCount += 1;
+        current.dieselQty += Number.isFinite(quantity) ? quantity : 0;
+
+        const normalizedProject = String(projectValue || "").trim();
+        if (normalizedProject) {
+          current.projectsWorked.add(normalizedProject);
+        }
+
+        operationMetrics.set(key, current);
+      };
+
+      for (const operation of completedOperations) {
+        const quantity = Number(operation.quantity || 0);
+        const projectValue =
+          operation.projectIdAtOperation ||
+          operation.projectNameAtOperation ||
+          "";
+
+        const snapshotEmployeeCode = String(
+          operation.fuelerEmployeeIdAtOperation || "",
+        ).trim();
+
+        const linkedEmployee = operation.requestedBy?.linkedEmployee;
+        const fallbackEmployeeCode = String(
+          linkedEmployee?.employeeId || "",
+        ).trim();
+        const fallbackEmployeeBackendId = String(linkedEmployee?.id || "").trim();
+
+        const identities = snapshotEmployeeCode
+          ? [snapshotEmployeeCode]
+          : [fallbackEmployeeCode, fallbackEmployeeBackendId].filter(Boolean);
+
+        const seen = new Set<string>();
+        for (const identity of identities) {
+          const normalizedIdentity = String(identity).trim().toLowerCase();
+          if (!normalizedIdentity || seen.has(normalizedIdentity)) continue;
+          seen.add(normalizedIdentity);
+          addMetric(
+            operation.companyId,
+            identity,
+            quantity,
+            projectValue,
+          );
+        }
+      }
+    }
+
     return employees.map((employee: any) => {
       const linkedRole = this.normalizeRoleName(employee.linkedUser?.role?.name);
       const managerProjectCount =
@@ -561,11 +666,26 @@ export class EmployeesService {
           ).length || 0
         : 0;
 
+      const metricCandidates = [employee.employeeId, employee.id]
+        .map((value: any) => String(value || "").trim().toLowerCase())
+        .filter(Boolean);
+
+      const employeeMetric = metricCandidates
+        .map((identity: string) =>
+          operationMetrics.get(`${employee.companyId}::${identity}`),
+        )
+        .find(Boolean);
+
       return {
         ...employee,
         multiProjectEnabled,
         assignedProjectsCount:
           managerProjectCount ?? ((employee.projectId ? 1 : 0) + additionalProjectCount),
+        operationalMetrics: {
+          operationsCount: employeeMetric?.operationsCount || 0,
+          dieselQty: employeeMetric?.dieselQty || 0,
+          projectsWorkedCount: employeeMetric?.projectsWorked?.size || 0,
+        },
       };
     });
   }
