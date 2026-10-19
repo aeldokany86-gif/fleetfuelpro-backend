@@ -569,6 +569,9 @@ export class EmployeesService {
         where: {
           companyId: { in: companyIds },
           status: 'COMPLETED',
+          type: {
+            in: ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'],
+          },
         },
         select: {
           companyId: true,
