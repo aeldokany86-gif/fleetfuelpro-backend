@@ -319,7 +319,115 @@ export class ProjectsService {
       },
     });
 
-    return projects.map((project) => this.applyEffectiveCurrentPrice(project));
+    if (!projects.length) return projects;
+
+    const pricedProjects = projects.map((project) =>
+      this.applyEffectiveCurrentPrice(project),
+    );
+    const projectIds = pricedProjects.map((project) => project.id);
+
+    /*
+      Project equipment-fuel KPIs must be independent from the generic
+      /operations list, which is intentionally capped for UI performance.
+      Read the complete COMPLETED refuel history here and aggregate it by the
+      immutable project snapshot captured on each operation.
+
+      Legacy rows that predate project snapshots fall back to the asset's
+      current project only when projectIdAtOperation is null.
+    */
+    const refuelOperations = await this.prisma.operation.findMany({
+      where: {
+        status: "COMPLETED",
+        type: {
+          in: ["DIRECT_REFUEL", "EXTERNAL_DIRECT_REFUEL"],
+        },
+        ...(companyId ? { companyId } : {}),
+        OR: [
+          { projectIdAtOperation: { in: projectIds } },
+          {
+            projectIdAtOperation: null,
+            asset: {
+              is: {
+                projectId: { in: projectIds },
+              },
+            },
+          },
+        ],
+      },
+      select: {
+        projectIdAtOperation: true,
+        quantity: true,
+        totalCostAtOperation: true,
+        pricePerLiterAtOperation: true,
+        asset: {
+          select: {
+            projectId: true,
+          },
+        },
+      },
+    });
+
+    const currentPriceByProjectId = new Map(
+      pricedProjects.map((project) => [
+        project.id,
+        Number(project.currentFuelPrice || 0),
+      ]),
+    );
+
+    const metricsByProjectId = new Map<
+      string,
+      { operationsCount: number; fuelConsumed: number; fuelCost: number }
+    >();
+
+    for (const operation of refuelOperations) {
+      const resolvedProjectId =
+        operation.projectIdAtOperation || operation.asset?.projectId || "";
+
+      if (!resolvedProjectId || !currentPriceByProjectId.has(resolvedProjectId)) {
+        continue;
+      }
+
+      const quantity = Number(operation.quantity || 0);
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        continue;
+      }
+
+      const current = metricsByProjectId.get(resolvedProjectId) || {
+        operationsCount: 0,
+        fuelConsumed: 0,
+        fuelCost: 0,
+      };
+
+      const storedCost = Number(operation.totalCostAtOperation || 0);
+      const storedPrice = Number(operation.pricePerLiterAtOperation || 0);
+      const fallbackProjectPrice =
+        currentPriceByProjectId.get(resolvedProjectId) || 0;
+
+      const operationCost =
+        storedCost > 0
+          ? storedCost
+          : quantity *
+            (storedPrice > 0 ? storedPrice : fallbackProjectPrice);
+
+      current.operationsCount += 1;
+      current.fuelConsumed += quantity;
+      current.fuelCost += Number.isFinite(operationCost) ? operationCost : 0;
+
+      metricsByProjectId.set(resolvedProjectId, current);
+    }
+
+    return pricedProjects.map((project) => {
+      const metrics = metricsByProjectId.get(project.id) || {
+        operationsCount: 0,
+        fuelConsumed: 0,
+        fuelCost: 0,
+      };
+
+      return {
+        ...project,
+        operationalMetrics: metrics,
+      };
+    });
   }
 
   async getMobileProjectContext(
