@@ -2611,37 +2611,105 @@ async getOperationsDashboard(
       .filter((item: any) => item.meter !== null);
 
     const positiveDeltas: number[] = [];
+    const positiveRates: number[] = [];
     const deltas: Array<{
       delta: number;
+      elapsedHours: number;
+      ratePerHour: number | null;
       operation: any;
       previousOperation: any;
+      currentMeter: number;
+      previousMeter: number;
+      nextMeter: number | null;
     }> = [];
 
     for (let index = 1; index < readings.length; index += 1) {
       const current = readings[index];
       const previous = readings[index - 1];
-      const delta = Number(current.meter) - Number(previous.meter);
+      const next = readings[index + 1] || null;
+
+      const currentMeter = Number(current.meter);
+      const previousMeter = Number(previous.meter);
+      const nextMeter = next ? Number(next.meter) : null;
+      const delta = currentMeter - previousMeter;
+
+      const currentTime = new Date(current.operation.occurredAt).getTime();
+      const previousTime = new Date(previous.operation.occurredAt).getTime();
+      const elapsedHours =
+        Number.isFinite(currentTime) &&
+        Number.isFinite(previousTime) &&
+        currentTime > previousTime
+          ? (currentTime - previousTime) / (60 * 60 * 1000)
+          : 0;
+
+      const ratePerHour =
+        delta > 0 && elapsedHours >= 0.25
+          ? delta / elapsedHours
+          : null;
 
       deltas.push({
         delta,
+        elapsedHours,
+        ratePerHour,
         operation: current.operation,
         previousOperation: previous.operation,
+        currentMeter,
+        previousMeter,
+        nextMeter:
+          nextMeter !== null && Number.isFinite(nextMeter)
+            ? nextMeter
+            : null,
       });
 
       if (delta > 0) {
         positiveDeltas.push(delta);
       }
+
+      if (
+        ratePerHour !== null &&
+        Number.isFinite(ratePerHour) &&
+        ratePerHour > 0
+      ) {
+        positiveRates.push(ratePerHour);
+      }
     }
 
     const typicalIncrement = median(positiveDeltas);
+    const typicalRatePerHour = median(positiveRates);
+
+    /*
+      Meter anomaly rule:
+      - A broken sequence is always suspicious (the next reading drops below
+        the current reading, which is the classic extra-zero / bad-entry case).
+      - A large jump by itself is NOT enough anymore. Refuelling intervals are
+        irregular, so +35 can be perfectly valid when several days passed.
+      - For an isolated large jump to be flagged, it must be extreme both in
+        absolute increment AND after normalising by elapsed time.
+      This removes false positives such as 3485 -> 3520 when the following
+      reading continues normally from 3520.
+    */
     const recentCandidates = deltas.filter((item) => {
       const occurredAt = new Date(item.operation.occurredAt).getTime();
-      return (
-        Number.isFinite(occurredAt) &&
-        occurredAt >= anomalyWindowStart &&
+      if (
+        !Number.isFinite(occurredAt) ||
+        occurredAt < anomalyWindowStart
+      ) {
+        return false;
+      }
+
+      const sequenceBreak =
+        item.nextMeter !== null && item.nextMeter < item.currentMeter;
+
+      const extremeDelta =
         typicalIncrement > 0 &&
-        item.delta > typicalIncrement * 3
-      );
+        item.delta > typicalIncrement * 3;
+
+      const extremeRate =
+        item.ratePerHour !== null &&
+        typicalRatePerHour > 0 &&
+        item.ratePerHour > typicalRatePerHour * 3;
+
+      return sequenceBreak || (extremeDelta && extremeRate);
     });
 
     const latestMeterAnomaly = recentCandidates.length
@@ -2650,20 +2718,25 @@ async getOperationsDashboard(
 
     meterAnalyticsByAsset.set(String(assetId), {
       typicalIncrement,
+      typicalRatePerHour,
       meterAnomaly: latestMeterAnomaly
         ? {
             date: latestMeterAnomaly.operation.occurredAt,
             operationNo:
               latestMeterAnomaly.operation.operationNo ||
               latestMeterAnomaly.operation.id,
-            previousMeterReading: resolveMeterValue(
-              latestMeterAnomaly.previousOperation,
-            ),
-            currentMeterReading: resolveMeterValue(
-              latestMeterAnomaly.operation,
-            ),
+            previousMeterReading: latestMeterAnomaly.previousMeter,
+            currentMeterReading: latestMeterAnomaly.currentMeter,
+            nextMeterReading: latestMeterAnomaly.nextMeter,
             meterIncrease: latestMeterAnomaly.delta,
+            elapsedHours: latestMeterAnomaly.elapsedHours,
+            ratePerHour: latestMeterAnomaly.ratePerHour,
             typicalIncrease: typicalIncrement,
+            typicalRatePerHour,
+            sequenceBreak:
+              latestMeterAnomaly.nextMeter !== null &&
+              latestMeterAnomaly.nextMeter <
+                latestMeterAnomaly.currentMeter,
           }
         : null,
     });
@@ -2779,6 +2852,23 @@ async getOperationsDashboard(
           meterAnomaly?.currentMeterReading == null
             ? null
             : Number(meterAnomaly.currentMeterReading),
+        anomalyNextMeterReading:
+          meterAnomaly?.nextMeterReading == null
+            ? null
+            : Number(meterAnomaly.nextMeterReading),
+        anomalyElapsedHours:
+          meterAnomaly?.elapsedHours == null
+            ? null
+            : Number(meterAnomaly.elapsedHours.toFixed(1)),
+        anomalyRatePerHour:
+          meterAnomaly?.ratePerHour == null
+            ? null
+            : Number(meterAnomaly.ratePerHour.toFixed(3)),
+        typicalMeterRatePerHour:
+          meterAnalytics.typicalRatePerHour > 0
+            ? Number(meterAnalytics.typicalRatePerHour.toFixed(3))
+            : null,
+        anomalySequenceBreak: Boolean(meterAnomaly?.sequenceBreak),
         anomalyMeterIncrease:
           meterAnomaly?.meterIncrease == null
             ? null
