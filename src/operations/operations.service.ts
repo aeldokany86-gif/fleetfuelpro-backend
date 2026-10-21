@@ -2742,6 +2742,150 @@ async getOperationsDashboard(
     });
   }
 
+  const analyticsNow = Date.now();
+  const recent30Start = analyticsNow - 30 * 24 * 60 * 60 * 1000;
+  const previous30Start = analyticsNow - 60 * 24 * 60 * 60 * 1000;
+
+  const calculateWindowEfficiency = (
+    assetId: string,
+    startTime: number,
+    endTime: number,
+  ) => {
+    const rows = (meterHistoryByAsset.get(String(assetId)) || [])
+      .filter((operation: any) => {
+        const occurredAt = new Date(operation.occurredAt).getTime();
+        return (
+          Number.isFinite(occurredAt) &&
+          occurredAt >= startTime &&
+          occurredAt < endTime
+        );
+      })
+      .map((operation: any) => ({
+        operation,
+        meter: resolveMeterValue(operation),
+      }))
+      .filter((item: any) => item.meter !== null);
+
+    if (rows.length < 2) {
+      return {
+        efficiency: null,
+        fuel: 0,
+        usage: 0,
+        operationsCount: rows.length,
+      };
+    }
+
+    const firstMeter = Number(rows[0].meter);
+    const lastMeter = Number(rows[rows.length - 1].meter);
+    const usage = lastMeter - firstMeter;
+
+    if (!Number.isFinite(usage) || usage <= 0) {
+      return {
+        efficiency: null,
+        fuel: 0,
+        usage: 0,
+        operationsCount: rows.length,
+      };
+    }
+
+    const fuel = rows.reduce(
+      (sum: number, item: any) =>
+        sum + Math.max(0, Number(item.operation.quantity || 0)),
+      0,
+    );
+
+    const efficiency = fuel > 0 ? fuel / usage : null;
+
+    return {
+      efficiency:
+        efficiency !== null && Number.isFinite(efficiency)
+          ? efficiency
+          : null,
+      fuel,
+      usage,
+      operationsCount: rows.length,
+    };
+  };
+
+  const findDeviationStart = (
+    assetId: string,
+    peerMedian: number,
+    thresholdPercent: number,
+  ) => {
+    if (!(peerMedian > 0)) return null;
+
+    const rows = (meterHistoryByAsset.get(String(assetId)) || [])
+      .map((operation: any) => ({
+        operation,
+        meter: resolveMeterValue(operation),
+      }))
+      .filter((item: any) => item.meter !== null);
+
+    const intervalRows: Array<{
+      date: Date;
+      operationNo: string;
+      efficiency: number;
+    }> = [];
+
+    for (let index = 1; index < rows.length; index += 1) {
+      const current = rows[index];
+      const previous = rows[index - 1];
+      const occurredAt = new Date(current.operation.occurredAt);
+      const timestamp = occurredAt.getTime();
+
+      if (
+        !Number.isFinite(timestamp) ||
+        timestamp < recent30Start ||
+        timestamp >= analyticsNow
+      ) {
+        continue;
+      }
+
+      const usage = Number(current.meter) - Number(previous.meter);
+      const fuel = Number(current.operation.quantity || 0);
+
+      if (
+        !Number.isFinite(usage) ||
+        usage <= 0 ||
+        !Number.isFinite(fuel) ||
+        fuel <= 0
+      ) {
+        continue;
+      }
+
+      intervalRows.push({
+        date: occurredAt,
+        operationNo:
+          current.operation.operationNo || current.operation.id,
+        efficiency: fuel / usage,
+      });
+    }
+
+    if (intervalRows.length < 2) return null;
+
+    const threshold = peerMedian * (1 + thresholdPercent / 100);
+
+    // Mark the first point of a sustained deviation: two consecutive
+    // refuel intervals above the peer threshold. This avoids calling a
+    // one-off noisy fill the start of a trend.
+    for (let index = 0; index < intervalRows.length - 1; index += 1) {
+      const current = intervalRows[index];
+      const next = intervalRows[index + 1];
+
+      if (
+        current.efficiency >= threshold &&
+        next.efficiency >= threshold
+      ) {
+        return {
+          date: current.date,
+          operationNo: current.operationNo,
+        };
+      }
+    }
+
+    return null;
+  };
+
   const preliminaryEquipmentSummary = Array.from(equipmentMap.values()).map(
     (item) => {
       const lifetime = lifetimeMap.get(item.equipmentBackendId);
@@ -2792,6 +2936,51 @@ async getOperationsDashboard(
         item.numericEfficiency > 0 && peerMedian > 0
           ? ((item.numericEfficiency - peerMedian) / peerMedian) * 100
           : null;
+
+      const recent30 = calculateWindowEfficiency(
+        item.equipmentBackendId,
+        recent30Start,
+        analyticsNow,
+      );
+      const previous30 = calculateWindowEfficiency(
+        item.equipmentBackendId,
+        previous30Start,
+        recent30Start,
+      );
+
+      const recentVsPreviousPercent =
+        recent30.efficiency !== null &&
+        previous30.efficiency !== null &&
+        previous30.efficiency > 0
+          ? ((recent30.efficiency - previous30.efficiency) /
+              previous30.efficiency) *
+            100
+          : null;
+
+      const recentVsPeerPercent =
+        recent30.efficiency !== null && peerMedian > 0
+          ? ((recent30.efficiency - peerMedian) / peerMedian) * 100
+          : null;
+
+      let efficiencyTrend = 'INSUFFICIENT_DATA';
+      if (
+        recentVsPreviousPercent !== null &&
+        Number.isFinite(recentVsPreviousPercent)
+      ) {
+        if (recentVsPreviousPercent >= 10) {
+          efficiencyTrend = 'RISING';
+        } else if (recentVsPreviousPercent <= -10) {
+          efficiencyTrend = 'IMPROVING';
+        } else {
+          efficiencyTrend = 'STABLE';
+        }
+      }
+
+      const deviationStart = findDeviationStart(
+        item.equipmentBackendId,
+        peerMedian,
+        15,
+      );
 
       const meterAnalytics =
         meterAnalyticsByAsset.get(item.equipmentBackendId) || {};
@@ -2850,6 +3039,27 @@ async getOperationsDashboard(
           deviationPercent === null || !Number.isFinite(deviationPercent)
             ? null
             : Number(deviationPercent.toFixed(1)),
+        recent30Efficiency:
+          recent30.efficiency === null
+            ? null
+            : Number(recent30.efficiency.toFixed(2)),
+        previous30Efficiency:
+          previous30.efficiency === null
+            ? null
+            : Number(previous30.efficiency.toFixed(2)),
+        recentVsPreviousPercent:
+          recentVsPreviousPercent === null ||
+          !Number.isFinite(recentVsPreviousPercent)
+            ? null
+            : Number(recentVsPreviousPercent.toFixed(1)),
+        recentVsPeerPercent:
+          recentVsPeerPercent === null ||
+          !Number.isFinite(recentVsPeerPercent)
+            ? null
+            : Number(recentVsPeerPercent.toFixed(1)),
+        efficiencyTrend,
+        deviationStartedAt: deviationStart?.date || null,
+        deviationStartOperationNo: deviationStart?.operationNo || null,
         attentionStatus,
         attentionReason,
         attentionReasonCode,
