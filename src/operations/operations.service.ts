@@ -2535,8 +2535,136 @@ async getOperationsDashboard(
     ),
   );
 
-  const equipmentSummary = Array.from(equipmentMap.values())
-    .map((item) => {
+  // Compact all-history meter series used only for analytics. This is
+  // read-only and does not affect operation creation, stock, approvals, or
+  // historical correction workflows.
+  const meterHistoryOperations = equipmentIds.length
+    ? await (this.prisma as any).operation.findMany({
+        where: {
+          companyId: currentUser.companyId,
+          status: 'COMPLETED',
+          type: {
+            in: ['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'],
+          },
+          assetId: { in: equipmentIds },
+        },
+        select: {
+          id: true,
+          operationNo: true,
+          assetId: true,
+          quantity: true,
+          occurredAt: true,
+          odometer: true,
+          lifetimeOdometer: true,
+        },
+        orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
+      })
+    : [];
+
+  const meterHistoryByAsset = new Map<string, any[]>();
+  for (const operation of meterHistoryOperations) {
+    const key = String(operation.assetId || '');
+    if (!key) continue;
+    const rows = meterHistoryByAsset.get(key) || [];
+    rows.push(operation);
+    meterHistoryByAsset.set(key, rows);
+  }
+
+  const median = (values: number[]) => {
+    const valid = values
+      .filter((value) => Number.isFinite(value))
+      .slice()
+      .sort((a, b) => a - b);
+
+    if (!valid.length) return 0;
+    const middle = Math.floor(valid.length / 2);
+    return valid.length % 2
+      ? valid[middle]
+      : (valid[middle - 1] + valid[middle]) / 2;
+  };
+
+  const resolveMeterValue = (operation: any) => {
+    const lifetime = Number(operation?.lifetimeOdometer);
+    if (
+      operation?.lifetimeOdometer !== null &&
+      operation?.lifetimeOdometer !== undefined &&
+      Number.isFinite(lifetime) &&
+      lifetime >= 0
+    ) {
+      return lifetime;
+    }
+
+    const meter = Number(operation?.odometer);
+    return Number.isFinite(meter) && meter >= 0 ? meter : null;
+  };
+
+  const meterAnalyticsByAsset = new Map<string, any>();
+  const anomalyWindowStart = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
+  for (const assetId of equipmentIds) {
+    const operations = meterHistoryByAsset.get(String(assetId)) || [];
+    const readings = operations
+      .map((operation: any) => ({
+        operation,
+        meter: resolveMeterValue(operation),
+      }))
+      .filter((item: any) => item.meter !== null);
+
+    const positiveDeltas: number[] = [];
+    const deltas: Array<{
+      delta: number;
+      operation: any;
+      previousOperation: any;
+    }> = [];
+
+    for (let index = 1; index < readings.length; index += 1) {
+      const current = readings[index];
+      const previous = readings[index - 1];
+      const delta = Number(current.meter) - Number(previous.meter);
+
+      deltas.push({
+        delta,
+        operation: current.operation,
+        previousOperation: previous.operation,
+      });
+
+      if (delta > 0) {
+        positiveDeltas.push(delta);
+      }
+    }
+
+    const typicalIncrement = median(positiveDeltas);
+    const recentCandidates = deltas.filter((item) => {
+      const occurredAt = new Date(item.operation.occurredAt).getTime();
+      return (
+        Number.isFinite(occurredAt) &&
+        occurredAt >= anomalyWindowStart &&
+        typicalIncrement > 0 &&
+        item.delta > typicalIncrement * 3
+      );
+    });
+
+    const latestMeterAnomaly = recentCandidates.length
+      ? recentCandidates[recentCandidates.length - 1]
+      : null;
+
+    meterAnalyticsByAsset.set(String(assetId), {
+      typicalIncrement,
+      meterAnomaly: latestMeterAnomaly
+        ? {
+            date: latestMeterAnomaly.operation.occurredAt,
+            operationNo:
+              latestMeterAnomaly.operation.operationNo ||
+              latestMeterAnomaly.operation.id,
+            meterIncrease: latestMeterAnomaly.delta,
+            typicalIncrease: typicalIncrement,
+          }
+        : null,
+    });
+  }
+
+  const preliminaryEquipmentSummary = Array.from(equipmentMap.values()).map(
+    (item) => {
       const lifetime = lifetimeMap.get(item.equipmentBackendId);
       const firstLifetime =
         lifetime?._min?.lifetimeOdometer == null
@@ -2548,6 +2676,10 @@ async getOperationsDashboard(
           : Number(lifetime._max.lifetimeOdometer);
       const lifetimeDistance = Math.max(0, lastLifetime - firstLifetime);
       const lifetimeFuelConsumption = Number(lifetime?._sum?.quantity || 0);
+      const numericEfficiency =
+        lifetimeDistance > 0
+          ? lifetimeFuelConsumption / lifetimeDistance
+          : 0;
 
       return {
         equipmentBackendId: item.equipmentBackendId,
@@ -2560,13 +2692,109 @@ async getOperationsDashboard(
         fuelConsumption: item.fuelConsumption,
         totalCost: item.totalCost,
         distance: lifetimeDistance,
+        numericEfficiency,
+      };
+    },
+  );
+
+  const equipmentSummary = preliminaryEquipmentSummary
+    .map((item) => {
+      const peers = preliminaryEquipmentSummary
+        .filter(
+          (candidate) =>
+            candidate.equipmentBackendId !== item.equipmentBackendId &&
+            candidate.equipmentType === item.equipmentType &&
+            candidate.numericEfficiency > 0,
+        )
+        .map((candidate) => candidate.numericEfficiency);
+
+      const peerMedian = median(peers);
+      const deviationPercent =
+        item.numericEfficiency > 0 && peerMedian > 0
+          ? ((item.numericEfficiency - peerMedian) / peerMedian) * 100
+          : null;
+
+      const meterAnalytics =
+        meterAnalyticsByAsset.get(item.equipmentBackendId) || {};
+      const meterAnomaly = meterAnalytics.meterAnomaly || null;
+
+      let attentionStatus = 'NORMAL';
+      let attentionReason = '';
+
+      if (meterAnomaly) {
+        attentionStatus = 'METER_ANOMALY';
+        attentionReason =
+          `Unusual meter jump +${meterAnomaly.meterIncrease.toFixed(1)} vs typical +${meterAnomaly.typicalIncrease.toFixed(1)}`;
+      } else if (
+        deviationPercent !== null &&
+        Number.isFinite(deviationPercent) &&
+        deviationPercent >= 25
+      ) {
+        attentionStatus = 'HIGH_CONSUMPTION';
+        attentionReason =
+          `Efficiency is ${deviationPercent.toFixed(1)}% above peer median`;
+      } else if (
+        deviationPercent !== null &&
+        Number.isFinite(deviationPercent) &&
+        deviationPercent >= 15
+      ) {
+        attentionStatus = 'WATCH';
+        attentionReason =
+          `Efficiency is ${deviationPercent.toFixed(1)}% above peer median`;
+      } else if (item.numericEfficiency <= 0 || peers.length < 2) {
+        attentionStatus = 'INSUFFICIENT_DATA';
+        attentionReason =
+          item.numericEfficiency <= 0
+            ? 'Not enough valid meter usage to calculate efficiency'
+            : 'Not enough comparable equipment for peer benchmark';
+      }
+
+      return {
+        ...item,
         efficiency:
-          lifetimeDistance > 0
-            ? (lifetimeFuelConsumption / lifetimeDistance).toFixed(2)
+          item.numericEfficiency > 0
+            ? item.numericEfficiency.toFixed(2)
             : '-',
+        peerMedianEfficiency:
+          peerMedian > 0 ? Number(peerMedian.toFixed(2)) : null,
+        deviationPercent:
+          deviationPercent === null || !Number.isFinite(deviationPercent)
+            ? null
+            : Number(deviationPercent.toFixed(1)),
+        attentionStatus,
+        attentionReason,
+        anomalyDate: meterAnomaly?.date || null,
+        anomalyOperationNo: meterAnomaly?.operationNo || null,
+        anomalyMeterIncrease:
+          meterAnomaly?.meterIncrease == null
+            ? null
+            : Number(meterAnomaly.meterIncrease.toFixed(1)),
+        typicalMeterIncrease:
+          meterAnalytics.typicalIncrement > 0
+            ? Number(meterAnalytics.typicalIncrement.toFixed(1))
+            : null,
       };
     })
     .sort((a, b) => b.fuelConsumption - a.fuelConsumption);
+
+  const attentionRows = equipmentSummary.filter((item) =>
+    ['METER_ANOMALY', 'HIGH_CONSUMPTION', 'WATCH'].includes(
+      item.attentionStatus,
+    ),
+  );
+
+  const attentionSummary = {
+    assetsNeedingAttention: attentionRows.length,
+    meterAnomalies: attentionRows.filter(
+      (item) => item.attentionStatus === 'METER_ANOMALY',
+    ).length,
+    highConsumption: attentionRows.filter(
+      (item) => item.attentionStatus === 'HIGH_CONSUMPTION',
+    ).length,
+    watch: attentionRows.filter(
+      (item) => item.attentionStatus === 'WATCH',
+    ).length,
+  };
 
   const equipmentTypeConsumptionSummary = Array.from(
     equipmentTypeMap.values(),
@@ -2574,7 +2802,11 @@ async getOperationsDashboard(
 
   return {
     generatedAt: new Date().toISOString(),
-    summary,
+    summary: {
+      ...summary,
+      assetsNeedingAttention: attentionSummary.assetsNeedingAttention,
+    },
+    attentionSummary,
     equipmentSummary,
     equipmentTypeConsumptionSummary,
     dailyConsumptionSummary,
