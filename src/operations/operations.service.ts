@@ -2799,9 +2799,13 @@ async getOperationsDashboard(
 
       let attentionStatus = 'NORMAL';
       let attentionReason = '';
+      let attentionReasonCode = 'NORMAL';
 
       if (meterAnomaly) {
         attentionStatus = 'METER_ANOMALY';
+        attentionReasonCode = meterAnomaly.sequenceBreak
+          ? 'METER_SEQUENCE_BREAK'
+          : 'METER_JUMP';
         attentionReason =
           `Unusual meter jump +${meterAnomaly.meterIncrease.toFixed(1)} vs typical +${meterAnomaly.typicalIncrease.toFixed(1)}`;
       } else if (
@@ -2810,6 +2814,7 @@ async getOperationsDashboard(
         deviationPercent >= 25
       ) {
         attentionStatus = 'HIGH_CONSUMPTION';
+        attentionReasonCode = 'EFFICIENCY_ABOVE_PEER';
         attentionReason =
           `Efficiency is ${deviationPercent.toFixed(1)}% above peer median`;
       } else if (
@@ -2818,10 +2823,15 @@ async getOperationsDashboard(
         deviationPercent >= 15
       ) {
         attentionStatus = 'WATCH';
+        attentionReasonCode = 'EFFICIENCY_ABOVE_PEER';
         attentionReason =
           `Efficiency is ${deviationPercent.toFixed(1)}% above peer median`;
       } else if (item.numericEfficiency <= 0 || peers.length < 2) {
         attentionStatus = 'INSUFFICIENT_DATA';
+        attentionReasonCode =
+          item.numericEfficiency <= 0
+            ? 'INSUFFICIENT_METER_USAGE'
+            : 'INSUFFICIENT_PEERS';
         attentionReason =
           item.numericEfficiency <= 0
             ? 'Not enough valid meter usage to calculate efficiency'
@@ -2842,6 +2852,7 @@ async getOperationsDashboard(
             : Number(deviationPercent.toFixed(1)),
         attentionStatus,
         attentionReason,
+        attentionReasonCode,
         anomalyDate: meterAnomaly?.date || null,
         anomalyOperationNo: meterAnomaly?.operationNo || null,
         anomalyPreviousMeterReading:
