@@ -2656,6 +2656,12 @@ async getOperationsDashboard(
             operationNo:
               latestMeterAnomaly.operation.operationNo ||
               latestMeterAnomaly.operation.id,
+            previousMeterReading: resolveMeterValue(
+              latestMeterAnomaly.previousOperation,
+            ),
+            currentMeterReading: resolveMeterValue(
+              latestMeterAnomaly.operation,
+            ),
             meterIncrease: latestMeterAnomaly.delta,
             typicalIncrease: typicalIncrement,
           }
@@ -2765,6 +2771,14 @@ async getOperationsDashboard(
         attentionReason,
         anomalyDate: meterAnomaly?.date || null,
         anomalyOperationNo: meterAnomaly?.operationNo || null,
+        anomalyPreviousMeterReading:
+          meterAnomaly?.previousMeterReading == null
+            ? null
+            : Number(meterAnomaly.previousMeterReading),
+        anomalyCurrentMeterReading:
+          meterAnomaly?.currentMeterReading == null
+            ? null
+            : Number(meterAnomaly.currentMeterReading),
         anomalyMeterIncrease:
           meterAnomaly?.meterIncrease == null
             ? null
