@@ -3007,6 +3007,27 @@ async getOperationsDashboard(
         .map((candidate) => candidate.numericEfficiency);
 
       const peerMedian = median(peers);
+      // Descriptive benchmark reliability, not a calibrated probability.
+      // Compare only eligible peers, excluding the subject asset.
+      const peerMad = peers.length
+        ? median(peers.map((value) => Math.abs(value - peerMedian)))
+        : null;
+      const peerRelativeMadPercent =
+        peerMad !== null && peerMedian > 0
+          ? (peerMad / peerMedian) * 100
+          : null;
+      // Operational similarity and meter-data accuracy cannot be established
+      // from equipment type and lifetime ratio alone. Never claim HIGH
+      // reliability without those independent checks.
+      let peerComparisonReliability = 'INSUFFICIENT';
+      if (peers.length >= 2 && peerRelativeMadPercent !== null) {
+        if (peers.length >= 10 && peerRelativeMadPercent <= 10) {
+          peerComparisonReliability = 'MODERATE';
+        } else {
+          peerComparisonReliability = 'LOW';
+        }
+      }
+
       const deviationPercent =
         item.numericEfficiency > 0 && peerMedian > 0
           ? ((item.numericEfficiency - peerMedian) / peerMedian) * 100
@@ -3118,6 +3139,13 @@ async getOperationsDashboard(
             : Number(deviationPercent.toFixed(1)),
         intervalTrend90d,
         peerSampleSize: peers.length,
+        peerMad: peerMad === null ? null : Number(peerMad.toFixed(2)),
+        peerRelativeMadPercent:
+          peerRelativeMadPercent === null
+            ? null
+            : Number(peerRelativeMadPercent.toFixed(1)),
+        peerComparisonReliability,
+        peerComparisonReliabilityNote: 'OPERATING_CONDITIONS_UNVERIFIED',
         peerGroupSize: peers.length + (item.numericEfficiency > 0 ? 1 : 0),
         recent30Efficiency:
           recent30.efficiency === null
