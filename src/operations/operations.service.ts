@@ -3130,17 +3130,17 @@ async getOperationsDashboard(
       let attentionReason = '';
       let attentionReasonCode = 'NORMAL';
 
-      if (meterAnomaly) {
+      if (stagnantMeter) {
+        attentionStatus = 'METER_ANOMALY';
+        attentionReasonCode = 'METER_STUCK';
+        attentionReason = `Suspected stuck meter: ${stagnantMeter.operationsCount} refuels with unchanged reading ${stagnantMeter.reading}`;
+      } else if (meterAnomaly) {
         attentionStatus = 'METER_ANOMALY';
         attentionReasonCode = meterAnomaly.sequenceBreak
           ? 'METER_SEQUENCE_BREAK'
           : 'METER_JUMP';
         attentionReason =
           `Unusual meter jump +${meterAnomaly.meterIncrease.toFixed(1)} vs typical +${meterAnomaly.typicalIncrease.toFixed(1)}`;
-      } else if (stagnantMeter) {
-        attentionStatus = 'METER_ANOMALY';
-        attentionReasonCode = 'METER_STUCK';
-        attentionReason = `Suspected stuck meter: ${stagnantMeter.operationsCount} refuels with unchanged reading ${stagnantMeter.reading}`;
       } else if (
         deviationPercent !== null &&
         Number.isFinite(deviationPercent) &&
