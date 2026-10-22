@@ -3117,6 +3117,8 @@ async getOperationsDashboard(
             ? null
             : Number(deviationPercent.toFixed(1)),
         intervalTrend90d,
+        peerSampleSize: peers.length,
+        peerGroupSize: peers.length + (item.numericEfficiency > 0 ? 1 : 0),
         recent30Efficiency:
           recent30.efficiency === null
             ? null
