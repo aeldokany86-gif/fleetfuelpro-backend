@@ -2610,6 +2610,45 @@ async getOperationsDashboard(
       }))
       .filter((item: any) => item.meter !== null);
 
+    // Suspicion only: three or more positive refuels with exactly the same
+    // meter reading over at least 24 hours. Only the latest consecutive run
+    // can trigger the alert; meter movement clears the suspicion.
+    // The 24h threshold is a provisional operating rule, not fault proof.
+    let stagnantRun: any[] = [];
+    for (const reading of readings) {
+      if (
+        stagnantRun.length &&
+        Number(reading.meter) !== Number(stagnantRun[0].meter)
+      ) {
+        stagnantRun = [];
+      }
+      if (Number(reading.operation.quantity) > 0) {
+        stagnantRun.push(reading);
+      }
+    }
+    const firstStagnant = stagnantRun[0];
+    const lastStagnant = stagnantRun[stagnantRun.length - 1];
+    const stagnantHours = firstStagnant && lastStagnant
+      ? (new Date(lastStagnant.operation.occurredAt).getTime() -
+          new Date(firstStagnant.operation.occurredAt).getTime()) / 3600000
+      : 0;
+    const stagnantMeter = stagnantRun.length >= 3 &&
+      Number.isFinite(stagnantHours) && stagnantHours >= 24 &&
+      new Date(lastStagnant.operation.occurredAt).getTime() >= anomalyWindowStart
+      ? {
+          reading: Number(firstStagnant.meter),
+          operationsCount: stagnantRun.length,
+          quantity: Number(stagnantRun.reduce(
+            (sum: number, row: any) => sum + Number(row.operation.quantity || 0), 0,
+          ).toFixed(2)),
+          firstAt: firstStagnant.operation.occurredAt,
+          lastAt: lastStagnant.operation.occurredAt,
+          elapsedHours: Number(stagnantHours.toFixed(1)),
+          operationNos: stagnantRun.map((row: any) =>
+            String(row.operation.operationNo || row.operation.id)),
+        }
+      : null;
+
     const positiveDeltas: number[] = [];
     const positiveRates: number[] = [];
     const deltas: Array<{
@@ -2719,6 +2758,7 @@ async getOperationsDashboard(
     meterAnalyticsByAsset.set(String(assetId), {
       typicalIncrement,
       typicalRatePerHour,
+      stagnantMeter,
       meterAnomaly: latestMeterAnomaly
         ? {
             date: latestMeterAnomaly.operation.occurredAt,
@@ -3084,6 +3124,7 @@ async getOperationsDashboard(
       const meterAnalytics =
         meterAnalyticsByAsset.get(item.equipmentBackendId) || {};
       const meterAnomaly = meterAnalytics.meterAnomaly || null;
+      const stagnantMeter = meterAnalytics.stagnantMeter || null;
 
       let attentionStatus = 'NORMAL';
       let attentionReason = '';
@@ -3096,6 +3137,10 @@ async getOperationsDashboard(
           : 'METER_JUMP';
         attentionReason =
           `Unusual meter jump +${meterAnomaly.meterIncrease.toFixed(1)} vs typical +${meterAnomaly.typicalIncrease.toFixed(1)}`;
+      } else if (stagnantMeter) {
+        attentionStatus = 'METER_ANOMALY';
+        attentionReasonCode = 'METER_STUCK';
+        attentionReason = `Suspected stuck meter: ${stagnantMeter.operationsCount} refuels with unchanged reading ${stagnantMeter.reading}`;
       } else if (
         deviationPercent !== null &&
         Number.isFinite(deviationPercent) &&
@@ -3172,6 +3217,7 @@ async getOperationsDashboard(
         attentionStatus,
         attentionReason,
         attentionReasonCode,
+        stagnantMeter,
         anomalyDate: meterAnomaly?.date || null,
         anomalyOperationNo: meterAnomaly?.operationNo || null,
         anomalyPreviousMeterReading:
