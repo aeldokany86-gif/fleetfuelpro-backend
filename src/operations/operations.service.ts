@@ -2886,6 +2886,81 @@ async getOperationsDashboard(
     return null;
   };
 
+  // Exploratory refuel-interval trend. Quantities are refuel records, not
+  // directly measured fuel burned; individual spikes require verification.
+  // Only valid consecutive meter intervals ending within the last 90 days.
+  const trend90Start = analyticsNow - 90 * 24 * 60 * 60 * 1000;
+  const getRefuelIntervalTrend = (assetId: string, peerMedian: number) => {
+    const source = meterHistoryByAsset.get(String(assetId)) || [];
+    const samples: Array<{
+      date: Date;
+      operationNo: string;
+      previousOperationNo: string;
+      quantity: number;
+      meterDelta: number;
+      intervalEfficiency: number;
+    }> = [];
+
+    for (let index = 1; index < source.length; index += 1) {
+      const current = source[index];
+      const previous = source[index - 1];
+      const currentTime = new Date(current.occurredAt).getTime();
+      const previousTime = new Date(previous.occurredAt).getTime();
+      const currentMeter = resolveMeterValue(current);
+      const previousMeter = resolveMeterValue(previous);
+      const quantity = Number(current.quantity);
+
+      if (
+        !Number.isFinite(currentTime) ||
+        !Number.isFinite(previousTime) ||
+        currentTime <= previousTime ||
+        currentTime > analyticsNow ||
+        currentMeter === null ||
+        previousMeter === null ||
+        !Number.isFinite(quantity) ||
+        quantity <= 0
+      ) continue;
+
+      const meterDelta = currentMeter - previousMeter;
+      if (!Number.isFinite(meterDelta) || meterDelta <= 0) continue;
+
+      samples.push({
+        date: new Date(currentTime),
+        operationNo: String(current.operationNo || current.id),
+        previousOperationNo: String(previous.operationNo || previous.id),
+        quantity,
+        meterDelta,
+        intervalEfficiency: quantity / meterDelta,
+      });
+    }
+
+    // Historical baseline deliberately excludes all points in the visible
+    // 90-day interval; if there is no prior history, do not manufacture one.
+    const historical = samples
+      .filter((sample) => sample.date.getTime() < trend90Start)
+      .map((sample) => sample.intervalEfficiency);
+    const historicalBaseline = historical.length >= 3 ? median(historical) : null;
+
+    return {
+      historicalBaseline:
+        historicalBaseline === null ? null : Number(historicalBaseline.toFixed(2)),
+      baselineSamples: historical.length,
+      points: samples
+        .filter((sample) => sample.date.getTime() >= trend90Start)
+        .map((sample) => ({
+          occurredAt: sample.date,
+          operationNo: sample.operationNo,
+          previousOperationNo: sample.previousOperationNo,
+          quantity: Number(sample.quantity.toFixed(2)),
+          meterDelta: Number(sample.meterDelta.toFixed(2)),
+          intervalEfficiency: Number(sample.intervalEfficiency.toFixed(2)),
+          historicalBaseline:
+            historicalBaseline === null ? null : Number(historicalBaseline.toFixed(2)),
+          peerMedian: peerMedian > 0 ? Number(peerMedian.toFixed(2)) : null,
+        })),
+    };
+  };
+
   const preliminaryEquipmentSummary = Array.from(equipmentMap.values()).map(
     (item) => {
       const lifetime = lifetimeMap.get(item.equipmentBackendId);
@@ -2932,6 +3007,28 @@ async getOperationsDashboard(
         .map((candidate) => candidate.numericEfficiency);
 
       const peerMedian = median(peers);
+      // Descriptive benchmark reliability, not a calibrated probability.
+      // Compare only eligible peers, excluding the subject asset.
+      const peerMad = peers.length
+        ? median(peers.map((value) => Math.abs(value - peerMedian)))
+        : null;
+      const peerRelativeMadPercent =
+        peerMad !== null && peerMedian > 0
+          ? (peerMad / peerMedian) * 100
+          : null;
+      // Preliminary statistical consistency only; not a validated
+      // probability or proof of comparable operating conditions.
+      let peerComparisonReliability = 'INSUFFICIENT';
+      if (peers.length >= 2 && peerRelativeMadPercent !== null) {
+        if (peers.length >= 20 && peerRelativeMadPercent <= 5) {
+          peerComparisonReliability = 'HIGH';
+        } else if (peers.length >= 10 && peerRelativeMadPercent <= 10) {
+          peerComparisonReliability = 'MODERATE';
+        } else {
+          peerComparisonReliability = 'LOW';
+        }
+      }
+
       const deviationPercent =
         item.numericEfficiency > 0 && peerMedian > 0
           ? ((item.numericEfficiency - peerMedian) / peerMedian) * 100
@@ -2981,6 +3078,8 @@ async getOperationsDashboard(
         peerMedian,
         15,
       );
+
+      const intervalTrend90d = getRefuelIntervalTrend(item.equipmentBackendId, peerMedian);
 
       const meterAnalytics =
         meterAnalyticsByAsset.get(item.equipmentBackendId) || {};
@@ -3039,6 +3138,16 @@ async getOperationsDashboard(
           deviationPercent === null || !Number.isFinite(deviationPercent)
             ? null
             : Number(deviationPercent.toFixed(1)),
+        intervalTrend90d,
+        peerSampleSize: peers.length,
+        peerMad: peerMad === null ? null : Number(peerMad.toFixed(2)),
+        peerRelativeMadPercent:
+          peerRelativeMadPercent === null
+            ? null
+            : Number(peerRelativeMadPercent.toFixed(1)),
+        peerComparisonReliability,
+        peerComparisonReliabilityNote: 'OPERATING_CONDITIONS_UNVERIFIED',
+        peerGroupSize: peers.length + (item.numericEfficiency > 0 ? 1 : 0),
         recent30Efficiency:
           recent30.efficiency === null
             ? null
