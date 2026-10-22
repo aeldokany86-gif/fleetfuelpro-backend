@@ -3016,12 +3016,13 @@ async getOperationsDashboard(
         peerMad !== null && peerMedian > 0
           ? (peerMad / peerMedian) * 100
           : null;
-      // Operational similarity and meter-data accuracy cannot be established
-      // from equipment type and lifetime ratio alone. Never claim HIGH
-      // reliability without those independent checks.
+      // Preliminary statistical consistency only; not a validated
+      // probability or proof of comparable operating conditions.
       let peerComparisonReliability = 'INSUFFICIENT';
       if (peers.length >= 2 && peerRelativeMadPercent !== null) {
-        if (peers.length >= 10 && peerRelativeMadPercent <= 10) {
+        if (peers.length >= 20 && peerRelativeMadPercent <= 5) {
+          peerComparisonReliability = 'HIGH';
+        } else if (peers.length >= 10 && peerRelativeMadPercent <= 10) {
           peerComparisonReliability = 'MODERATE';
         } else {
           peerComparisonReliability = 'LOW';
