@@ -2886,6 +2886,81 @@ async getOperationsDashboard(
     return null;
   };
 
+  // Exploratory refuel-interval trend. Quantities are refuel records, not
+  // directly measured fuel burned; individual spikes require verification.
+  // Only valid consecutive meter intervals ending within the last 90 days.
+  const trend90Start = analyticsNow - 90 * 24 * 60 * 60 * 1000;
+  const getRefuelIntervalTrend = (assetId: string, peerMedian: number) => {
+    const source = meterHistoryByAsset.get(String(assetId)) || [];
+    const samples: Array<{
+      date: Date;
+      operationNo: string;
+      previousOperationNo: string;
+      quantity: number;
+      meterDelta: number;
+      intervalEfficiency: number;
+    }> = [];
+
+    for (let index = 1; index < source.length; index += 1) {
+      const current = source[index];
+      const previous = source[index - 1];
+      const currentTime = new Date(current.occurredAt).getTime();
+      const previousTime = new Date(previous.occurredAt).getTime();
+      const currentMeter = resolveMeterValue(current);
+      const previousMeter = resolveMeterValue(previous);
+      const quantity = Number(current.quantity);
+
+      if (
+        !Number.isFinite(currentTime) ||
+        !Number.isFinite(previousTime) ||
+        currentTime <= previousTime ||
+        currentTime > analyticsNow ||
+        currentMeter === null ||
+        previousMeter === null ||
+        !Number.isFinite(quantity) ||
+        quantity <= 0
+      ) continue;
+
+      const meterDelta = currentMeter - previousMeter;
+      if (!Number.isFinite(meterDelta) || meterDelta <= 0) continue;
+
+      samples.push({
+        date: new Date(currentTime),
+        operationNo: String(current.operationNo || current.id),
+        previousOperationNo: String(previous.operationNo || previous.id),
+        quantity,
+        meterDelta,
+        intervalEfficiency: quantity / meterDelta,
+      });
+    }
+
+    // Historical baseline deliberately excludes all points in the visible
+    // 90-day interval; if there is no prior history, do not manufacture one.
+    const historical = samples
+      .filter((sample) => sample.date.getTime() < trend90Start)
+      .map((sample) => sample.intervalEfficiency);
+    const historicalBaseline = historical.length >= 3 ? median(historical) : null;
+
+    return {
+      historicalBaseline:
+        historicalBaseline === null ? null : Number(historicalBaseline.toFixed(2)),
+      baselineSamples: historical.length,
+      points: samples
+        .filter((sample) => sample.date.getTime() >= trend90Start)
+        .map((sample) => ({
+          occurredAt: sample.date,
+          operationNo: sample.operationNo,
+          previousOperationNo: sample.previousOperationNo,
+          quantity: Number(sample.quantity.toFixed(2)),
+          meterDelta: Number(sample.meterDelta.toFixed(2)),
+          intervalEfficiency: Number(sample.intervalEfficiency.toFixed(2)),
+          historicalBaseline:
+            historicalBaseline === null ? null : Number(historicalBaseline.toFixed(2)),
+          peerMedian: peerMedian > 0 ? Number(peerMedian.toFixed(2)) : null,
+        })),
+    };
+  };
+
   const preliminaryEquipmentSummary = Array.from(equipmentMap.values()).map(
     (item) => {
       const lifetime = lifetimeMap.get(item.equipmentBackendId);
@@ -2982,6 +3057,8 @@ async getOperationsDashboard(
         15,
       );
 
+      const intervalTrend90d = getRefuelIntervalTrend(item.equipmentBackendId, peerMedian);
+
       const meterAnalytics =
         meterAnalyticsByAsset.get(item.equipmentBackendId) || {};
       const meterAnomaly = meterAnalytics.meterAnomaly || null;
@@ -3039,6 +3116,7 @@ async getOperationsDashboard(
           deviationPercent === null || !Number.isFinite(deviationPercent)
             ? null
             : Number(deviationPercent.toFixed(1)),
+        intervalTrend90d,
         recent30Efficiency:
           recent30.efficiency === null
             ? null
