@@ -1105,11 +1105,22 @@ export class OperationsService {
       quantity: Number(operation.quantity),
       odometer: operation.odometer == null ? undefined : Number(operation.odometer),
       stationCounter: operation.stationCounter == null ? undefined : Number(operation.stationCounter),
+      // A STANDALONE destination's counter is persisted in
+      // OperationStationCounterReading for auditing, but it is NOT a
+      // dispenser reading. Reconstruct only actual dispenser readings here.
+      // The destination's own reading is already supplied as stationCounter.
       dispenserReadings: Array.isArray(operation.stationCounterReadings)
-        ? operation.stationCounterReadings.map((item: any) => ({
-            stationId: item.stationId,
-            counter: Number(item.counterValue),
-          }))
+        ? operation.stationCounterReadings
+            .filter((item: any) =>
+              !(
+                operation.stationCounter != null &&
+                item.stationId === operation.destinationStationId
+              ),
+            )
+            .map((item: any) => ({
+              stationId: item.stationId,
+              counter: Number(item.counterValue),
+            }))
         : undefined,
       dispenserAllocations: Array.isArray(operation.dispenserAllocations)
         ? operation.dispenserAllocations.map((item: any) => ({
