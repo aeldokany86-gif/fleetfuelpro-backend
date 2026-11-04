@@ -1922,7 +1922,17 @@ async getStationOperationsHistory(
 
   const where = {
     companyId: currentUser.companyId,
-    status: 'COMPLETED',
+    AND: [
+      {
+        OR: [
+          { status: 'COMPLETED' },
+          {
+            status: { in: ['PENDING', 'PARTIALLY_APPROVED'] },
+            approvals: { some: { approvalStage: { startsWith: 'Historical Missing Station' } } },
+          },
+        ],
+      },
+    ],
     OR: [
       { sourceStationId: station.id },
       { destinationStationId: station.id },
