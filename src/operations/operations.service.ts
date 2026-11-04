@@ -5401,6 +5401,19 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     dto: CreateOperationDto,
   ) {
     const selectedProjectId = String(dto.currentProjectId || '').trim();
+    if (dto.historicalMissingOperation && dto.historicalStationId) {
+      const historicalProjectId = dto.historicalStationId === entities.sourceStation?.id
+        ? entities.sourceProjectId
+        : dto.historicalStationId === entities.destinationStation?.id
+          ? entities.destinationProjectId
+          : null;
+      if (!historicalProjectId || (selectedProjectId && selectedProjectId !== historicalProjectId)) {
+        throw new UnprocessableEntityException(
+          'OFFLINE_ENTITY_CONFLICT: Historical station does not match the selected project at operation time.',
+        );
+      }
+      return;
+    }
     if (!selectedProjectId) return;
 
     const conflict = (message: string) => {
@@ -6546,6 +6559,25 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     occurredAt: Date,
   ) {
     if (!['Officer', 'Operator', 'Supervisor', 'Manager'].includes(user.role)) return;
+    if (dto.historicalMissingOperation && dto.historicalStationId) {
+      const projectId = dto.historicalStationId === entities.sourceStation?.id
+        ? entities.sourceProjectId
+        : dto.historicalStationId === entities.destinationStation?.id
+          ? entities.destinationProjectId
+          : null;
+      if (!projectId) throw new ForbiddenException('Historical station project could not be resolved.');
+      if (user.role === 'Manager') {
+        if (!user.managedProjectIds.includes(projectId)) {
+          throw new ForbiddenException('Manager cannot add a historical operation for this station.');
+        }
+      } else if (
+        !user.assignedProjectIds.includes(projectId) &&
+        !(await this.wasUserAssignedToProjectAt(tx, user, projectId, occurredAt))
+      ) {
+        throw new ForbiddenException('User was not assigned to this historical station project.');
+      }
+      return;
+    }
 
     const requiredProjectIds = new Set<string>();
     if (type === 'DIRECT_REFUEL') {
