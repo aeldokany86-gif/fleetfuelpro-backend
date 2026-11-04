@@ -1173,8 +1173,11 @@ export class OperationsService {
           )
         : false;
 
+    const isHistoricalStationReview = operation.approvals.some(
+      (item: any) => String(item.approvalStage || '').startsWith('Historical Missing Station'),
+    );
     const meterSnapshot =
-      action === 'APPROVE' && entities
+      action === 'APPROVE' && entities && !isHistoricalStationReview
         ? useHistoricalAssetMeterPath
           ? this.emptyOperationMeterSnapshot()
           : this.buildOperationMeterSnapshot(
@@ -4483,7 +4486,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     // Normal operations keep the exact existing snapshot logic. Historical
     // asset snapshots are rebuilt inside the write transaction after creation.
     const meterSnapshot =
-      status === 'COMPLETED'
+      status === 'COMPLETED' && !(isHistoricalMissingOperation && dto.historicalStationId)
         ? useHistoricalAssetMeterPath
           ? this.emptyOperationMeterSnapshot()
           : this.buildOperationMeterSnapshot(type, dto, entities)
