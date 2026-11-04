@@ -116,6 +116,12 @@ export class CreateOperationDto {
   @IsBoolean()
   historicalMissingOperation?: boolean;
 
+  // The station whose history opened the controlled backdated-operation form.
+  // Validated server-side against the selected source/destination station.
+  @IsOptional()
+  @IsString()
+  historicalStationId?: string;
+
   /*
     Explicit user override after the backend reports a possible business duplicate.
     This does not bypass clientOperationId idempotency; it only acknowledges the

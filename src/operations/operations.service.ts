@@ -1150,9 +1150,21 @@ export class OperationsService {
               whose source project they do not manage.
             */
             skipUserProjectAccess: true,
+            historicalStationCounter: operation.approvals.some(
+              (item: any) => String(item.approvalStage || '').startsWith('Historical Missing Station'),
+            ),
           },
         )
       : undefined;
+
+    if (action === 'APPROVE' && entities && operation.approvals.some(
+      (item: any) => String(item.approvalStage || '').startsWith('Historical Missing Station'),
+    )) {
+      await this.validateHistoricalStationCounterPlacement(
+        this.prisma as any, operation.type, operationDto, entities,
+        new Date(operation.occurredAt),
+      );
+    }
 
     const useHistoricalAssetMeterPath =
       action === 'APPROVE' && entities
@@ -1164,8 +1176,11 @@ export class OperationsService {
           )
         : false;
 
+    const isHistoricalStationReview = operation.approvals.some(
+      (item: any) => String(item.approvalStage || '').startsWith('Historical Missing Station'),
+    );
     const meterSnapshot =
-      action === 'APPROVE' && entities
+      action === 'APPROVE' && entities && !isHistoricalStationReview
         ? useHistoricalAssetMeterPath
           ? this.emptyOperationMeterSnapshot()
           : this.buildOperationMeterSnapshot(
@@ -1913,7 +1928,17 @@ async getStationOperationsHistory(
 
   const where = {
     companyId: currentUser.companyId,
-    status: 'COMPLETED',
+    AND: [
+      {
+        OR: [
+          { status: 'COMPLETED' },
+          {
+            status: { in: ['PENDING', 'PARTIALLY_APPROVED'] },
+            approvals: { some: { approvalStage: { startsWith: 'Historical Missing Station' } } },
+          },
+        ],
+      },
+    ],
     OR: [
       { sourceStationId: station.id },
       { destinationStationId: station.id },
@@ -4320,6 +4345,17 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     const isHistoricalMissingOperation =
       dto.historicalMissingOperation === true;
 
+    if (isHistoricalMissingOperation && dto.historicalStationId) {
+      const relatedStation = [entities.sourceStation, entities.destinationStation]
+        .find((station: any) => station?.id === dto.historicalStationId);
+      if (!relatedStation || relatedStation.companyId !== currentUser.companyId) {
+        throw new BadRequestException('Historical station does not belong to the operation.');
+      }
+      await this.validateHistoricalStationCounterPlacement(
+        this.prisma as any, type, dto, entities, occurredAt,
+      );
+    }
+
     /*
       Missing Historical Operation uses a correction-style authority flow,
       not the normal operation-type approval rules:
@@ -4333,7 +4369,54 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     */
     let approvalPlan: ApprovalPlanItem[];
 
-    if (isHistoricalMissingOperation) {
+    if (isHistoricalMissingOperation && dto.historicalStationId) {
+      const sourceProjectId = String(entities.sourceProjectId || '').trim();
+      const destinationProjectId = String(entities.destinationProjectId || '').trim();
+      if (type === 'EXTERNAL_TRANSFER') {
+        if (!sourceProjectId || !destinationProjectId || sourceProjectId === destinationProjectId) {
+          throw new BadRequestException('Historical external transfer requires two distinct projects.');
+        }
+        const sourceManager = await this.getProjectManagerId(this.prisma as any, sourceProjectId);
+        const destinationManager = await this.getProjectManagerId(this.prisma as any, destinationProjectId);
+        if (sourceManager === destinationManager) {
+          // A single manager legitimately responsible for both projects reviews once.
+          approvalPlan = [{
+            approverUserId: sourceManager,
+            projectId: sourceProjectId,
+            approvalStage: 'Historical Missing Station - Source and Destination Manager Review',
+            status: 'PENDING',
+          }];
+        } else {
+          approvalPlan = [
+            {
+              approverUserId: sourceManager,
+              projectId: sourceProjectId,
+              approvalStage: 'Historical Missing Station - Source Manager Review',
+              status: currentUser.role === 'Manager' && currentUser.id === sourceManager ? 'APPROVED' : 'PENDING',
+              reviewedAt: currentUser.role === 'Manager' && currentUser.id === sourceManager ? serverOperationDate : null,
+            },
+            {
+              approverUserId: destinationManager,
+              projectId: destinationProjectId,
+              approvalStage: 'Historical Missing Station - Destination Manager Review',
+              status: currentUser.role === 'Manager' && currentUser.id === destinationManager ? 'APPROVED' : 'PENDING',
+              reviewedAt: currentUser.role === 'Manager' && currentUser.id === destinationManager ? serverOperationDate : null,
+            },
+          ];
+        }
+      } else if (currentUser.role === 'Supervisor') {
+        const projectId = type === 'EXTERNAL_SUPPLY' ? destinationProjectId : sourceProjectId;
+        const managerId = await this.getProjectManagerId(this.prisma as any, projectId);
+        approvalPlan = [{
+          approverUserId: managerId,
+          projectId,
+          approvalStage: 'Historical Missing Station - Manager Review',
+          status: 'PENDING',
+        }];
+      } else {
+        approvalPlan = [];
+      }
+    } else if (isHistoricalMissingOperation) {
       if (currentUser.role === 'Supervisor') {
         const assetProjectId = String(entities.assetProjectId || '').trim();
 
@@ -4368,7 +4451,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       );
     }
 
-    const status = this.getInitialOperationStatus(type, currentUser, approvalPlan);
+    const initialStatus = this.getInitialOperationStatus(type, currentUser, approvalPlan);
+    const status = isHistoricalMissingOperation && dto.historicalStationId && type === 'EXTERNAL_TRANSFER'
+      ? approvalPlan.some((item) => item.status === 'PENDING')
+        ? approvalPlan.some((item) => item.status === 'APPROVED') ? 'PARTIALLY_APPROVED' : 'PENDING'
+        : 'COMPLETED'
+      : initialStatus;
     const completedAt = status === 'COMPLETED' ? serverOperationDate : null;
 
     const costSnapshot = await this.resolveOperationCostSnapshot(
@@ -4406,7 +4494,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     // Normal operations keep the exact existing snapshot logic. Historical
     // asset snapshots are rebuilt inside the write transaction after creation.
     const meterSnapshot =
-      status === 'COMPLETED'
+      status === 'COMPLETED' && !(isHistoricalMissingOperation && dto.historicalStationId)
         ? useHistoricalAssetMeterPath
           ? this.emptyOperationMeterSnapshot()
           : this.buildOperationMeterSnapshot(type, dto, entities)
@@ -5313,6 +5401,19 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     dto: CreateOperationDto,
   ) {
     const selectedProjectId = String(dto.currentProjectId || '').trim();
+    if (dto.historicalMissingOperation && dto.historicalStationId) {
+      const historicalProjectId = dto.historicalStationId === entities.sourceStation?.id
+        ? entities.sourceProjectId
+        : dto.historicalStationId === entities.destinationStation?.id
+          ? entities.destinationProjectId
+          : null;
+      if (!historicalProjectId || (selectedProjectId && selectedProjectId !== historicalProjectId)) {
+        throw new UnprocessableEntityException(
+          'OFFLINE_ENTITY_CONFLICT: Historical station does not match the selected project at operation time.',
+        );
+      }
+      return;
+    }
     if (!selectedProjectId) return;
 
     const conflict = (message: string) => {
@@ -5629,6 +5730,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     tx: any,
     dto: CreateOperationDto,
     destinationStation: any,
+    skipCurrentCounterCheck = false,
   ) {
     if (
       !destinationStation ||
@@ -5692,7 +5794,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       }
 
       const currentCounter = Number(dispenser.currentCounter || 0);
-      if (counter < currentCounter) {
+      if (!skipCurrentCounterCheck && counter < currentCounter) {
         throw new BadRequestException(
           `Dispenser ${dispenser.stationId} counter cannot be lower than current counter ${currentCounter}.`,
         );
@@ -5847,6 +5949,96 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       lifetimeAfter,
       counterCycleAfter,
     };
+  }
+
+  // Validate an insertion against BOTH historical neighbors and meter resets.
+  // Never replace the live-station counter with a backdated value.
+  private async validateHistoricalStationCounterPlacement(
+    db: any,
+    type: NormalizedOperationType,
+    dto: CreateOperationDto,
+    entities: LoadedOperationEntities,
+    occurredAt: Date,
+  ) {
+    if (!['EXTERNAL_SUPPLY', 'INTERNAL_TRANSFER', 'EXTERNAL_TRANSFER'].includes(type)) return;
+    const destination = entities.destinationStation;
+    if (!destination) throw new BadRequestException('Historical destination station is required.');
+    const isShared = this.getStationStructureType(destination) === 'SHARED_TANK';
+    const readings: Array<{stationId: string; value: number}> = isShared
+      ? (dto.dispenserReadings || []).map(item => ({
+          stationId: String(item.stationId),
+          value: Number(item.counter),
+        }))
+      : [{ stationId: destination.id, value: Number(dto.stationCounter) }];
+    if (!readings.length) throw new BadRequestException('Historical station counter reading is required.');
+
+    for (const reading of readings) {
+      const station = await db.station.findFirst({
+        where: { id: reading.stationId, companyId: destination.companyId, deletedAt: null },
+        select: { id: true, openingCounter: true },
+      });
+      if (!station || station.openingCounter == null) {
+        throw new BadRequestException('Historical station counter requires an Opening Counter for every affected station/dispenser.');
+      }
+      if (!Number.isFinite(reading.value) || reading.value < 0) {
+        throw new BadRequestException('Historical station counter is invalid.');
+      }
+      const [savedReadings, resets] = await Promise.all([
+        db.operationStationCounterReading.findMany({
+          where: {
+            stationId: reading.stationId,
+            operation: { status: 'COMPLETED' },
+          },
+          select: {
+            id: true, counterValue: true,
+            operation: { select: { occurredAt: true, createdAt: true } },
+          },
+        }),
+        db.stationCounterReset.findMany({
+          where: { stationId: reading.stationId },
+          select: { id: true, effectiveAt: true, createdAt: true, oldCounter: true, newCounter: true },
+        }),
+      ]);
+      const events: any[] = [
+        ...savedReadings.map((item: any) => ({
+          kind: 'READING', at: new Date(item.operation.occurredAt),
+          createdAt: new Date(item.operation.createdAt), id: item.id,
+          value: Number(item.counterValue),
+        })),
+        ...resets.map((item: any) => ({
+          kind: 'RESET', at: new Date(item.effectiveAt),
+          createdAt: new Date(item.createdAt), id: item.id,
+          oldValue: Number(item.oldCounter), newValue: Number(item.newCounter),
+        })),
+        {
+          kind: 'CANDIDATE', at: occurredAt,
+          createdAt: new Date('9999-12-31T23:59:59.999Z'),
+          id: '__candidate__', value: reading.value,
+        },
+      ].sort((a, b) =>
+        a.at.getTime() - b.at.getTime()
+        || (a.kind === 'RESET' ? -1 : b.kind === 'RESET' ? 1 : 0)
+        || a.createdAt.getTime() - b.createdAt.getTime()
+        || String(a.id).localeCompare(String(b.id)),
+      );
+
+      let previous = Number(station.openingCounter);
+      for (const event of events) {
+        if (event.kind === 'RESET') {
+          if (event.oldValue < previous) {
+            throw new BadRequestException('Historical station reading conflicts with a subsequent counter reset.');
+          }
+          previous = event.newValue;
+        } else {
+          if (!Number.isFinite(event.value) || event.value < previous) {
+            throw new BadRequestException(
+              'Historical station counter must be between the previous and following readings within its meter cycle.',
+            );
+          }
+          previous = event.value;
+        }
+      }
+    }
   }
 
   private async rebuildStandaloneStationCounterHistory(
@@ -6249,6 +6441,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     occurredAt: Date,
     options?: {
       skipUserProjectAccess?: boolean;
+      historicalStationCounter?: boolean;
     },
   ): Promise<LoadedOperationEntities> {
     if (!user.companyId) throw new BadRequestException('User companyId is required.');
@@ -6322,6 +6515,8 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         tx,
         dto,
         destinationStation,
+        options?.historicalStationCounter === true ||
+          (dto.historicalMissingOperation === true && Boolean(dto.historicalStationId)),
       );
     }
 
@@ -6364,6 +6559,25 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     occurredAt: Date,
   ) {
     if (!['Officer', 'Operator', 'Supervisor', 'Manager'].includes(user.role)) return;
+    if (dto.historicalMissingOperation && dto.historicalStationId) {
+      const projectId = dto.historicalStationId === entities.sourceStation?.id
+        ? entities.sourceProjectId
+        : dto.historicalStationId === entities.destinationStation?.id
+          ? entities.destinationProjectId
+          : null;
+      if (!projectId) throw new ForbiddenException('Historical station project could not be resolved.');
+      if (user.role === 'Manager') {
+        if (!user.managedProjectIds.includes(projectId)) {
+          throw new ForbiddenException('Manager cannot add a historical operation for this station.');
+        }
+      } else if (
+        !user.assignedProjectIds.includes(projectId) &&
+        !(await this.wasUserAssignedToProjectAt(tx, user, projectId, occurredAt))
+      ) {
+        throw new ForbiddenException('User was not assigned to this historical station project.');
+      }
+      return;
+    }
 
     const requiredProjectIds = new Set<string>();
     if (type === 'DIRECT_REFUEL') {
@@ -7732,10 +7946,16 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       );
     }
 
-    if (!['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type)) {
-      throw new BadRequestException(
-        'Missing historical operation supports Direct Refuel and External Direct Refuel only.',
-      );
+    const stationTypes = ['EXTERNAL_SUPPLY', 'INTERNAL_TRANSFER', 'EXTERNAL_TRANSFER'];
+    if (dto.historicalStationId) {
+      if (!stationTypes.includes(type)) {
+        throw new BadRequestException('Historical station operations support External Supply, Internal Transfer and External Transfer only.');
+      }
+      if (![dto.sourceStationId, dto.destinationStationId].includes(dto.historicalStationId)) {
+        throw new BadRequestException('Historical station must match the source or destination of the operation.');
+      }
+    } else if (!['DIRECT_REFUEL', 'EXTERNAL_DIRECT_REFUEL'].includes(type)) {
+      throw new BadRequestException('Historical equipment operations support Direct Refuel and External Direct Refuel only.');
     }
 
     const occurredAtText = String(dto.occurredAt || '').trim();
