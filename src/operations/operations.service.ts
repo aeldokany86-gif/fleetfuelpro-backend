@@ -1150,6 +1150,9 @@ export class OperationsService {
               whose source project they do not manage.
             */
             skipUserProjectAccess: true,
+            historicalStationCounter: operation.approvals.some(
+              (item: any) => String(item.approvalStage || '').startsWith('Historical Missing Station'),
+            ),
           },
         )
       : undefined;
@@ -4448,7 +4451,12 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       );
     }
 
-    const status = this.getInitialOperationStatus(type, currentUser, approvalPlan);
+    const initialStatus = this.getInitialOperationStatus(type, currentUser, approvalPlan);
+    const status = isHistoricalMissingOperation && dto.historicalStationId && type === 'EXTERNAL_TRANSFER'
+      ? approvalPlan.some((item) => item.status === 'PENDING')
+        ? approvalPlan.some((item) => item.status === 'APPROVED') ? 'PARTIALLY_APPROVED' : 'PENDING'
+        : 'COMPLETED'
+      : initialStatus;
     const completedAt = status === 'COMPLETED' ? serverOperationDate : null;
 
     const costSnapshot = await this.resolveOperationCostSnapshot(
@@ -5709,6 +5717,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     tx: any,
     dto: CreateOperationDto,
     destinationStation: any,
+    skipCurrentCounterCheck = false,
   ) {
     if (
       !destinationStation ||
@@ -5772,7 +5781,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
       }
 
       const currentCounter = Number(dispenser.currentCounter || 0);
-      if (counter < currentCounter) {
+      if (!skipCurrentCounterCheck && counter < currentCounter) {
         throw new BadRequestException(
           `Dispenser ${dispenser.stationId} counter cannot be lower than current counter ${currentCounter}.`,
         );
@@ -6419,6 +6428,7 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
     occurredAt: Date,
     options?: {
       skipUserProjectAccess?: boolean;
+      historicalStationCounter?: boolean;
     },
   ): Promise<LoadedOperationEntities> {
     if (!user.companyId) throw new BadRequestException('User companyId is required.');
@@ -6492,6 +6502,8 @@ async getSummaryReport(request: RequestLike | undefined, filters: {
         tx,
         dto,
         destinationStation,
+        options?.historicalStationCounter === true ||
+          (dto.historicalMissingOperation === true && Boolean(dto.historicalStationId)),
       );
     }
 
